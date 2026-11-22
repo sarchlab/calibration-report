@@ -1,4 +1,5 @@
 const palette = ['#2b7884', '#ad6b19', '#7d54aa', '#a2404b', '#4e782e'];
+const scalePreferences = new Map();
 let selectedGroup;
 
 function el(tag, className, text) {
@@ -21,28 +22,26 @@ function displayUnit(unit) {
   return unit === 'ns' ? 'ms' : unit;
 }
 
-function drawCurve(rows, curves, xLabel, unit) {
+function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
   const canvas = el('canvas', 'curve');
   canvas.width = 640;
   canvas.height = 334;
   canvas.setAttribute('role', 'img');
-  canvas.setAttribute('aria-label', 'Comparison by ' + xLabel);
+  const xScale = scales.x ? 'logarithmic' : 'linear';
+  const yScale = scales.y ? 'logarithmic' : 'linear';
+  canvas.setAttribute('aria-label', 'Comparison by ' + xLabel + ', ' + xScale + ' X axis, ' + yScale + ' Y axis');
   const ctx = canvas.getContext('2d');
   ctx.scale(2, 2);
   const left = 53, right = 305, top = 16, bottom = 132;
-  const measures = curves.flatMap(curve => rows.map(row => row.values[curve.id])).filter(Number.isFinite);
   ctx.font = '10px system-ui';
   ctx.fillStyle = '#526a75';
-  const smallest = Math.min(...measures);
-  const largest = Math.max(...measures);
-  const log = smallest > 0 && largest / smallest >= 10;
-  const transform = log ? Math.log10 : n => n;
-  const inverse = log ? n => 10 ** n : n => n;
-  let min = transform(smallest), max = transform(largest);
+  const transformY = scales.y ? Math.log10 : n => n;
+  const inverseY = scales.y ? n => 10 ** n : n => n;
+  let min = transformY(bounds.min), max = transformY(bounds.max);
   const span = Math.max(max - min, Math.abs(max) * 0.02, 0.001);
   min -= span * 0.12;
   max += span * 0.12;
-  ctx.fillText(displayUnit(unit) + (log ? ' · log' : ''), 4, 9);
+  ctx.fillText(displayUnit(unit) + (scales.y ? ' · log' : ''), 4, 9);
   ctx.textAlign = 'right';
   for (let i = 0; i < 4; i++) {
     const fraction = i / 3;
@@ -52,13 +51,15 @@ function drawCurve(rows, curves, xLabel, unit) {
     ctx.moveTo(left, y);
     ctx.lineTo(right, y);
     ctx.stroke();
-    ctx.fillText(formatValue(inverse(min + (max - min) * fraction), unit), left - 5, y + 3);
+    ctx.fillText(formatValue(inverseY(min + (max - min) * fraction), unit), left - 5, y + 3);
   }
 
   const sizes = rows.map(row => row.x);
-  const xMin = sizes[0], xMax = sizes[sizes.length - 1];
-  const x = i => xMin === xMax ? (left + right) / 2 : left + (sizes[i] - xMin) / (xMax - xMin) * (right - left);
-  const y = v => bottom - (transform(v) - min) / (max - min) * (bottom - top);
+  const transformX = scales.x ? Math.log10 : n => n;
+  const xMin = transformX(sizes[0]), xMax = transformX(sizes[sizes.length - 1]);
+  const x = i => xMin === xMax ? (left + right) / 2 :
+    left + (transformX(sizes[i]) - xMin) / (xMax - xMin) * (right - left);
+  const y = v => bottom - (transformY(v) - min) / (max - min) * (bottom - top);
   ctx.textAlign = 'center';
   let lastLabel = -Infinity;
   sizes.forEach((size, i) => {
@@ -67,7 +68,7 @@ function drawCurve(rows, curves, xLabel, unit) {
     ctx.fillText(size.toLocaleString(), px, bottom + 12);
     lastLabel = px;
   });
-  ctx.fillText(xLabel, (left + right) / 2, 161);
+  ctx.fillText(xLabel + (scales.x ? ' · log' : ''), (left + right) / 2, 161);
 
   for (const curve of curves) {
     ctx.strokeStyle = ctx.fillStyle = curve.color;
@@ -96,6 +97,43 @@ function drawCurve(rows, curves, xLabel, unit) {
   return canvas;
 }
 
+function chartWithScales(key, rows, curves, xLabel, unit) {
+  const measures = curves.flatMap(curve => rows.map(row => row.values[curve.id])).filter(Number.isFinite);
+  const bounds = {min: Math.min(...measures), max: Math.max(...measures)};
+  const canLog = {x: rows[0].x > 0, y: bounds.min > 0};
+  const preferences = scalePreferences.get(key) ?? {};
+  const scales = {
+    x: canLog.x && (preferences.x ?? false),
+    y: canLog.y && (preferences.y ?? bounds.max / bounds.min >= 10),
+  };
+
+  const plot = el('div', 'plot');
+  const controls = el('div', 'scale-controls');
+  controls.setAttribute('role', 'group');
+  controls.setAttribute('aria-label', 'Axis scales');
+  let canvas = drawCurve(rows, curves, xLabel, unit, bounds, scales);
+  for (const axis of ['x', 'y']) {
+    const label = axis.toUpperCase() + ' log';
+    const button = el('button', '', label);
+    button.type = 'button';
+    button.disabled = !canLog[axis];
+    button.setAttribute('aria-pressed', String(scales[axis]));
+    if (button.disabled) button.title = 'Log scale requires positive ' + axis.toUpperCase() + ' values';
+    button.addEventListener('click', () => {
+      scales[axis] = !scales[axis];
+      preferences[axis] = scales[axis];
+      scalePreferences.set(key, preferences);
+      button.setAttribute('aria-pressed', String(scales[axis]));
+      const next = drawCurve(rows, curves, xLabel, unit, bounds, scales);
+      canvas.replaceWith(next);
+      canvas = next;
+    });
+    controls.append(button);
+  }
+  plot.append(controls, canvas);
+  return plot;
+}
+
 function parameterLabel(params, metadata) {
   return Object.entries(params).map(([id, value]) => {
     const unit = metadata[id].unit;
@@ -114,7 +152,7 @@ function plotBenchmark(id, rows, meta) {
   const axisUnit = meta.params[meta.scaling_param].unit;
   const xLabel = displayName(meta.scaling_param) + (axisUnit ? ' (' + axisUnit + ')' : '');
 
-  for (const group of fixed.values()) {
+  for (const [parameters, group] of fixed) {
     group.sort((a, b) => a.x - b.x);
     const section = el('section', 'series');
     section.append(el('h3', '', parameterLabel(group[0].non_scaling_params, meta.params)));
@@ -130,7 +168,8 @@ function plotBenchmark(id, rows, meta) {
         legend.append(label);
       }
       const measured = group.filter(row => active.some(curve => Number.isFinite(row.values[curve.id])));
-      section.append(drawCurve(measured, active, xLabel, unit), legend);
+      const key = JSON.stringify([rows[0].group, id, parameters, unit]);
+      section.append(chartWithScales(key, measured, active, xLabel, unit), legend);
     }
     card.append(section);
   }
