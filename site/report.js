@@ -1,8 +1,4 @@
 const palette = ['#2b7884', '#ad6b19', '#7d54aa', '#a2404b', '#4e782e'];
-const statusLabels = {
-  queued: 'Queued', running: 'Running', complete: 'Passed', failed: 'Failed',
-  timeout: 'Timed out', skipped: 'Skipped', unsupported: 'Unsupported', memory_limit: 'RAM limit'
-};
 let selectedGroup;
 
 function el(tag, className, text) {
@@ -17,7 +13,7 @@ function displayName(key) {
 }
 
 function formatValue(value, unit) {
-  if (!Number.isFinite(value)) return '—';
+  if (!Number.isFinite(value)) return '';
   return unit === 'ns' ? (value / 1e6).toPrecision(4) : value.toPrecision(4);
 }
 
@@ -37,10 +33,6 @@ function drawCurve(rows, curves, xLabel, unit) {
   const measures = curves.flatMap(curve => rows.map(row => row.values[curve.id])).filter(Number.isFinite);
   ctx.font = '10px system-ui';
   ctx.fillStyle = '#526a75';
-  if (!measures.length) {
-    ctx.fillText('No measurements yet', left, 60);
-    return canvas;
-  }
   const smallest = Math.min(...measures);
   const largest = Math.max(...measures);
   const log = smallest > 0 && largest / smallest >= 10;
@@ -107,28 +99,17 @@ function drawCurve(rows, curves, xLabel, unit) {
 function dataTable(rows, curves, xLabel) {
   const wrapper = el('div', 'clip');
   const table = el('table');
-  const hasStatus = rows.some(row => row.progress);
   const head = table.createTHead().insertRow();
   head.append(el('th', '', xLabel));
   for (const curve of curves) {
     const unit = displayUnit(curve.unit);
     head.append(el('th', '', curve.name + (unit ? ' (' + unit + ')' : '')));
   }
-  if (hasStatus) head.append(el('th', 'state', 'State'));
   const body = table.createTBody();
   for (const row of rows) {
     const tr = body.insertRow();
     tr.insertCell().textContent = row.x.toLocaleString();
     for (const curve of curves) tr.insertCell().textContent = formatValue(row.values[curve.id], curve.unit);
-    if (hasStatus) {
-      const cell = tr.insertCell();
-      cell.className = 'state';
-      if (row.progress) {
-        const {case: number, state, worker, error} = row.progress;
-        cell.append(el('span', 'badge ' + state, statusLabels[state] ?? state));
-        tr.title = ['Case ' + number, worker, error].filter(Boolean).join(' · ');
-      }
-    }
   }
   wrapper.append(table);
   return wrapper;
@@ -157,7 +138,7 @@ function plotBenchmark(id, rows, meta) {
     const section = el('section', 'series');
     section.append(el('h3', '', parameterLabel(group[0].non_scaling_params, meta.params)));
     for (const [unit, comparable] of units) {
-      const active = comparable.filter(curve => group.some(row => Object.hasOwn(row.values, curve.id)));
+      const active = comparable.filter(curve => group.some(row => Number.isFinite(row.values[curve.id])));
       if (!active.length) continue;
       const legend = el('div', 'legend');
       for (const curve of active) {
@@ -167,50 +148,21 @@ function plotBenchmark(id, rows, meta) {
         label.append(swatch, document.createTextNode(curve.name));
         legend.append(label);
       }
-      section.append(drawCurve(group, active, xLabel, unit), legend, dataTable(group, active, xLabel));
+      const measured = group.filter(row => active.some(curve => Number.isFinite(row.values[curve.id])));
+      section.append(drawCurve(measured, active, xLabel, unit), legend,
+        dataTable(measured, active, xLabel));
     }
     card.append(section);
   }
   return card;
 }
 
-function renderProgress(rows, progress) {
-  const section = document.querySelector('#live');
-  section.hidden = !progress;
-  const stamp = document.querySelector('#stamp');
-  if (!progress) {
-    stamp.textContent = '';
-    return;
-  }
-  const counts = {};
-  for (const row of rows) {
-    const status = row.progress?.state;
-    counts[status] = (counts[status] ?? 0) + 1;
-  }
-  const completed = counts.complete ?? 0;
-  const running = counts.running ?? 0;
-  const queued = counts.queued ?? 0;
-  const stopped = rows.length - completed - running - queued;
-  const stats = document.querySelector('#stats');
-  stats.replaceChildren();
-  for (const [name, number] of [
-    ['Verified', completed + ' / ' + rows.length],
-    ['Running', running], ['Queued', queued], ['Failed, timed out or unavailable', stopped],
-  ]) {
-    const card = el('div', 'card');
-    card.append(el('small', '', name), el('strong', 'big', number));
-    stats.append(card);
-  }
-  const bar = document.querySelector('#progress');
-  bar.max = Math.max(rows.length, 1);
-  bar.value = completed + stopped;
-  stamp.textContent = 'Updated ' + new Date(progress.updated_at * 1000).toLocaleTimeString();
-}
-
-function render(data, progress) {
-  const groups = Object.keys(data.groups);
+function render(data) {
+  const measured = data.points.filter(point => Object.values(point.values).some(Number.isFinite));
+  const groups = [...new Set(measured.map(point => point.group))];
   if (!groups.includes(selectedGroup)) selectedGroup = groups[0];
-  document.querySelector('#title').textContent = data.groups[selectedGroup].name + ' calibration';
+  const groupName = data.groups[selectedGroup]?.name;
+  document.querySelector('#title').textContent = groupName ? groupName + ' calibration' : 'Calibration report';
   const tabs = document.querySelector('#groups');
   tabs.hidden = groups.length < 2;
   tabs.replaceChildren();
@@ -220,40 +172,25 @@ function render(data, progress) {
       button.setAttribute('aria-pressed', String(id === selectedGroup));
       button.addEventListener('click', () => {
         selectedGroup = id;
-        render(data, progress);
+        render(data);
         tabs.querySelector('[aria-pressed="true"]').focus();
       });
       tabs.append(button);
     }
   }
 
-  const rows = data.points.map((point, i) => ({...point, progress: progress?.points[i]}))
-    .filter(point => point.group === selectedGroup);
-  renderProgress(rows, progress);
+  const rows = measured.filter(point => point.group === selectedGroup);
   const list = document.querySelector('#charts');
   const byBenchmark = Map.groupBy(rows, row => row.benchmark);
   list.replaceChildren(...Array.from(byBenchmark, ([id, points]) => plotBenchmark(id, points, data.benchmarks[id])));
-  if (!rows.length) list.append(el('p', 'muted', 'No points for this group.'));
 }
 
 async function refresh() {
   try {
     const dataResponse = await fetch('./data.json', {cache: 'no-store'});
     if (!dataResponse.ok) throw new Error('Data unavailable');
-    const data = await dataResponse.json();
-    let progress = null;
-    if (dataResponse.headers.get('X-Calibration-Live') === 'true') {
-      try {
-        const status = await fetch('./progress.json', {cache: 'no-store'});
-        if (status.ok) {
-          const candidate = await status.json();
-          if (candidate.points.length === data.points.length) progress = candidate;
-        }
-      } catch {
-        // A static snapshot remains usable while the live progress feed reconnects.
-      }
-    }
-    render(data, progress);
+    render(await dataResponse.json());
+    document.querySelector('#stamp').textContent = '';
   } catch {
     document.querySelector('#stamp').textContent = 'Waiting for report data';
   }

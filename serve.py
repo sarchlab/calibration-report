@@ -15,7 +15,6 @@ def handler_for(data_dir):
         "/report.css": (SITE / "report.css", "text/css; charset=utf-8"),
         "/report.js": (SITE / "report.js", "text/javascript; charset=utf-8"),
         "/data.json": (data_dir / "data.json", "application/json"),
-        "/progress.json": (data_dir / "progress.json", "application/json"),
     }
 
     class Handler(BaseHTTPRequestHandler):
@@ -40,8 +39,6 @@ def handler_for(data_dir):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
-            if name == "/data.json" and (data_dir / "progress.json").is_file():
-                self.send_header("X-Calibration-Live", "true")
             self.end_headers()
             if include_body:
                 self.wfile.write(data)
