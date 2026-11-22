@@ -199,6 +199,7 @@ function render(data) {
   }
 
   const rows = measured.filter(point => point.group === selectedGroup);
+  renderSummary(rows, data.benchmarks);
   const list = document.querySelector('#charts');
   const byBenchmark = Map.groupBy(rows, row => row.benchmark);
   list.replaceChildren(...Array.from(byBenchmark, ([id, points]) => plotBenchmark(id, points, data.benchmarks[id])));

@@ -14,6 +14,7 @@ def handler_for(data_dir):
         "/index.html": (SITE / "index.html", "text/html; charset=utf-8"),
         "/report.css": (SITE / "report.css", "text/css; charset=utf-8"),
         "/report.js": (SITE / "report.js", "text/javascript; charset=utf-8"),
+        "/summary.js": (SITE / "summary.js", "text/javascript; charset=utf-8"),
         "/data.json": (data_dir / "data.json", "application/json"),
     }
 

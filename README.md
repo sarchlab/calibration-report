@@ -21,6 +21,10 @@ JSON Schema validates the structure. Producers and consumers also check cross-re
 
 Within a tab, the renderer makes one plot for each benchmark and non-scaling parameter combination. Each value key is a curve over `x`.
 
+## Accuracy summary
+
+The active group includes a ranked simulator-to-hardware ratio plot, a cumulative distribution of absolute relative error, and a measured-versus-simulated scatter plot. A comparison requires two positive measurements at the same point and one declared hardware series with the same unit as the simulator series. Ambiguous hardware references are omitted. The absolute error uses the Poros convention, `abs(simulated - measured) / min(simulated, measured)`.
+
 ## Hosting
 
 - **GitHub Pages:** Copy the contents of [`site/`](site/) and an exported `data.json` into the Pages publishing branch. The viewer loads its data using a relative URL.
