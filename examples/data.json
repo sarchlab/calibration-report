@@ -1,0 +1,23 @@
+{
+  "benchmarks": {
+    "polybench_fdtd2d": {
+      "scaling_param": "size",
+      "params": {
+        "size": {"unit": "cells"},
+        "tmax": {"unit": "steps"}
+      },
+      "values": {
+        "mi300x": {"name": "MI300X kernel time", "unit": "ns"},
+        "mgpusim": {"name": "MGPUSim kernel time", "unit": "ns"}
+      }
+    }
+  },
+  "points": [
+    {
+      "benchmark": "polybench_fdtd2d",
+      "x": 64,
+      "non_scaling_params": {"tmax": 10},
+      "values": {"mi300x": 57889, "mgpusim": 79339}
+    }
+  ]
+}

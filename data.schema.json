@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SarchLab Calibration Report Data",
+  "type": "object",
+  "required": ["benchmarks", "points"],
+  "additionalProperties": false,
+  "properties": {
+    "benchmarks": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"minLength": 1},
+      "additionalProperties": {"$ref": "#/$defs/benchmark"}
+    },
+    "points": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/point"}
+    }
+  },
+  "$defs": {
+    "benchmark": {
+      "type": "object",
+      "required": ["scaling_param", "params", "values"],
+      "additionalProperties": false,
+      "properties": {
+        "scaling_param": {"type": "string", "minLength": 1},
+        "params": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"$ref": "#/$defs/parameter"}
+        },
+        "values": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"$ref": "#/$defs/series"}
+        }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "required": ["unit"],
+      "additionalProperties": false,
+      "properties": {
+        "unit": {"type": "string"}
+      }
+    },
+    "series": {
+      "type": "object",
+      "required": ["name", "unit"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "unit": {"type": "string"}
+      }
+    },
+    "point": {
+      "type": "object",
+      "required": ["benchmark", "x", "non_scaling_params", "values"],
+      "additionalProperties": false,
+      "properties": {
+        "benchmark": {"type": "string", "minLength": 1},
+        "x": {"type": "number"},
+        "non_scaling_params": {
+          "type": "object",
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {
+            "anyOf": [{"type": "number"}, {"type": "string"}, {"type": "boolean"}]
+          }
+        },
+        "values": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"type": ["number", "null"]}
+        }
+      }
+    }
+  }
+}
