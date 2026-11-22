@@ -10,8 +10,8 @@
         "tmax": {"unit": "steps"}
       },
       "values": {
-        "mi300x": {"name": "MI300X kernel time", "unit": "ns"},
-        "mgpusim": {"name": "MGPUSim kernel time", "unit": "ns"}
+        "mi300x": {"name": "MI300X kernel time", "unit": "ns", "role": "hardware_measurement"},
+        "mgpusim": {"name": "MGPUSim kernel time", "unit": "ns", "role": "simulator_output"}
       }
     }
   },
