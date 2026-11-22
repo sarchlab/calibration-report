@@ -2,9 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "SarchLab Calibration Report Data",
   "type": "object",
-  "required": ["benchmarks", "points"],
+  "required": ["groups", "benchmarks", "points"],
   "additionalProperties": false,
   "properties": {
+    "groups": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"minLength": 1},
+      "additionalProperties": {"$ref": "#/$defs/group"}
+    },
     "benchmarks": {
       "type": "object",
       "minProperties": 1,
@@ -17,6 +23,14 @@
     }
   },
   "$defs": {
+    "group": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1}
+      }
+    },
     "benchmark": {
       "type": "object",
       "required": ["scaling_param", "params", "values"],
@@ -56,9 +70,10 @@
     },
     "point": {
       "type": "object",
-      "required": ["benchmark", "x", "non_scaling_params", "values"],
+      "required": ["group", "benchmark", "x", "non_scaling_params", "values"],
       "additionalProperties": false,
       "properties": {
+        "group": {"type": "string", "minLength": 1},
         "benchmark": {"type": "string", "minLength": 1},
         "x": {"type": "number"},
         "non_scaling_params": {

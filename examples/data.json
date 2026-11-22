@@ -1,4 +1,7 @@
 {
+  "groups": {
+    "mi300x": {"name": "AMD MI300X"}
+  },
   "benchmarks": {
     "polybench_fdtd2d": {
       "scaling_param": "size",
@@ -14,6 +17,7 @@
   },
   "points": [
     {
+      "group": "mi300x",
       "benchmark": "polybench_fdtd2d",
       "x": 64,
       "non_scaling_params": {"tmax": 10},
