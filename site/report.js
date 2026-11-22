@@ -96,25 +96,6 @@ function drawCurve(rows, curves, xLabel, unit) {
   return canvas;
 }
 
-function dataTable(rows, curves, xLabel) {
-  const wrapper = el('div', 'clip');
-  const table = el('table');
-  const head = table.createTHead().insertRow();
-  head.append(el('th', '', xLabel));
-  for (const curve of curves) {
-    const unit = displayUnit(curve.unit);
-    head.append(el('th', '', curve.name + (unit ? ' (' + unit + ')' : '')));
-  }
-  const body = table.createTBody();
-  for (const row of rows) {
-    const tr = body.insertRow();
-    tr.insertCell().textContent = row.x.toLocaleString();
-    for (const curve of curves) tr.insertCell().textContent = formatValue(row.values[curve.id], curve.unit);
-  }
-  wrapper.append(table);
-  return wrapper;
-}
-
 function parameterLabel(params, metadata) {
   return Object.entries(params).map(([id, value]) => {
     const unit = metadata[id].unit;
@@ -149,8 +130,7 @@ function plotBenchmark(id, rows, meta) {
         legend.append(label);
       }
       const measured = group.filter(row => active.some(curve => Number.isFinite(row.values[curve.id])));
-      section.append(drawCurve(measured, active, xLabel, unit), legend,
-        dataTable(measured, active, xLabel));
+      section.append(drawCurve(measured, active, xLabel, unit), legend);
     }
     card.append(section);
   }
