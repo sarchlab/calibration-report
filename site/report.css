@@ -1,0 +1,42 @@
+:root {
+  font: 15px Inter, system-ui, sans-serif;
+  color: #172b35;
+  background: #f5f7f7;
+}
+body { margin: 0; }
+main { max-width: 1180px; margin: auto; padding: 38px 24px 65px; }
+header { border-bottom: 1px solid #cedbde; padding-bottom: 20px; margin-bottom: 18px; }
+h1 { font-size: clamp(26px, 5vw, 42px); letter-spacing: -.045em; margin: 0 0 10px; }
+a { color: #006e75; text-underline-offset: 3px; }
+.muted { color: #58707a; }
+.links, nav { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+nav { margin: 16px 0; }
+nav[hidden] { display: none; }
+button { font: inherit; border: 1px solid #c5d7db; border-radius: 6px; background: #fff; padding: 6px 12px; cursor: pointer; }
+button[aria-pressed="true"] { color: #fff; background: #247480; border-color: #247480; }
+.stats, .charts { display: grid; gap: 14px; }
+.stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.charts { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; margin-top: 18px; }
+.card { background: #fff; border: 1px solid #d7e1e4; border-radius: 9px; padding: 15px; min-width: 0; }
+.big { font-size: 25px; font-weight: 700; display: block; }
+.chart h2 { font-size: 16px; margin: 0 0 12px; overflow-wrap: anywhere; }
+.series { margin: 14px 0 0; padding-top: 10px; border-top: 1px solid #e5ecee; }
+.series h3 { margin: 0; font-size: 12px; color: #526a75; overflow-wrap: anywhere; }
+.curve { display: block; width: 100%; height: auto; }
+.legend { display: flex; flex-wrap: wrap; gap: 7px 12px; margin: 3px 0 7px; font-size: 11px; }
+.key { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; }
+table { width: 100%; border-collapse: collapse; font-size: 11px; }
+td, th { padding: 5px 3px; text-align: right; border-bottom: 1px solid #edf1f2; font-variant-numeric: tabular-nums; }
+td:first-child, th:first-child, td.state, th.state { text-align: left; }
+.clip { overflow-x: auto; }
+.badge { padding: 3px 8px; border-radius: 14px; background: #edf1f2; color: #42565e; white-space: nowrap; }
+.complete { background: #e1f3e9; color: #15523b; }
+.failed, .timeout, .memory_limit { background: #fbe6df; color: #8f321b; }
+.running { background: #fff0ce; color: #6d4b04; }
+progress { width: 100%; height: 8px; accent-color: #247480; margin: 17px 0 3px; }
+@media (max-width: 820px) { .charts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 520px) {
+  main { padding: 25px 12px; }
+  .charts { grid-template-columns: 1fr; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

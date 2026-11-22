@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Calibration report</title>
+  <link rel="stylesheet" href="./report.css">
+  <script src="./report.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1 id="title">Calibration report</h1>
+      <div class="links">
+        <a href="./data.json">Results JSON</a>
+        <span id="stamp" class="muted" aria-live="polite">Loading results…</span>
+      </div>
+    </header>
+    <nav id="groups" aria-label="Report groups" hidden></nav>
+    <section id="live" aria-label="Live progress" hidden>
+      <div class="stats" id="stats"></div>
+      <progress id="progress" aria-label="Resolved points"></progress>
+    </section>
+    <section class="charts" id="charts" aria-label="Benchmark plots"></section>
+  </main>
+</body>
+</html>

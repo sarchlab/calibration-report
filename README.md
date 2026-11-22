@@ -21,6 +21,13 @@ JSON Schema validates the structure. Producers and consumers also check cross-re
 
 Within a tab, the renderer makes one plot for each benchmark and non-scaling parameter combination. Each value key is a curve over `x`.
 
+## Hosting
+
+- **GitHub Pages:** Copy the contents of [`site/`](site/) and an exported `data.json` into the Pages publishing branch. The viewer loads its data using a relative URL.
+- **Live hosting:** Run `python3 serve.py --data-dir /path/to/export --port 8000`. The exporter can refresh that directory from a separate simulator checkout while the server serves the shared viewer. The optional `progress.json` companion shows operational status in the live viewer. Static snapshots require only the schema-defined `data.json`.
+
+The live companion contains `updated_at` as Unix seconds and a `points` array in the same order as `data.json`. Each entry has a `state` and may have a `worker`, `case`, and `error`.
+
 ## Repository scope
 
-Simulator repositories own benchmark collection, simulation orchestration, and adapters that export this format. This repository owns the format and reporting. The report generator is pending.
+Simulator repositories own benchmark collection, simulation orchestration, and adapters that export this format. This repository owns the format, viewer, and live HTTP server.
