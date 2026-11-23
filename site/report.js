@@ -204,6 +204,39 @@ function plotBenchmark(id, rows, meta, pairs) {
   return card;
 }
 
+function liveProgressBar(progress) {
+  const remaining = Math.max(0, progress.total - progress.completed - progress.running);
+  const failed = progress.unsuccessful ?? Math.max(0, remaining - (progress.queued ?? remaining));
+  const pending = progress.queued ?? Math.max(0, remaining - failed);
+  const states = [
+    ['completed', 'Completed', progress.completed],
+    ['running', 'Running', progress.running],
+    ['failed', 'Failed', failed],
+    ['pending', 'Not started', pending],
+  ];
+  const container = el('div', 'live-progress');
+  const bar = el('div', 'progress-track');
+  bar.setAttribute('aria-hidden', 'true');
+  const legend = el('ul', 'progress-legend');
+  for (const [state, label, count] of states) {
+    const segment = el('div', 'progress-segment ' + state);
+    segment.style.flexBasis = (progress.total ? 100 * count / progress.total : 0) + '%';
+    bar.append(segment);
+    const item = el('li', 'progress-count ' + state);
+    const swatch = el('i', 'progress-key');
+    swatch.setAttribute('aria-hidden', 'true');
+    item.append(swatch, el('span', '', label), el('strong', '', count.toLocaleString()));
+    if (state === 'failed') item.title = 'Includes timeouts and unavailable configurations';
+    legend.append(item);
+  }
+  container.append(el('p', 'progress-caption', 'Run progress · ' + progress.total.toLocaleString() + ' points'),
+    bar, legend);
+  if (progress.started_at) {
+    container.append(el('p', 'progress-started', 'Started ' + new Date(progress.started_at).toLocaleString()));
+  }
+  return container;
+}
+
 function renderHeader(report, progress) {
   const title = report.title || 'Calibration report';
   const description = document.querySelector('#description');
@@ -216,6 +249,10 @@ function renderHeader(report, progress) {
   const panel = document.querySelector('#progress');
   panel.hidden = !progress;
   if (!progress) return;
+  if (report.live === true) {
+    panel.replaceChildren(liveProgressBar(progress));
+    return;
+  }
   const stats = [
     ['Completed', progress.completed.toLocaleString() + ' / ' + progress.total.toLocaleString()],
     ['Running', progress.running.toLocaleString()],

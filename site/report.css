@@ -23,6 +23,19 @@ h1 { font-size: clamp(26px, 5vw, 42px); letter-spacing: -.045em; margin: 0 0 10p
 .progress-item span { color: #58707a; font-size: 12px; }
 a { color: #006e75; text-underline-offset: 3px; }
 .muted { color: #58707a; }
+.live-progress { width: 100%; }
+.progress-caption { margin: 0 0 8px; font-size: 13px; font-weight: 650; }
+.progress-track { display: flex; height: 12px; overflow: hidden; border-radius: 6px; background: #edf2f3; }
+.progress-segment { flex: 0 0 0%; }
+.progress-segment.completed, .progress-count.completed .progress-key { background: #16815d; }
+.progress-segment.running, .progress-count.running .progress-key { background: #3b72a6; }
+.progress-segment.failed, .progress-count.failed .progress-key { background: #ab4948; }
+.progress-segment.pending, .progress-count.pending .progress-key { background: #c4d0d5; }
+.progress-legend { display: flex; flex-wrap: wrap; gap: 8px 20px; list-style: none; padding: 0; margin: 8px 0 0; }
+.progress-count { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+.progress-count strong { font-variant-numeric: tabular-nums; }
+.progress-key { width: 9px; height: 9px; border-radius: 2px; }
+.progress-started { margin: 8px 0 0; color: #58707a; font-size: 12px; }
 .links, nav { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
 nav { margin: 16px 0; }
 nav[hidden] { display: none; }
