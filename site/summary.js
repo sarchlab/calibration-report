@@ -131,18 +131,117 @@ function absoluteErrorCDF(pairs) {
   ];
 }
 
-function comparisonScatter(pairs, unit, colors) {
-  const limit = Math.max(...pairs.flatMap(pair => [pair.actual, pair.prediction]));
-  const axisUnit = displayUnit(unit);
+const scatterLogPreferences = new Map();
+
+function averageRanks(values) {
+  const ordered = values.map((value, index) => ({value, index})).sort((a, b) => a.value - b.value);
+  const ranks = [];
+  for (let start = 0; start < ordered.length;) {
+    let end = start + 1;
+    while (end < ordered.length && ordered[end].value === ordered[start].value) end++;
+    const rank = (start + end + 1) / 2;
+    for (let i = start; i < end; i++) ranks[ordered[i].index] = rank;
+    start = end;
+  }
+  return ranks;
+}
+
+function rankStatistics(pairs) {
+  let concordant = 0, discordant = 0, measuredUnequal = 0, simulatedUnequal = 0;
+  for (let i = 0; i < pairs.length; i++) {
+    for (let j = 0; j < i; j++) {
+      const x = Math.sign(pairs[i].actual - pairs[j].actual);
+      const y = Math.sign(pairs[i].prediction - pairs[j].prediction);
+      if (x) measuredUnequal++;
+      if (y) simulatedUnequal++;
+      if (x && y) {
+        if (x === y) concordant++;
+        else discordant++;
+      }
+    }
+  }
+  const tauDenominator = Math.sqrt(measuredUnequal * simulatedUnequal);
+  const measuredRanks = averageRanks(pairs.map(pair => pair.actual));
+  const simulatedRanks = averageRanks(pairs.map(pair => pair.prediction));
+  const mean = (pairs.length + 1) / 2;
+  let covariance = 0, measuredVariance = 0, simulatedVariance = 0;
+  for (let i = 0; i < pairs.length; i++) {
+    const x = measuredRanks[i] - mean;
+    const y = simulatedRanks[i] - mean;
+    covariance += x * y;
+    measuredVariance += x * x;
+    simulatedVariance += y * y;
+  }
+  const rhoDenominator = Math.sqrt(measuredVariance * simulatedVariance);
+  return {
+    tau: tauDenominator ? (concordant - discordant) / tauDenominator : null,
+    concordant,
+    measuredUnequal,
+    rho: rhoDenominator ? covariance / rhoDenominator : null,
+  };
+}
+
+function rankingDescription(pairs) {
+  const stats = rankStatistics(pairs);
+  const description = el('div', 'rank-stats');
+  const probability = stats.measuredUnequal
+    ? (100 * stats.concordant / stats.measuredUnequal).toFixed(2) + '% (' +
+      stats.concordant.toLocaleString() + '/' + stats.measuredUnequal.toLocaleString() + ')'
+    : '—';
+  for (const [label, value] of [
+    ['Kendall’s τ-b', stats.tau?.toFixed(4) ?? '—'],
+    ['Pairwise ordering accuracy', probability],
+    ['Spearman’s ρ', stats.rho?.toFixed(4) ?? '—'],
+  ]) {
+    const item = el('p', 'summary-note');
+    item.append(el('strong', '', label), document.createTextNode(' ' + value));
+    description.append(item);
+  }
+  description.append(el('p', 'summary-note', 'Pairwise accuracy uses pairs with distinct measured values.'));
+  return description;
+}
+
+function comparisonScatter(pairs, unit, colors, log) {
+  const values = pairs.flatMap(pair => [pair.actual, pair.prediction]);
+  const transform = log ? Math.log10 : n => n;
+  const inverse = log ? n => 10 ** n : n => n;
+  const low = log ? transform(Math.min(...values)) : 0;
+  const high = transform(Math.max(...values));
+  const margin = log ? Math.max((high - low) * 0.04, 0.08) : high * 0.04;
+  const range = [log ? low - margin : 0, high + margin];
+  const axisUnit = [displayUnit(unit), log ? 'log' : ''].filter(Boolean).join(', ');
   const suffix = axisUnit ? ' (' + axisUnit + ')' : '';
+  const tick = n => formatValue(inverse(n), unit);
   const chart = summaryAxes(
-    'Measured versus predicted values',
-    'Measured' + suffix, 'Simulated' + suffix, [0, limit * 1.04], [0, limit * 1.04],
-    n => formatValue(n, unit), n => formatValue(n, unit)
+    'Measured versus predicted values, ' + (log ? 'logarithmic' : 'linear') + ' X and Y axes',
+    'Measured' + suffix, 'Simulated' + suffix, range, range, tick, tick
   );
-  referenceLine(chart, 0, 0, limit, limit);
-  for (const pair of pairs) summaryPoint(chart, pair.actual, pair.prediction, colors.get(pair.id).color);
+  referenceLine(chart, range[0], range[0], range[1], range[1]);
+  for (const pair of pairs) {
+    summaryPoint(chart, transform(pair.actual), transform(pair.prediction), colors.get(pair.id).color);
+  }
   return chart.canvas;
+}
+
+function scatterWithScale(key, pairs, unit, colors) {
+  const plot = el('div', 'plot');
+  const controls = el('div', 'scale-controls');
+  const button = el('button', '', 'X/Y log');
+  button.type = 'button';
+  let log = scatterLogPreferences.get(key) ?? false;
+  button.setAttribute('aria-pressed', String(log));
+  let canvas = comparisonScatter(pairs, unit, colors, log);
+  button.addEventListener('click', () => {
+    log = !log;
+    scatterLogPreferences.set(key, log);
+    button.setAttribute('aria-pressed', String(log));
+    const next = comparisonScatter(pairs, unit, colors, log);
+    canvas.replaceWith(next);
+    canvas = next;
+  });
+  controls.append(button);
+  plot.append(controls, canvas, rankingDescription(pairs));
+  return plot;
 }
 
 function renderSummary(rows, benchmarks) {
@@ -175,7 +274,8 @@ function renderSummary(rows, benchmarks) {
   const scatter = el('figure', 'card');
   scatter.append(el('figcaption', '', 'Measured vs. simulated'));
   for (const [unit, values] of Map.groupBy(pairs, pair => pair.unit)) {
-    scatter.append(comparisonScatter(values, unit, colors));
+    const key = JSON.stringify([rows[0].group, unit]);
+    scatter.append(scatterWithScale(key, values, unit, colors));
   }
   scatter.append(el('p', 'summary-note', 'Dashed line indicates equal values.'));
   charts.append(signed, cdf, scatter);
