@@ -227,8 +227,10 @@ function drawStatusMarkers(rows, series, xLabel, xPosition, statusPosition) {
     const main = marked.find(curve => row.statuses[curve.id].state !== 'running') ?? marked[0];
     const {state, symbol} = row.statuses[main.id];
     const message = [xLabel + ' = ' + row.x, ...messages].join('\n');
-    const marker = el('button', 'plot-status-marker', symbol ?? visibleStates.get(state).symbol);
+    const glyph = symbol ?? visibleStates.get(state).symbol;
+    const marker = el('button', 'plot-status-marker', glyph);
     marker.dataset.state = state;
+    marker.toggleAttribute('data-emoji', /\p{Emoji_Presentation}|\uFE0F/u.test(glyph));
     marker.type = 'button';
     marker.style.left = (100 * xPosition(row.x)) + '%';
     marker.title = message;
