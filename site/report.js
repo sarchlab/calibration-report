@@ -132,7 +132,7 @@ function numericAxis([min, max], [start, end], {log = false, unit = '', count = 
   return {position, ticks};
 }
 
-function drawAxisTicks(ctx, x, y, {left, right, top, bottom}) {
+function drawAxisTicks(ctx, x, y, {left, right, top, bottom}, xLabelOffset = 0) {
   ctx.strokeStyle = chartTheme.grid;
   ctx.fillStyle = chartTheme.label;
   ctx.textAlign = 'center';
@@ -145,7 +145,7 @@ function drawAxisTicks(ctx, x, y, {left, right, top, bottom}) {
     ctx.stroke();
     const half = ctx.measureText(label).width / 2;
     if (label === lastLabel || position - half < lastRight + 6) continue;
-    ctx.fillText(label, position, bottom + 13);
+    ctx.fillText(label, position, bottom + 13 + xLabelOffset);
     lastRight = position + half;
     lastLabel = label;
   }
@@ -207,9 +207,9 @@ function isMarked(row, id) {
   return !Number.isFinite(row.values[id]) && visibleStates.has(row.statuses?.[id]?.state);
 }
 
-function drawStatusMarkers(rows, series, xLabel, xPosition) {
-  const markers = el('div', 'plot-statuses');
+function drawStatusMarkers(rows, series, xLabel, xPosition, statusPosition) {
   const track = el('div', 'plot-status-track');
+  track.style.top = (100 * statusPosition) + '%';
   track.setAttribute('role', 'group');
   track.setAttribute('aria-label', 'Unavailable results');
   const detail = el('p', 'plot-status-detail');
@@ -233,15 +233,14 @@ function drawStatusMarkers(rows, series, xLabel, xPosition) {
     });
     track.append(marker);
   }
-  if (!track.childElementCount) return null;
-  markers.append(track, detail);
-  return markers;
+  return {track, detail};
 }
 
-function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
+function drawCurve(rows, curves, xLabel, unit, bounds, scales, hasStatuses) {
+  const xLabelOffset = hasStatuses ? 12 : 0;
   const canvas = el('canvas', 'curve');
   canvas.width = 640;
-  canvas.height = bounds ? 318 : 70;
+  canvas.height = (bounds ? 318 : 70) + 2 * xLabelOffset;
   canvas.setAttribute('role', 'img');
   const xScale = scales.x ? 'logarithmic' : 'linear';
   const yScale = scales.y ? 'logarithmic' : 'linear';
@@ -266,8 +265,9 @@ function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
     yAxis = numericAxis([inverseY(min), inverseY(max)], [bottom, top], {log: scales.y, unit});
     yLabel = [displayUnit(unit), scales.y ? 'log' : ''].filter(Boolean).join(' · ');
   }
-  drawAxisTicks(ctx, xAxis, yAxis, frame);
-  drawAxisTitles(ctx, xLabel + (scales.x ? ' · log' : ''), yLabel, frame, bottom + (bounds ? 29 : 25));
+  drawAxisTicks(ctx, xAxis, yAxis, frame, xLabelOffset);
+  drawAxisTitles(ctx, xLabel + (scales.x ? ' · log' : ''), yLabel, frame,
+    bottom + (bounds ? 29 : 25) + xLabelOffset);
   const x = index => xAxis.position(rows[index].x);
   const y = yAxis.position;
 
@@ -295,7 +295,11 @@ function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
       ctx.fill();
     });
   }
-  return {canvas, xPosition: value => xAxis.position(value) / (canvas.width / 2)};
+  return {
+    canvas,
+    xPosition: value => xAxis.position(value) / (canvas.width / 2),
+    statusPosition: (bottom + 6) / (canvas.height / 2),
+  };
 }
 
 function chartWithScales(key, rows, curves, series, xLabel, unit) {
@@ -313,11 +317,17 @@ function chartWithScales(key, rows, curves, series, xLabel, unit) {
   controls.setAttribute('role', 'group');
   controls.setAttribute('aria-label', 'Axis scales');
   const figure = el('div', 'plot-figure');
+  const hasStatuses = rows.some(row => series.some(curve => isMarked(row, curve.id)));
   function redrawPlot() {
-    const {canvas, xPosition} = drawCurve(rows, curves, xLabel, unit, bounds, scales);
-    const markers = drawStatusMarkers(rows, series, xLabel, xPosition);
-    figure.replaceChildren(canvas);
-    if (markers) figure.append(markers);
+    const {canvas, xPosition, statusPosition} = drawCurve(rows, curves, xLabel, unit, bounds, scales, hasStatuses);
+    if (!hasStatuses) {
+      figure.replaceChildren(canvas);
+      return;
+    }
+    const surface = el('div', 'plot-surface');
+    const {track, detail} = drawStatusMarkers(rows, series, xLabel, xPosition, statusPosition);
+    surface.append(canvas, track);
+    figure.replaceChildren(surface, detail);
   }
   redrawPlot();
   for (const axis of ['x', 'y']) {
