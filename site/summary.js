@@ -120,14 +120,14 @@ function absoluteErrorCDF(pairs) {
   ctx.lineTo(x(right), y(1));
   ctx.stroke();
   const nearestRank = p => errors[Math.ceil(p * errors.length) - 1].toPrecision(3) + '%';
-  return [
-    chart.canvas,
-    plotDetails(
-      [el('p', '', '|simulated − measured| / min(simulated, measured)')],
-      [['P50', nearestRank(0.5)], ['P90', nearestRank(0.9)], ...errorStats(pairs)],
-      pairs.length
-    )
-  ];
+  const percentiles = [50, 90, 95, 98].map(p => ['P' + p, nearestRank(p / 100)]);
+  const details = plotDetails(
+    [el('p', '', '|simulated − measured| / min(simulated, measured)')],
+    percentiles,
+    pairs.length
+  );
+  details.append(renderStats(errorStats(pairs), pairs.length));
+  return [chart.canvas, details];
 }
 
 const scatterLogPreferences = new Map();
