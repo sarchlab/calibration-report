@@ -8,6 +8,19 @@ main { max-width: 1180px; margin: auto; padding: 38px 24px 65px; }
 header { border-bottom: 1px solid #cedbde; padding-bottom: 20px; margin-bottom: 18px; }
 h1 { font-size: clamp(26px, 5vw, 42px); letter-spacing: -.045em; margin: 0 0 10px; }
 .report-description { margin: 0 0 12px; max-width: 76ch; line-height: 1.55; }
+.report-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px 16px; }
+.live-badge { display: inline-flex; align-items: center; gap: 6px; color: #176754; font-weight: 700; }
+.live-badge[hidden] { display: none; }
+.live-dot { width: 8px; height: 8px; background: #22a57a; border-radius: 50%; animation: breathe 2s ease-in-out infinite; }
+@keyframes breathe {
+  0%, 100% { opacity: .55; box-shadow: 0 0 0 0 rgb(34 165 122 / 45%); }
+  50% { opacity: 1; box-shadow: 0 0 0 5px rgb(34 165 122 / 8%); }
+}
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+.progress { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; margin: 16px 0; }
+.progress[hidden] { display: none; }
+.progress-item strong { display: block; font-size: 19px; font-variant-numeric: tabular-nums; }
+.progress-item span { color: #58707a; font-size: 12px; }
 a { color: #006e75; text-underline-offset: 3px; }
 .muted { color: #58707a; }
 .links, nav { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }

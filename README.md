@@ -6,10 +6,10 @@ Shared result format and reporting for SarchLab simulators. Poros and MGPUSim ar
 
 A report publishes one `data.json` at its GitHub Pages site root. See the [JSON Schema](data.schema.json) and the [minimal example](examples/data.json).
 
-- The optional top-level `report` object provides the global `title` and `description` for every view.
-- `groups` defines tabs by ID and display name. An Overview tab appears when there are paired measurements and shows the combined accuracy summary.
+- `report` provides the global `title` and `description` for every view, a boolean `live` flag, and the `groups` map of tab IDs to display names. An Overview tab appears when there are paired measurements.
+- `progress` contains counts for the entire report. `total`, `completed`, and `running` are required. `queued` and `unsuccessful` can be supplied when available. `started_at` and `updated_at` are ISO 8601 timestamps and can be omitted or set to `null` when unknown.
 - `benchmarks` defines each benchmark's scaling parameter, parameter units, and available value series. Each series has a display name and unit. Its optional `role` is `hardware_measurement` or `simulator_output`.
-- `points` stores one entry per benchmark configuration. Its `group` selects the tab, and `x` is the scaling parameter's numeric value. Its `non_scaling_params` object contains the other parameter values.
+- `data` stores one entry per benchmark configuration. Its `group` selects the tab, and `x` is the scaling parameter's numeric value. Its `non_scaling_params` object contains the other parameter values.
 - Each point's `values` is an object keyed by the benchmark's series IDs. A number is a measured value in that series' unit. Use `null` for a series with a planned but unavailable result. Omit a series that does not apply to that point. Use an empty string for a dimensionless unit.
 
 JSON Schema validates the structure. Producers and consumers also check cross-references:
@@ -35,7 +35,7 @@ Plots default to a log axis when the values are positive, span at least one deca
 - **GitHub Pages:** Copy the contents of [`site/`](site/) and an exported `data.json` into the Pages publishing branch. The viewer loads its data using a relative URL.
 - **Live hosting:** Run `python3 serve.py --data-dir /path/to/export --port 8000`. The exporter can refresh that directory from a separate simulator checkout while the server serves the shared viewer.
 
-The viewer reads only `data.json`. It displays numeric measurements and omits points and series that have no measurements.
+The viewer reads only `data.json`. With `report.live: true`, it shows a live indicator and fetches the file every ten seconds without navigating. Static snapshots load once. Plots display numeric measurements and omit points and series that have no measurements.
 
 ## Repository scope
 

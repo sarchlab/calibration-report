@@ -1,10 +1,17 @@
 {
   "report": {
     "title": "MGPUSim calibration",
-    "description": "Hardware and simulator kernel times for matching benchmark configurations."
+    "description": "Hardware and simulator kernel times for matching benchmark configurations.",
+    "live": false,
+    "groups": {
+      "mi300x": {"name": "AMD MI300X"}
+    }
   },
-  "groups": {
-    "mi300x": {"name": "AMD MI300X"}
+  "progress": {
+    "started_at": null,
+    "total": 1,
+    "completed": 1,
+    "running": 0
   },
   "benchmarks": {
     "polybench_fdtd2d": {
@@ -19,7 +26,7 @@
       }
     }
   },
-  "points": [
+  "data": [
     {
       "group": "mi300x",
       "benchmark": "polybench_fdtd2d",

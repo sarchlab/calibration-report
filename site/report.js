@@ -1,6 +1,7 @@
 const palette = ['#2b7884', '#ad6b19', '#7d54aa', '#a2404b', '#4e782e'];
 const scalePreferences = new Map();
 let selectedGroup;
+let previousCharts;
 
 function el(tag, className, text) {
   const item = document.createElement(tag);
@@ -195,24 +196,45 @@ function plotBenchmark(id, rows, meta) {
   return card;
 }
 
-function render(data) {
-  const measured = data.points.filter(point => Object.values(point.values).some(Number.isFinite));
+function renderHeader(report, progress) {
+  const title = report.title || 'Calibration report';
+  const description = document.querySelector('#description');
+  document.title = title;
+  document.querySelector('#title').textContent = title;
+  description.textContent = report.description ?? '';
+  description.hidden = !description.textContent;
+  document.querySelector('#live-badge').hidden = report.live !== true;
+
+  const panel = document.querySelector('#progress');
+  panel.hidden = !progress;
+  if (!progress) return;
+  const stats = [
+    ['Completed', progress.completed.toLocaleString() + ' / ' + progress.total.toLocaleString()],
+    ['Running', progress.running.toLocaleString()],
+  ];
+  if (progress.queued !== undefined) stats.push(['Queued', progress.queued.toLocaleString()]);
+  if (progress.unsuccessful !== undefined) {
+    stats.push(['Unsuccessful or unavailable', progress.unsuccessful.toLocaleString()]);
+  }
+  if (progress.started_at) stats.push(['Started', new Date(progress.started_at).toLocaleString()]);
+  panel.replaceChildren(...stats.map(([label, value]) => {
+    const item = el('div', 'progress-item');
+    item.append(el('strong', '', value), el('span', '', label));
+    return item;
+  }));
+}
+
+function renderCharts(report, benchmarks, data) {
+  const measured = data.filter(point => Object.values(point.values).some(Number.isFinite));
   const groups = [...new Set(measured.map(point => point.group))];
-  const pairs = comparisonPairs(measured, data.benchmarks);
+  const pairs = comparisonPairs(measured, benchmarks);
   const hasOverview = pairs.length > 0;
   if (!(selectedGroup === null && hasOverview) && !groups.includes(selectedGroup)) {
     selectedGroup = hasOverview ? null : groups[0];
   }
 
-  const title = data.report?.title ?? 'Calibration report';
-  const description = document.querySelector('#description');
-  document.title = title;
-  document.querySelector('#title').textContent = title;
-  description.textContent = data.report?.description ?? '';
-  description.hidden = !description.textContent;
-
   const tabs = document.querySelector('#groups');
-  const views = groups.map(id => ({id, name: data.groups[id].name}));
+  const views = groups.map(id => ({id, name: report.groups[id].name}));
   if (hasOverview) views.unshift({id: null, name: 'Overview'});
   tabs.hidden = views.length < 2;
   tabs.replaceChildren();
@@ -223,7 +245,7 @@ function render(data) {
       button.setAttribute('aria-pressed', String(id === selectedGroup));
       button.addEventListener('click', () => {
         selectedGroup = id;
-        render(data);
+        renderCharts(report, benchmarks, data);
         tabs.querySelector('[aria-pressed="true"]').focus();
       });
       tabs.append(button);
@@ -231,25 +253,41 @@ function render(data) {
   }
 
   const groupPairs = selectedGroup === null ? pairs : pairs.filter(pair => pair.group === selectedGroup);
-  renderSummary(groupPairs, selectedGroup, data.groups);
+  renderSummary(groupPairs, selectedGroup, report.groups);
   const list = document.querySelector('#charts');
   list.replaceChildren();
   if (selectedGroup === null) return;
   const rows = measured.filter(point => point.group === selectedGroup);
   const byBenchmark = Map.groupBy(rows, row => row.benchmark);
-  list.replaceChildren(...Array.from(byBenchmark, ([id, points]) => plotBenchmark(id, points, data.benchmarks[id])));
+  list.replaceChildren(...Array.from(byBenchmark, ([id, points]) => plotBenchmark(id, points, benchmarks)));
 }
+
+let live = false;
 
 async function refresh() {
   try {
-    const dataResponse = await fetch('./data.json', {cache: 'no-store'});
-    if (!dataResponse.ok) throw new Error('Data unavailable');
-    render(await dataResponse.json());
-    document.querySelector('#stamp').textContent = '';
+    const response = await fetch('./data.json', {cache: 'no-store'});
+    if (!response.ok) throw new Error('Data unavailable');
+    const snapshot = await response.json();
+    // Older published snapshots remain readable while projects adopt the new schema.
+    const report = {...snapshot.report, groups: snapshot.report?.groups ?? snapshot.groups};
+    const data = snapshot.data ?? snapshot.points;
+    const benchmarks = snapshot.benchmarks;
+    renderHeader(report, snapshot.progress);
+
+    const charts = JSON.stringify([report.groups, benchmarks, data]);
+    if (charts !== previousCharts) {
+      renderCharts(report, benchmarks, data);
+      previousCharts = charts;
+    }
+    live = report.live === true;
+    document.querySelector('#stamp').textContent = snapshot.progress?.updated_at
+      ? 'Updated ' + new Date(snapshot.progress.updated_at).toLocaleTimeString()
+      : '';
   } catch {
     document.querySelector('#stamp').textContent = 'Waiting for report data';
   }
-  setTimeout(refresh, 24000);
+  if (live) setTimeout(refresh, 10000);
 }
 
 refresh();
