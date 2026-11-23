@@ -123,6 +123,17 @@ function drawAxisTicks(ctx, x, y, {left, right, top, bottom}) {
   }
 }
 
+function drawAxisTitles(ctx, xLabel, yLabel, {left, right, top, bottom}, xBaseline) {
+  ctx.textAlign = 'center';
+  ctx.fillText(xLabel, (left + right) / 2, xBaseline);
+  if (!yLabel) return;
+  ctx.save();
+  ctx.translate(10, (top + bottom) / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText(yLabel, 0, 0);
+  ctx.restore();
+}
+
 function preferLogScale(values) {
   const sorted = [...new Set(values.filter(Number.isFinite))].sort((a, b) => a - b);
   if (sorted.length < 3 || sorted[0] <= 0) return false;
@@ -147,14 +158,15 @@ function preferLogScale(values) {
 function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
   const canvas = el('canvas', 'curve');
   canvas.width = 640;
-  canvas.height = 334;
+  canvas.height = 318;
   canvas.setAttribute('role', 'img');
   const xScale = scales.x ? 'logarithmic' : 'linear';
   const yScale = scales.y ? 'logarithmic' : 'linear';
   canvas.setAttribute('aria-label', 'Comparison by ' + xLabel + ', ' + xScale + ' X axis, ' + yScale + ' Y axis');
   const ctx = canvas.getContext('2d');
   ctx.scale(2, 2);
-  const left = 53, right = 305, top = 16, bottom = 132;
+  const frame = {left: 53, right: 305, top: 8, bottom: 124};
+  const {left, right, top, bottom} = frame;
   ctx.font = '10px system-ui';
   ctx.fillStyle = '#526a75';
   const transformY = scales.y ? Math.log10 : n => n;
@@ -165,11 +177,9 @@ function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
   max += span * 0.12;
   const xAxis = numericAxis([rows[0].x, rows.at(-1).x], [left, right], {log: scales.x, count: 6});
   const yAxis = numericAxis([inverseY(min), inverseY(max)], [bottom, top], {log: scales.y, unit});
-  drawAxisTicks(ctx, xAxis, yAxis, {left, right, top, bottom});
-  ctx.textAlign = 'left';
-  ctx.fillText(displayUnit(unit) + (scales.y ? ' · log' : ''), 4, 9);
-  ctx.textAlign = 'center';
-  ctx.fillText(xLabel + (scales.x ? ' · log' : ''), (left + right) / 2, 161);
+  drawAxisTicks(ctx, xAxis, yAxis, frame);
+  const yLabel = [displayUnit(unit), scales.y ? 'log' : ''].filter(Boolean).join(' · ');
+  drawAxisTitles(ctx, xLabel + (scales.x ? ' · log' : ''), yLabel, frame, 153);
   const x = index => xAxis.position(rows[index].x);
   const y = yAxis.position;
 

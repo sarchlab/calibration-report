@@ -43,19 +43,14 @@ function summaryAxes(title, xLabel, yLabel, xRange, yRange, xOptions = {}, yOpti
   const ctx = canvas.getContext('2d');
   ctx.scale(2, 2);
   ctx.font = '10px system-ui';
-  const left = 51, right = 306, top = 12, bottom = 143;
+  const frame = {left: 51, right: 306, top: 12, bottom: 143};
+  const {left, right, top, bottom} = frame;
   const xAxis = numericAxis(xRange, [left, right], {count: 6, ...xOptions});
   const yAxis = numericAxis(yRange, [bottom, top], yOptions);
   const x = xAxis.position;
   const y = yAxis.position;
-  drawAxisTicks(ctx, xAxis, yAxis, {left, right, top, bottom});
-  ctx.textAlign = 'center';
-  ctx.fillText(xLabel, (left + right) / 2, 179);
-  ctx.save();
-  ctx.translate(10, (top + bottom) / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.fillText(yLabel, 0, 0);
-  ctx.restore();
+  drawAxisTicks(ctx, xAxis, yAxis, frame);
+  drawAxisTitles(ctx, xLabel, yLabel, frame, 179);
   return {canvas, ctx, x, y};
 }
 
