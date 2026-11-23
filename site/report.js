@@ -22,6 +22,25 @@ function displayUnit(unit) {
   return unit === 'ns' ? 'ms' : unit;
 }
 
+function preferLogScale(values) {
+  const sorted = [...new Set(values.filter(Number.isFinite))].sort((a, b) => a - b);
+  if (sorted.length < 3 || sorted[0] <= 0) return false;
+  const logValues = sorted.map(Math.log10);
+  if (logValues.at(-1) - logValues[0] < 1) return false;
+
+  function middleWidth(points) {
+    function quantile(fraction) {
+      const index = fraction * (points.length - 1);
+      const low = Math.floor(index);
+      return points[low] + (index - low) * (points[Math.ceil(index)] - points[low]);
+    }
+    return (quantile(0.75) - quantile(0.25)) / (points.at(-1) - points[0]);
+  }
+  const linearWidth = middleWidth(sorted);
+  const logWidth = middleWidth(logValues);
+  return linearWidth < 0.35 && logWidth >= 0.2 && logWidth - linearWidth >= 0.1;
+}
+
 function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
   const canvas = el('canvas', 'curve');
   canvas.width = 640;
@@ -103,8 +122,8 @@ function chartWithScales(key, rows, curves, xLabel, unit) {
   const canLog = {x: rows[0].x > 0, y: bounds.min > 0};
   const preferences = scalePreferences.get(key) ?? {};
   const scales = {
-    x: canLog.x && (preferences.x ?? false),
-    y: canLog.y && (preferences.y ?? bounds.max / bounds.min >= 10),
+    x: canLog.x && (preferences.x ?? preferLogScale(rows.map(row => row.x))),
+    y: canLog.y && (preferences.y ?? preferLogScale(measures)),
   };
 
   const plot = el('div', 'plot');

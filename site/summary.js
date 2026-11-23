@@ -100,13 +100,16 @@ function rankedErrors(pairs, colors) {
 
 function absoluteErrorCDF(pairs) {
   const errors = pairs.map(pair => Math.abs(pair.signedError)).sort((a, b) => a - b);
-  const smallestPositive = errors.find(x => x > 0);
-  const left = smallestPositive === undefined ? -3 : Math.floor(Math.log10(smallestPositive)) - 1;
-  const right = smallestPositive === undefined ? 0 : Math.max(left + 1, Math.ceil(Math.log10(errors[errors.length - 1])) + 0.1);
+  const log = preferLogScale(errors);
+  const transform = log ? Math.log10 : n => n;
+  const inverse = log ? n => 10 ** n : n => n;
+  const left = log ? Math.floor(transform(errors[0])) : 0;
+  const maximum = transform(errors.at(-1));
+  const right = log ? Math.ceil(maximum) + 0.1 : maximum * 1.04 || 1;
   const chart = summaryAxes(
     'Absolute error cumulative distribution',
-    'Absolute error (%) · log', 'Cumulative fraction', [left, right], [0, 1],
-    x => x === left ? '0' : (10 ** x).toPrecision(2),
+    'Absolute error (%)' + (log ? ' · log' : ''), 'Cumulative fraction', [left, right], [0, 1],
+    x => inverse(x).toPrecision(2),
     y => Number(y.toFixed(2)).toString()
   );
   const {ctx, x, y} = chart;
@@ -116,7 +119,7 @@ function absoluteErrorCDF(pairs) {
   ctx.moveTo(x(left), y(0));
   let fraction = 0;
   for (let i = 0; i < errors.length; i++) {
-    const px = x(errors[i] === 0 ? left : Math.log10(errors[i]));
+    const px = x(transform(errors[i]));
     ctx.lineTo(px, y(fraction));
     fraction = (i + 1) / errors.length;
     ctx.lineTo(px, y(fraction));
@@ -228,7 +231,7 @@ function scatterWithScale(key, pairs, unit, colors) {
   const controls = el('div', 'scale-controls');
   const button = el('button', '', 'X/Y log');
   button.type = 'button';
-  let log = scatterLogPreferences.get(key) ?? false;
+  let log = scatterLogPreferences.get(key) ?? preferLogScale(pairs.flatMap(pair => [pair.actual, pair.prediction]));
   button.setAttribute('aria-pressed', String(log));
   let canvas = comparisonScatter(pairs, unit, colors, log);
   button.addEventListener('click', () => {

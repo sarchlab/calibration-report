@@ -27,6 +27,8 @@ The active group includes a ranked signed-error plot, a cumulative distribution 
 
 The scatter plot can switch both axes to logarithmic scale. It reports Kendall’s tau-b, pairwise ordering accuracy among pairs with distinct measured values, and Spearman’s rho using average ranks for ties.
 
+Plots default to a log axis when the values are positive, span at least one decade, and a log transform meaningfully spreads out the middle half of the distinct values. Otherwise the axis is linear. Manual scale selections are kept during live refreshes. The scatter plot applies the same scale to both axes.
+
 ## Hosting
 
 - **GitHub Pages:** Copy the contents of [`site/`](site/) and an exported `data.json` into the Pages publishing branch. The viewer loads its data using a relative URL.
