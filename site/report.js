@@ -132,7 +132,7 @@ function numericAxis([min, max], [start, end], {log = false, unit = '', count = 
   return {position, ticks};
 }
 
-function drawAxisTicks(ctx, x, y, {left, right, top, bottom}, xLabelOffset = 0) {
+function drawAxisTicks(ctx, x, y, {left, right, top, bottom}) {
   ctx.strokeStyle = chartTheme.grid;
   ctx.fillStyle = chartTheme.label;
   ctx.textAlign = 'center';
@@ -145,7 +145,7 @@ function drawAxisTicks(ctx, x, y, {left, right, top, bottom}, xLabelOffset = 0) 
     ctx.stroke();
     const half = ctx.measureText(label).width / 2;
     if (label === lastLabel || position - half < lastRight + 6) continue;
-    ctx.fillText(label, position, bottom + 13 + xLabelOffset);
+    ctx.fillText(label, position, bottom + 13);
     lastRight = position + half;
     lastLabel = label;
   }
@@ -236,11 +236,10 @@ function drawStatusMarkers(rows, series, xLabel, xPosition, statusPosition) {
   return {track, detail};
 }
 
-function drawCurve(rows, curves, xLabel, unit, bounds, scales, hasStatuses) {
-  const xLabelOffset = hasStatuses ? 12 : 0;
+function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
   const canvas = el('canvas', 'curve');
   canvas.width = 640;
-  canvas.height = (bounds ? 318 : 70) + 2 * xLabelOffset;
+  canvas.height = bounds ? 318 : 70;
   canvas.setAttribute('role', 'img');
   const xScale = scales.x ? 'logarithmic' : 'linear';
   const yScale = scales.y ? 'logarithmic' : 'linear';
@@ -265,9 +264,9 @@ function drawCurve(rows, curves, xLabel, unit, bounds, scales, hasStatuses) {
     yAxis = numericAxis([inverseY(min), inverseY(max)], [bottom, top], {log: scales.y, unit});
     yLabel = [displayUnit(unit), scales.y ? 'log' : ''].filter(Boolean).join(' · ');
   }
-  drawAxisTicks(ctx, xAxis, yAxis, frame, xLabelOffset);
+  drawAxisTicks(ctx, xAxis, yAxis, frame);
   drawAxisTitles(ctx, xLabel + (scales.x ? ' · log' : ''), yLabel, frame,
-    bottom + (bounds ? 29 : 25) + xLabelOffset);
+    bottom + (bounds ? 29 : 25));
   const x = index => xAxis.position(rows[index].x);
   const y = yAxis.position;
 
@@ -298,7 +297,7 @@ function drawCurve(rows, curves, xLabel, unit, bounds, scales, hasStatuses) {
   return {
     canvas,
     xPosition: value => xAxis.position(value) / (canvas.width / 2),
-    statusPosition: (bottom + 6) / (canvas.height / 2),
+    statusPosition: (bounds ? bottom - 4 : bottom) / (canvas.height / 2),
   };
 }
 
@@ -319,7 +318,7 @@ function chartWithScales(key, rows, curves, series, xLabel, unit) {
   const figure = el('div', 'plot-figure');
   const hasStatuses = rows.some(row => series.some(curve => isMarked(row, curve.id)));
   function redrawPlot() {
-    const {canvas, xPosition, statusPosition} = drawCurve(rows, curves, xLabel, unit, bounds, scales, hasStatuses);
+    const {canvas, xPosition, statusPosition} = drawCurve(rows, curves, xLabel, unit, bounds, scales);
     if (!hasStatuses) {
       figure.replaceChildren(canvas);
       return;
