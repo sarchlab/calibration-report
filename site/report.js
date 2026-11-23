@@ -1,4 +1,8 @@
 const palette = ['#2b7884', '#ad6b19', '#7d54aa', '#a2404b', '#4e782e'];
+const roleStyles = new Map([
+  ['hardware_measurement', {color: '#b57e14', layer: 0}],
+  ['simulator_output', {color: '#16815d', layer: 2}],
+]);
 const scalePreferences = new Map();
 let selectedGroup;
 let previousCharts;
@@ -165,9 +169,10 @@ function plotBenchmark(id, rows, meta) {
   const card = el('article', 'chart card');
   card.append(el('h2', '', displayName(id)));
   const fixed = Map.groupBy(rows, row => JSON.stringify(Object.entries(row.non_scaling_params).sort()));
-  const curves = Object.entries(meta.values).map(([id, info], i) => ({
-    id, ...info, color: palette[i % palette.length]
-  }));
+  const curves = Object.entries(meta.values).map(([id, info], i) => {
+    const style = roleStyles.get(info.role) ?? {color: palette[i % palette.length], layer: 1};
+    return {id, ...info, ...style};
+  }).sort((a, b) => a.layer - b.layer);
   const units = Map.groupBy(curves, curve => curve.unit);
   const axisUnit = meta.params[meta.scaling_param].unit;
   const xLabel = displayName(meta.scaling_param) + (axisUnit ? ' (' + axisUnit + ')' : '');
@@ -259,7 +264,7 @@ function renderCharts(report, benchmarks, data) {
   if (selectedGroup === null) return;
   const rows = measured.filter(point => point.group === selectedGroup);
   const byBenchmark = Map.groupBy(rows, row => row.benchmark);
-  list.replaceChildren(...Array.from(byBenchmark, ([id, points]) => plotBenchmark(id, points, benchmarks)));
+  list.replaceChildren(...Array.from(byBenchmark, ([id, points]) => plotBenchmark(id, points, benchmarks[id])));
 }
 
 let live = false;
