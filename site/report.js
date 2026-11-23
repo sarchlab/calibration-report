@@ -1,8 +1,49 @@
-const palette = ['#2b7884', '#ad6b19', '#7d54aa', '#a2404b', '#4e782e'];
-const roleStyles = new Map([
-  ['hardware_measurement', {color: '#b57e14', layer: 0}],
-  ['simulator_output', {color: '#16815d', layer: 2}],
-]);
+let chartTheme;
+let redrawCharts;
+
+function setupTheme() {
+  const preference = document.querySelector('#theme');
+  const systemTheme = matchMedia('(prefers-color-scheme: dark)');
+  const storageKey = 'calibration-report-theme';
+  try {
+    const saved = localStorage.getItem(storageKey);
+    if (saved === 'light' || saved === 'dark') preference.value = saved;
+  } catch {
+    // A browser can disable storage while still allowing a theme for this page.
+  }
+
+  function applyTheme() {
+    const root = document.documentElement;
+    const theme = preference.value === 'system' ? (systemTheme.matches ? 'dark' : 'light') : preference.value;
+    if (root.dataset.theme === theme) return;
+    root.dataset.theme = theme;
+    const style = getComputedStyle(root);
+    const color = name => style.getPropertyValue('--chart-' + name).trim();
+    chartTheme = {
+      grid: color('grid'),
+      label: color('label'),
+      reference: color('reference'),
+      palette: [1, 2, 3, 4, 5].map(i => color('series-' + i)),
+      roles: new Map([
+        ['hardware_measurement', {color: color('hardware'), layer: 0}],
+        ['simulator_output', {color: color('simulator'), layer: 2}],
+      ]),
+    };
+    redrawCharts?.();
+  }
+
+  preference.addEventListener('change', () => {
+    try {
+      localStorage.setItem(storageKey, preference.value);
+    } catch {
+      // Apply the selection even when it cannot be saved.
+    }
+    applyTheme();
+  });
+  systemTheme.addEventListener('change', applyTheme);
+  applyTheme();
+}
+
 const scalePreferences = new Map();
 let selectedGroup;
 let previousCharts;
@@ -92,8 +133,8 @@ function numericAxis([min, max], [start, end], {log = false, unit = '', count = 
 }
 
 function drawAxisTicks(ctx, x, y, {left, right, top, bottom}) {
-  ctx.strokeStyle = '#e5ecee';
-  ctx.fillStyle = '#526a75';
+  ctx.strokeStyle = chartTheme.grid;
+  ctx.fillStyle = chartTheme.label;
   ctx.textAlign = 'center';
   let lastRight = -Infinity;
   let lastLabel;
@@ -168,7 +209,7 @@ function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
   const frame = {left: 53, right: 305, top: 8, bottom: 124};
   const {left, right, top, bottom} = frame;
   ctx.font = '10px system-ui';
-  ctx.fillStyle = '#526a75';
+  ctx.fillStyle = chartTheme.label;
   const transformY = scales.y ? Math.log10 : n => n;
   const inverseY = scales.y ? n => 10 ** n : n => n;
   let min = transformY(bounds.min), max = transformY(bounds.max);
@@ -284,7 +325,8 @@ function plotBenchmark(id, rows, meta, pairs) {
   }
   const fixed = Map.groupBy(rows, row => JSON.stringify(Object.entries(row.non_scaling_params).sort()));
   const curves = Object.entries(meta.values).map(([id, info], i) => {
-    const style = roleStyles.get(info.role) ?? {color: palette[i % palette.length], layer: 1};
+    const {roles, palette} = chartTheme;
+    const style = roles.get(info.role) ?? {color: palette[i % palette.length], layer: 1};
     return {id, ...info, ...style};
   }).sort((a, b) => a.layer - b.layer);
   const units = Map.groupBy(curves, curve => curve.unit);
@@ -444,7 +486,8 @@ async function refresh() {
 
     const charts = JSON.stringify([report.groups, benchmarks, data]);
     if (charts !== previousCharts) {
-      renderCharts(report, benchmarks, data);
+      redrawCharts = () => renderCharts(report, benchmarks, data);
+      redrawCharts();
       previousCharts = charts;
     }
     live = report.live === true;
@@ -457,4 +500,5 @@ async function refresh() {
   if (live) setTimeout(refresh, 10000);
 }
 
+setupTheme();
 refresh();

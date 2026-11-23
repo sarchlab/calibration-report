@@ -64,7 +64,7 @@ function summaryPoint(chart, x, y, color) {
 function referenceLine(chart, x0, y0, x1, y1) {
   const {ctx, x, y} = chart;
   ctx.save();
-  ctx.strokeStyle = '#69808a';
+  ctx.strokeStyle = chartTheme.reference;
   ctx.setLineDash([4, 3]);
   ctx.beginPath();
   ctx.moveTo(x(x0), y(y0));
@@ -101,7 +101,7 @@ function absoluteErrorCDF(pairs) {
     {log}
   );
   const {ctx, x, y} = chart;
-  ctx.strokeStyle = palette[0];
+  ctx.strokeStyle = chartTheme.palette[0];
   ctx.lineWidth = 1.7;
   ctx.beginPath();
   ctx.moveTo(x(left), y(0));
@@ -246,6 +246,7 @@ function renderSummary(pairs, scope, groups) {
     }));
   }
 
+  const {palette} = chartTheme;
   const colors = new Map();
   for (const pair of pairs) {
     if (!colors.has(pair.id)) {

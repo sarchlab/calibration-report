@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>Calibration report</title>
   <link rel="stylesheet" href="./report.css">
   <script src="./summary.js" defer></script>
@@ -18,7 +19,16 @@
           <span id="live-badge" class="live-badge" hidden><span class="live-dot" aria-hidden="true"></span>Live</span>
           <span id="stamp" class="muted" aria-live="polite"></span>
         </div>
-        <a class="report-data-link" href="./data.json">Results JSON</a>
+        <div class="report-actions">
+          <label class="theme-control">Theme
+            <select id="theme">
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
+          <a class="report-data-link" href="./data.json">Results JSON</a>
+        </div>
       </div>
     </header>
     <section id="progress" class="progress" aria-label="Run progress" hidden></section>
