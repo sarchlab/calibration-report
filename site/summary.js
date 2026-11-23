@@ -281,6 +281,7 @@ function renderSummary(pairs, scope, groups) {
   }
   charts.append(signed, cdf, scatter);
   const heading = scope === null ? 'Overview · Accuracy summary' : groups[scope].name + ' accuracy summary';
-  section.append(el('h2', '', heading),
-    el('p', 'summary-note', pairs.length.toLocaleString() + ' paired measurements'), legend, charts);
+  const context = el('div', 'summary-context');
+  context.append(el('p', 'summary-note', pairs.length.toLocaleString() + ' paired measurements'), legend);
+  section.append(el('h2', '', heading), context, charts);
 }

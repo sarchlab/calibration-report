@@ -331,8 +331,9 @@ function liveProgressBar(progress) {
     if (state === 'failed') item.title = 'Includes timeouts and unavailable configurations';
     legend.append(item);
   }
-  container.append(el('p', 'progress-caption', 'Run progress · ' + progress.total.toLocaleString() + ' points'),
-    bar, legend);
+  const caption = el('div', 'progress-caption');
+  caption.append(el('h2', '', 'Run progress'), el('span', '', progress.total.toLocaleString() + ' points'));
+  container.append(caption, bar, legend);
   if (progress.started_at) {
     container.append(el('p', 'progress-started', 'Started ' + new Date(progress.started_at).toLocaleString()));
   }
