@@ -51,8 +51,14 @@ button[aria-pressed="true"] { color: #fff; background: #247480; border-color: #2
 .charts { display: grid; gap: 14px; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; margin-top: 18px; }
 .card { background: #fff; border: 1px solid #d7e1e4; border-radius: 9px; padding: 15px; min-width: 0; }
 .chart h2 { font-size: 16px; margin: 0 0 12px; overflow-wrap: anywhere; }
-.series { margin: 14px 0 0; padding-top: 10px; border-top: 1px solid #e5ecee; }
-.series h3 { margin: 0; font-size: 12px; color: #526a75; overflow-wrap: anywhere; }
+.benchmark-error { margin-bottom: 14px; }
+.benchmark-error p { margin: 0; color: #526a75; font-size: 12px; font-weight: 650; }
+.benchmark-error .stats { margin-top: 4px; }
+.series { margin: 14px 0 0; border: 1px solid #d7e1e4; border-radius: 7px; }
+.series h3 { margin: 0; padding: 8px 9px; border-radius: 6px 6px 0 0; border-bottom: 1px solid #e5ecee; background: #f5f7f7; font-size: 12px; color: #374e59; overflow-wrap: anywhere; }
+.series-plot { padding: 0 8px 8px; }
+.series-plot + .series-plot { border-top: 1px solid #d7e1e4; }
+.series-plot .plot-details .stats { padding: 6px 7px; border: 0; border-radius: 4px; background: #edf3f3; }
 .plot { margin-top: 6px; }
 .scale-controls { display: flex; justify-content: flex-end; gap: 5px; }
 .scale-controls button { font-size: 11px; padding: 2px 6px; }
