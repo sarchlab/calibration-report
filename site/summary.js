@@ -26,19 +26,12 @@ function comparisonPairs(rows, benchmarks) {
   return pairs.filter(p => Number.isFinite(p.signedError));
 }
 
-function errorSummary(pairs, className = '') {
-  if (!pairs.length) return document.createDocumentFragment();
+function errorStats(pairs) {
+  if (!pairs.length) return [];
   const errors = pairs.map(pair => Math.abs(pair.signedError));
   const mean = errors.reduce((total, error) => total + error, 0) / errors.length;
   const max = Math.max(...errors);
-  const stats = el('dl', 'error-summary ' + className);
-  stats.title = 'Based on ' + errors.length.toLocaleString() + ' paired measurements';
-  for (const [label, value] of [['Average error', mean], ['Max error', max]]) {
-    const item = el('div');
-    item.append(el('dt', '', label), el('dd', '', value.toFixed(2) + '%'));
-    stats.append(item);
-  }
-  return stats;
+  return [['Average error', mean.toFixed(2) + '%'], ['Max error', max.toFixed(2) + '%']];
 }
 
 function summaryAxes(title, xLabel, yLabel, xRange, yRange, xOptions = {}, yOptions = {}) {
@@ -129,8 +122,11 @@ function absoluteErrorCDF(pairs) {
   const nearestRank = p => errors[Math.ceil(p * errors.length) - 1].toPrecision(3) + '%';
   return [
     chart.canvas,
-    el('p', 'summary-note', 'P50 ' + nearestRank(0.5) + ' · P90 ' + nearestRank(0.9)),
-    el('p', 'summary-note', '|simulated − measured| / min(simulated, measured)')
+    plotDetails(
+      [el('p', '', '|simulated − measured| / min(simulated, measured)')],
+      [['P50', nearestRank(0.5)], ['P90', nearestRank(0.9)], ...errorStats(pairs)],
+      pairs.length
+    )
   ];
 }
 
@@ -184,24 +180,17 @@ function rankStatistics(pairs) {
   };
 }
 
-function rankingDescription(pairs) {
+function rankingStats(pairs) {
   const stats = rankStatistics(pairs);
-  const description = el('div', 'rank-stats');
   const probability = stats.measuredUnequal
     ? (100 * stats.concordant / stats.measuredUnequal).toFixed(2) + '% (' +
       stats.concordant.toLocaleString() + '/' + stats.measuredUnequal.toLocaleString() + ')'
     : '—';
-  for (const [label, value] of [
+  return [
     ['Kendall’s τ-b', stats.tau?.toFixed(4) ?? '—'],
     ['Pairwise ordering accuracy', probability],
     ['Spearman’s ρ', stats.rho?.toFixed(4) ?? '—'],
-  ]) {
-    const item = el('p', 'summary-note');
-    item.append(el('strong', '', label), document.createTextNode(' ' + value));
-    description.append(item);
-  }
-  description.append(el('p', 'summary-note', 'Pairwise accuracy uses pairs with distinct measured values.'));
-  return description;
+  ];
 }
 
 function comparisonScatter(pairs, unit, colors, log) {
@@ -242,7 +231,10 @@ function scatterWithScale(key, pairs, unit, colors) {
     canvas = next;
   });
   controls.append(button);
-  plot.append(controls, canvas, rankingDescription(pairs));
+  plot.append(controls, canvas, plotDetails([
+    el('p', '', 'Dashed line indicates equal values.'),
+    el('p', '', 'Pairwise accuracy uses pairs with distinct measured values.'),
+  ], [...rankingStats(pairs), ...errorStats(pairs)], pairs.length));
   return plot;
 }
 
@@ -277,16 +269,16 @@ function renderSummary(pairs, scope, groups) {
   const charts = el('div', 'charts summary-charts');
   const signed = el('figure', 'card');
   signed.append(el('figcaption', '', 'S-curve'), rankedErrors(pairs, colors),
-    errorSummary(pairs), el('p', 'summary-note', 'Negative values are underestimates. Positive values are overestimates.'));
+    plotDetails([el('p', '', 'Negative values are underestimates. Positive values are overestimates.')],
+      errorStats(pairs), pairs.length));
   const cdf = el('figure', 'card');
-  cdf.append(el('figcaption', '', 'Absolute error distribution (CDF)'), ...absoluteErrorCDF(pairs), errorSummary(pairs));
+  cdf.append(el('figcaption', '', 'Absolute error distribution (CDF)'), ...absoluteErrorCDF(pairs));
   const scatter = el('figure', 'card');
   scatter.append(el('figcaption', '', 'Measured vs. simulated'));
   for (const [unit, values] of Map.groupBy(pairs, pair => pair.unit)) {
     const key = JSON.stringify([scope, unit]);
-    scatter.append(scatterWithScale(key, values, unit, colors), errorSummary(values));
+    scatter.append(scatterWithScale(key, values, unit, colors));
   }
-  scatter.append(el('p', 'summary-note', 'Dashed line indicates equal values.'));
   charts.append(signed, cdf, scatter);
   const heading = scope === null ? 'Overview · Accuracy summary' : groups[scope].name + ' accuracy summary';
   section.append(el('h2', '', heading),

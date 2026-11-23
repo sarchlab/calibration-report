@@ -244,9 +244,29 @@ function parameterLabel(params, metadata) {
   }).join(' · ') || 'Default parameters';
 }
 
+function renderStats(entries, pairedCount) {
+  if (!entries.length) return document.createDocumentFragment();
+  const stats = el('dl', 'stats');
+  stats.title = 'Based on ' + pairedCount.toLocaleString() + ' paired measurements';
+  for (const [name, value] of entries) {
+    const item = el('div');
+    item.append(el('dt', '', name), el('dd', '', value));
+    stats.append(item);
+  }
+  return stats;
+}
+
+function plotDetails(description, entries, pairedCount) {
+  const footer = el('footer', 'plot-details');
+  const notes = el('div', 'description');
+  notes.append(...description);
+  footer.append(notes, renderStats(entries, pairedCount));
+  return footer;
+}
+
 function plotBenchmark(id, rows, meta, pairs) {
   const card = el('article', 'chart card');
-  card.append(el('h2', '', displayName(id)), errorSummary(pairs, 'benchmark-errors'));
+  card.append(el('h2', '', displayName(id)), renderStats(errorStats(pairs), pairs.length));
   const fixed = Map.groupBy(rows, row => JSON.stringify(Object.entries(row.non_scaling_params).sort()));
   const curves = Object.entries(meta.values).map(([id, info], i) => {
     const style = roleStyles.get(info.role) ?? {color: palette[i % palette.length], layer: 1};
@@ -276,7 +296,10 @@ function plotBenchmark(id, rows, meta, pairs) {
       const measured = group.filter(row => active.some(curve => Number.isFinite(row.values[curve.id])));
       const key = JSON.stringify([rows[0].group, id, parameters, unit]);
       const plotPairs = groupPairs.filter(pair => pair.unit === unit);
-      section.append(chartWithScales(key, measured, active, xLabel, unit), legend, errorSummary(plotPairs, 'plot-errors'));
+      section.append(
+        chartWithScales(key, measured, active, xLabel, unit),
+        plotDetails([legend], errorStats(plotPairs), plotPairs.length)
+      );
     }
     card.append(section);
   }
