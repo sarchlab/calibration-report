@@ -1,4 +1,8 @@
 {
+  "report": {
+    "title": "MGPUSim calibration",
+    "description": "Hardware and simulator kernel times for matching benchmark configurations."
+  },
   "groups": {
     "mi300x": {"name": "AMD MI300X"}
   },

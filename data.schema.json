@@ -5,6 +5,15 @@
   "required": ["groups", "benchmarks", "points"],
   "additionalProperties": false,
   "properties": {
+    "report": {
+      "type": "object",
+      "required": ["title", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "description": {"type": "string"}
+      }
+    },
     "groups": {
       "type": "object",
       "minProperties": 1,

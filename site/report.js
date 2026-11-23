@@ -198,15 +198,28 @@ function plotBenchmark(id, rows, meta) {
 function render(data) {
   const measured = data.points.filter(point => Object.values(point.values).some(Number.isFinite));
   const groups = [...new Set(measured.map(point => point.group))];
-  if (!groups.includes(selectedGroup)) selectedGroup = groups[0];
-  const groupName = data.groups[selectedGroup]?.name;
-  document.querySelector('#title').textContent = groupName ? groupName + ' calibration' : 'Calibration report';
+  const pairs = comparisonPairs(measured, data.benchmarks);
+  const hasOverview = pairs.length > 0;
+  if (!(selectedGroup === null && hasOverview) && !groups.includes(selectedGroup)) {
+    selectedGroup = hasOverview ? null : groups[0];
+  }
+
+  const title = data.report?.title ?? 'Calibration report';
+  const description = document.querySelector('#description');
+  document.title = title;
+  document.querySelector('#title').textContent = title;
+  description.textContent = data.report?.description ?? '';
+  description.hidden = !description.textContent;
+
   const tabs = document.querySelector('#groups');
-  tabs.hidden = groups.length < 2;
+  const views = groups.map(id => ({id, name: data.groups[id].name}));
+  if (hasOverview) views.unshift({id: null, name: 'Overview'});
+  tabs.hidden = views.length < 2;
   tabs.replaceChildren();
-  if (groups.length > 1) {
-    for (const id of groups) {
-      const button = el('button', '', data.groups[id].name);
+  if (!tabs.hidden) {
+    for (const {id, name} of views) {
+      const button = el('button', '', name);
+      button.type = 'button';
       button.setAttribute('aria-pressed', String(id === selectedGroup));
       button.addEventListener('click', () => {
         selectedGroup = id;
@@ -217,9 +230,12 @@ function render(data) {
     }
   }
 
-  const rows = measured.filter(point => point.group === selectedGroup);
-  renderSummary(rows, data.benchmarks);
+  const groupPairs = selectedGroup === null ? pairs : pairs.filter(pair => pair.group === selectedGroup);
+  renderSummary(groupPairs, selectedGroup, data.groups);
   const list = document.querySelector('#charts');
+  list.replaceChildren();
+  if (selectedGroup === null) return;
+  const rows = measured.filter(point => point.group === selectedGroup);
   const byBenchmark = Map.groupBy(rows, row => row.benchmark);
   list.replaceChildren(...Array.from(byBenchmark, ([id, points]) => plotBenchmark(id, points, data.benchmarks[id])));
 }

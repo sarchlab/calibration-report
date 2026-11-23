@@ -12,6 +12,7 @@ function comparisonPairs(rows, benchmarks) {
       const prediction = point.values[id];
       if (!Number.isFinite(actual) || actual <= 0 || !Number.isFinite(prediction) || prediction <= 0) continue;
       pairs.push({
+        group: point.group,
         actual,
         prediction,
         signedError: 100 * (prediction - actual) / Math.min(prediction, actual),
@@ -247,12 +248,19 @@ function scatterWithScale(key, pairs, unit, colors) {
   return plot;
 }
 
-function renderSummary(rows, benchmarks) {
+function renderSummary(pairs, scope, groups) {
   const section = document.querySelector('#summary');
   section.replaceChildren();
-  const pairs = comparisonPairs(rows, benchmarks);
   section.hidden = !pairs.length;
   if (!pairs.length) return;
+  if (scope === null && new Set(pairs.map(pair => pair.group)).size > 1) {
+    pairs = pairs.map(pair => ({
+      ...pair,
+      id: JSON.stringify([pair.group, pair.id]),
+      name: groups[pair.group].name + ' · ' + pair.name,
+    }));
+  }
+
   const colors = new Map();
   for (const pair of pairs) {
     if (!colors.has(pair.id)) {
@@ -277,11 +285,12 @@ function renderSummary(rows, benchmarks) {
   const scatter = el('figure', 'card');
   scatter.append(el('figcaption', '', 'Measured vs. simulated'));
   for (const [unit, values] of Map.groupBy(pairs, pair => pair.unit)) {
-    const key = JSON.stringify([rows[0].group, unit]);
+    const key = JSON.stringify([scope, unit]);
     scatter.append(scatterWithScale(key, values, unit, colors));
   }
   scatter.append(el('p', 'summary-note', 'Dashed line indicates equal values.'));
   charts.append(signed, cdf, scatter);
-  section.append(el('h2', '', 'Accuracy summary'),
+  const heading = scope === null ? 'Overview · Accuracy summary' : groups[scope].name + ' accuracy summary';
+  section.append(el('h2', '', heading),
     el('p', 'summary-note', pairs.length.toLocaleString() + ' paired measurements'), legend, charts);
 }
