@@ -23,7 +23,7 @@ Within a tab, the renderer makes one plot for each benchmark and non-scaling par
 
 ## Accuracy summary
 
-The active group includes a ranked simulator-to-hardware ratio plot, a cumulative distribution of absolute relative error, and a measured-versus-simulated scatter plot. A comparison requires two positive measurements at the same point and one declared hardware series with the same unit as the simulator series. Ambiguous hardware references are omitted. The absolute error uses the Poros convention, `abs(simulated - measured) / min(simulated, measured)`.
+The active group includes a ranked signed-error plot, a cumulative distribution of absolute relative error, and a measured-versus-simulated scatter plot. A comparison requires two positive measurements at the same point and one declared hardware series with the same unit as the simulator series. Ambiguous hardware references are omitted. The S-curve uses signed error, `(simulated - measured) / min(simulated, measured)`. The CDF takes the absolute value of the same error.
 
 ## Hosting
 

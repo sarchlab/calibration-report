@@ -14,15 +14,14 @@ function comparisonPairs(rows, benchmarks) {
       pairs.push({
         actual,
         prediction,
-        ratio: Math.log2(prediction) - Math.log2(actual),
-        error: 100 * Math.abs(prediction - actual) / Math.min(prediction, actual),
+        signedError: 100 * (prediction - actual) / Math.min(prediction, actual),
         unit: simulated.unit,
         id: JSON.stringify([reference, id]),
         name: simulated.name + ' vs. ' + measured.name,
       });
     }
   }
-  return pairs.filter(p => Number.isFinite(p.error));
+  return pairs.filter(p => Number.isFinite(p.signedError));
 }
 
 function summaryAxes(title, xLabel, yLabel, xRange, yRange, xTick, yTick) {
@@ -83,24 +82,24 @@ function referenceLine(chart, x0, y0, x1, y1) {
   ctx.restore();
 }
 
-function rankedRatios(pairs, colors) {
-  const ranked = [...pairs].sort((a, b) => a.ratio - b.ratio);
+function rankedErrors(pairs, colors) {
+  const ranked = [...pairs].sort((a, b) => a.signedError - b.signedError);
   const end = Math.max(2, ranked.length);
-  const minimum = Math.min(0, ranked[0].ratio);
-  const maximum = Math.max(0, ranked[ranked.length - 1].ratio);
+  const minimum = Math.min(0, ranked[0].signedError);
+  const maximum = Math.max(0, ranked[ranked.length - 1].signedError);
   const margin = Math.max(0.2, (maximum - minimum) * 0.06);
   const chart = summaryAxes(
-    'S-curve of predicted time relative to measured time',
-    'Case rank', 'Simulated / measured (log₂)', [1, end], [minimum - margin, maximum + margin],
-    n => Math.round(n).toLocaleString(), n => (2 ** n).toPrecision(2) + '×'
+    'S-curve of signed relative error',
+    'Case rank', 'Signed error (%)', [1, end], [minimum - margin, maximum + margin],
+    n => Math.round(n).toLocaleString(), n => (n > 0 ? '+' : '') + Number(n.toPrecision(2)) + '%'
   );
   referenceLine(chart, 1, 0, end, 0);
-  ranked.forEach((pair, i) => summaryPoint(chart, i + 1, pair.ratio, colors.get(pair.id).color));
+  ranked.forEach((pair, i) => summaryPoint(chart, i + 1, pair.signedError, colors.get(pair.id).color));
   return chart.canvas;
 }
 
 function absoluteErrorCDF(pairs) {
-  const errors = pairs.map(pair => pair.error).sort((a, b) => a - b);
+  const errors = pairs.map(pair => Math.abs(pair.signedError)).sort((a, b) => a - b);
   const smallestPositive = errors.find(x => x > 0);
   const left = smallestPositive === undefined ? -3 : Math.floor(Math.log10(smallestPositive)) - 1;
   const right = smallestPositive === undefined ? 0 : Math.max(left + 1, Math.ceil(Math.log10(errors[errors.length - 1])) + 0.1);
@@ -168,9 +167,9 @@ function renderSummary(rows, benchmarks) {
     legend.append(item);
   }
   const charts = el('div', 'charts summary-charts');
-  const ratio = el('figure', 'card');
-  ratio.append(el('figcaption', '', 'S-curve'), rankedRatios(pairs, colors),
-    el('p', 'summary-note', 'Ratios below 1× are underestimates.'));
+  const signed = el('figure', 'card');
+  signed.append(el('figcaption', '', 'S-curve'), rankedErrors(pairs, colors),
+    el('p', 'summary-note', 'Negative values are underestimates. Positive values are overestimates.'));
   const cdf = el('figure', 'card');
   cdf.append(el('figcaption', '', 'Absolute error distribution (CDF)'), ...absoluteErrorCDF(pairs));
   const scatter = el('figure', 'card');
@@ -179,7 +178,7 @@ function renderSummary(rows, benchmarks) {
     scatter.append(comparisonScatter(values, unit, colors));
   }
   scatter.append(el('p', 'summary-note', 'Dashed line indicates equal values.'));
-  charts.append(ratio, cdf, scatter);
+  charts.append(signed, cdf, scatter);
   section.append(el('h2', '', 'Accuracy summary'),
     el('p', 'summary-note', pairs.length.toLocaleString() + ' paired measurements'), legend, charts);
 }
