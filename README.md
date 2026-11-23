@@ -28,7 +28,7 @@ The Overview aggregates the qualified comparisons from all groups. Each group sh
 
 The scatter plot can switch both axes to logarithmic scale. It reports Kendall’s tau-b, pairwise ordering accuracy among pairs with distinct measured values, and Spearman’s rho using average ranks for ties.
 
-Plots default to a log axis when the values are positive, span at least one decade, and a log transform meaningfully spreads out the middle half of the distinct values. Otherwise the axis is linear. Manual scale selections are kept during live refreshes. The scatter plot applies the same scale to both axes.
+For a positive axis with at least three distinct values, the default scale minimizes the variance of adjacent gaps after normalizing the axis to the same span. Ties and axes with nonpositive values use a linear scale. Manual scale selections are kept during live refreshes. The scatter plot applies the same scale to both axes.
 
 ## Hosting
 

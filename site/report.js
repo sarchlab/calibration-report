@@ -30,20 +30,22 @@ function displayUnit(unit) {
 function preferLogScale(values) {
   const sorted = [...new Set(values.filter(Number.isFinite))].sort((a, b) => a - b);
   if (sorted.length < 3 || sorted[0] <= 0) return false;
-  const logValues = sorted.map(Math.log10);
-  if (logValues.at(-1) - logValues[0] < 1) return false;
 
-  function middleWidth(points) {
-    function quantile(fraction) {
-      const index = fraction * (points.length - 1);
-      const low = Math.floor(index);
-      return points[low] + (index - low) * (points[Math.ceil(index)] - points[low]);
+  function spacingVariance(points) {
+    const span = points.at(-1) - points[0];
+    if (span === 0) return Infinity;
+    const meanGap = 1 / (points.length - 1);
+    let squaredDeviation = 0;
+    for (let i = 1; i < points.length; i++) {
+      const gap = (points[i] - points[i - 1]) / span;
+      squaredDeviation += (gap - meanGap) ** 2;
     }
-    return (quantile(0.75) - quantile(0.25)) / (points.at(-1) - points[0]);
+    return squaredDeviation / (points.length - 1);
   }
-  const linearWidth = middleWidth(sorted);
-  const logWidth = middleWidth(logValues);
-  return linearWidth < 0.35 && logWidth >= 0.2 && logWidth - linearWidth >= 0.1;
+
+  const linear = spacingVariance(sorted);
+  const log = spacingVariance(sorted.map(Math.log10));
+  return log + 1e-12 < linear;
 }
 
 function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
