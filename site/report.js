@@ -165,9 +165,9 @@ function parameterLabel(params, metadata) {
   }).join(' · ') || 'Default parameters';
 }
 
-function plotBenchmark(id, rows, meta) {
+function plotBenchmark(id, rows, meta, pairs) {
   const card = el('article', 'chart card');
-  card.append(el('h2', '', displayName(id)));
+  card.append(el('h2', '', displayName(id)), errorSummary(pairs, 'benchmark-errors'));
   const fixed = Map.groupBy(rows, row => JSON.stringify(Object.entries(row.non_scaling_params).sort()));
   const curves = Object.entries(meta.values).map(([id, info], i) => {
     const style = roleStyles.get(info.role) ?? {color: palette[i % palette.length], layer: 1};
@@ -179,6 +179,8 @@ function plotBenchmark(id, rows, meta) {
 
   for (const [parameters, group] of fixed) {
     group.sort((a, b) => a.x - b.x);
+    const groupPoints = new Set(group);
+    const groupPairs = pairs.filter(pair => groupPoints.has(pair.point));
     const section = el('section', 'series');
     section.append(el('h3', '', parameterLabel(group[0].non_scaling_params, meta.params)));
     for (const [unit, comparable] of units) {
@@ -194,7 +196,8 @@ function plotBenchmark(id, rows, meta) {
       }
       const measured = group.filter(row => active.some(curve => Number.isFinite(row.values[curve.id])));
       const key = JSON.stringify([rows[0].group, id, parameters, unit]);
-      section.append(chartWithScales(key, measured, active, xLabel, unit), legend);
+      const plotPairs = groupPairs.filter(pair => pair.unit === unit);
+      section.append(chartWithScales(key, measured, active, xLabel, unit), legend, errorSummary(plotPairs, 'plot-errors'));
     }
     card.append(section);
   }
@@ -264,7 +267,9 @@ function renderCharts(report, benchmarks, data) {
   if (selectedGroup === null) return;
   const rows = measured.filter(point => point.group === selectedGroup);
   const byBenchmark = Map.groupBy(rows, row => row.benchmark);
-  list.replaceChildren(...Array.from(byBenchmark, ([id, points]) => plotBenchmark(id, points, benchmarks[id])));
+  const pairsByBenchmark = Map.groupBy(groupPairs, pair => pair.point.benchmark);
+  list.replaceChildren(...Array.from(byBenchmark, ([id, points]) =>
+    plotBenchmark(id, points, benchmarks[id], pairsByBenchmark.get(id) ?? [])));
 }
 
 let live = false;

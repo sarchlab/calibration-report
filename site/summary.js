@@ -12,6 +12,7 @@ function comparisonPairs(rows, benchmarks) {
       const prediction = point.values[id];
       if (!Number.isFinite(actual) || actual <= 0 || !Number.isFinite(prediction) || prediction <= 0) continue;
       pairs.push({
+        point,
         group: point.group,
         actual,
         prediction,
@@ -23,6 +24,21 @@ function comparisonPairs(rows, benchmarks) {
     }
   }
   return pairs.filter(p => Number.isFinite(p.signedError));
+}
+
+function errorSummary(pairs, className = '') {
+  if (!pairs.length) return document.createDocumentFragment();
+  const errors = pairs.map(pair => Math.abs(pair.signedError));
+  const mean = errors.reduce((total, error) => total + error, 0) / errors.length;
+  const max = Math.max(...errors);
+  const stats = el('dl', 'error-summary ' + className);
+  stats.title = 'Based on ' + errors.length.toLocaleString() + ' paired measurements';
+  for (const [label, value] of [['Average error', mean], ['Max error', max]]) {
+    const item = el('div');
+    item.append(el('dt', '', label), el('dd', '', value.toFixed(2) + '%'));
+    stats.append(item);
+  }
+  return stats;
 }
 
 function summaryAxes(title, xLabel, yLabel, xRange, yRange, xTick, yTick) {
@@ -279,14 +295,14 @@ function renderSummary(pairs, scope, groups) {
   const charts = el('div', 'charts summary-charts');
   const signed = el('figure', 'card');
   signed.append(el('figcaption', '', 'S-curve'), rankedErrors(pairs, colors),
-    el('p', 'summary-note', 'Negative values are underestimates. Positive values are overestimates.'));
+    errorSummary(pairs), el('p', 'summary-note', 'Negative values are underestimates. Positive values are overestimates.'));
   const cdf = el('figure', 'card');
-  cdf.append(el('figcaption', '', 'Absolute error distribution (CDF)'), ...absoluteErrorCDF(pairs));
+  cdf.append(el('figcaption', '', 'Absolute error distribution (CDF)'), ...absoluteErrorCDF(pairs), errorSummary(pairs));
   const scatter = el('figure', 'card');
   scatter.append(el('figcaption', '', 'Measured vs. simulated'));
   for (const [unit, values] of Map.groupBy(pairs, pair => pair.unit)) {
     const key = JSON.stringify([scope, unit]);
-    scatter.append(scatterWithScale(key, values, unit, colors));
+    scatter.append(scatterWithScale(key, values, unit, colors), errorSummary(values));
   }
   scatter.append(el('p', 'summary-note', 'Dashed line indicates equal values.'));
   charts.append(signed, cdf, scatter);
