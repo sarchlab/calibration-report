@@ -196,31 +196,78 @@ function preferLogScale(values) {
   return log + 1e-12 < linear;
 }
 
+const visibleStates = new Map([
+  ['failed', 'Failed'],
+  ['timeout', 'Timed out'],
+  ['memory_limit', 'Memory limit'],
+  ['unsupported', 'Unsupported'],
+]);
+
+function isMarked(row, id) {
+  return !Number.isFinite(row.values[id]) && visibleStates.has(row.statuses?.[id]?.state);
+}
+
+function drawStatusMarkers(rows, series, xLabel, xPosition) {
+  const markers = el('div', 'plot-statuses');
+  const track = el('div', 'plot-status-track');
+  track.setAttribute('role', 'group');
+  track.setAttribute('aria-label', 'Unavailable results');
+  const detail = el('p', 'plot-status-detail');
+  detail.setAttribute('aria-live', 'polite');
+  detail.hidden = true;
+  for (const row of rows) {
+    const messages = series.filter(curve => isMarked(row, curve.id)).map(curve => {
+      const {state, reason} = row.statuses[curve.id];
+      return curve.name + ' · ' + visibleStates.get(state) + (reason ? ' · ' + reason : '');
+    });
+    if (!messages.length) continue;
+    const message = [xLabel + ' = ' + row.x, ...messages].join('\n');
+    const marker = el('button', 'plot-status-marker', '×');
+    marker.type = 'button';
+    marker.style.left = (100 * xPosition(row.x)) + '%';
+    marker.title = message;
+    marker.setAttribute('aria-label', message);
+    marker.addEventListener('click', () => {
+      detail.hidden = false;
+      detail.textContent = message;
+    });
+    track.append(marker);
+  }
+  if (!track.childElementCount) return null;
+  markers.append(track, detail);
+  return markers;
+}
+
 function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
   const canvas = el('canvas', 'curve');
   canvas.width = 640;
-  canvas.height = 318;
+  canvas.height = bounds ? 318 : 70;
   canvas.setAttribute('role', 'img');
   const xScale = scales.x ? 'logarithmic' : 'linear';
   const yScale = scales.y ? 'logarithmic' : 'linear';
-  canvas.setAttribute('aria-label', 'Comparison by ' + xLabel + ', ' + xScale + ' X axis, ' + yScale + ' Y axis');
+  canvas.setAttribute('aria-label', bounds ? 'Comparison by ' + xLabel + ', ' + xScale + ' X axis, ' +
+    yScale + ' Y axis' : 'Unavailable results by ' + xLabel);
   const ctx = canvas.getContext('2d');
   ctx.scale(2, 2);
-  const frame = {left: 53, right: 305, top: 8, bottom: 124};
+  const frame = {left: 53, right: 305, top: 8, bottom: bounds ? 124 : 8};
   const {left, right, top, bottom} = frame;
   ctx.font = '10px system-ui';
   ctx.fillStyle = chartTheme.label;
-  const transformY = scales.y ? Math.log10 : n => n;
-  const inverseY = scales.y ? n => 10 ** n : n => n;
-  let min = transformY(bounds.min), max = transformY(bounds.max);
-  const span = Math.max(max - min, Math.abs(max) * 0.02) || 0.001;
-  min -= span * 0.12;
-  max += span * 0.12;
   const xAxis = numericAxis([rows[0].x, rows.at(-1).x], [left, right], {log: scales.x, count: 6});
-  const yAxis = numericAxis([inverseY(min), inverseY(max)], [bottom, top], {log: scales.y, unit});
+  let yAxis = {ticks: []};
+  let yLabel = '';
+  if (bounds) {
+    const transformY = scales.y ? Math.log10 : n => n;
+    const inverseY = scales.y ? n => 10 ** n : n => n;
+    let min = transformY(bounds.min), max = transformY(bounds.max);
+    const span = Math.max(max - min, Math.abs(max) * 0.02) || 0.001;
+    min -= span * 0.12;
+    max += span * 0.12;
+    yAxis = numericAxis([inverseY(min), inverseY(max)], [bottom, top], {log: scales.y, unit});
+    yLabel = [displayUnit(unit), scales.y ? 'log' : ''].filter(Boolean).join(' · ');
+  }
   drawAxisTicks(ctx, xAxis, yAxis, frame);
-  const yLabel = [displayUnit(unit), scales.y ? 'log' : ''].filter(Boolean).join(' · ');
-  drawAxisTitles(ctx, xLabel + (scales.x ? ' · log' : ''), yLabel, frame, 153);
+  drawAxisTitles(ctx, xLabel + (scales.x ? ' · log' : ''), yLabel, frame, bottom + (bounds ? 29 : 25));
   const x = index => xAxis.position(rows[index].x);
   const y = yAxis.position;
 
@@ -248,13 +295,13 @@ function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
       ctx.fill();
     });
   }
-  return canvas;
+  return {canvas, xPosition: value => xAxis.position(value) / (canvas.width / 2)};
 }
 
-function chartWithScales(key, rows, curves, xLabel, unit) {
+function chartWithScales(key, rows, curves, series, xLabel, unit) {
   const measures = curves.flatMap(curve => rows.map(row => row.values[curve.id])).filter(Number.isFinite);
-  const bounds = {min: Math.min(...measures), max: Math.max(...measures)};
-  const canLog = {x: rows[0].x > 0, y: bounds.min > 0};
+  const bounds = measures.length ? {min: Math.min(...measures), max: Math.max(...measures)} : null;
+  const canLog = {x: rows[0].x > 0, y: bounds !== null && bounds.min > 0};
   const preferences = scalePreferences.get(key) ?? {};
   const scales = {
     x: canLog.x && (preferences.x ?? preferLogScale(rows.map(row => row.x))),
@@ -265,7 +312,14 @@ function chartWithScales(key, rows, curves, xLabel, unit) {
   const controls = el('div', 'scale-controls');
   controls.setAttribute('role', 'group');
   controls.setAttribute('aria-label', 'Axis scales');
-  let canvas = drawCurve(rows, curves, xLabel, unit, bounds, scales);
+  const figure = el('div', 'plot-figure');
+  function redrawPlot() {
+    const {canvas, xPosition} = drawCurve(rows, curves, xLabel, unit, bounds, scales);
+    const markers = drawStatusMarkers(rows, series, xLabel, xPosition);
+    figure.replaceChildren(canvas);
+    if (markers) figure.append(markers);
+  }
+  redrawPlot();
   for (const axis of ['x', 'y']) {
     const label = axis.toUpperCase() + ' log';
     const button = el('button', '', label);
@@ -278,13 +332,11 @@ function chartWithScales(key, rows, curves, xLabel, unit) {
       preferences[axis] = scales[axis];
       scalePreferences.set(key, preferences);
       button.setAttribute('aria-pressed', String(scales[axis]));
-      const next = drawCurve(rows, curves, xLabel, unit, bounds, scales);
-      canvas.replaceWith(next);
-      canvas = next;
+      redrawPlot();
     });
     controls.append(button);
   }
-  plot.append(controls, canvas);
+  plot.append(controls, figure);
   return plot;
 }
 
@@ -341,7 +393,9 @@ function plotBenchmark(id, rows, meta, pairs) {
     section.append(el('h3', '', parameterLabel(group[0].non_scaling_params, meta.params)));
     for (const [unit, comparable] of units) {
       const active = comparable.filter(curve => group.some(row => Number.isFinite(row.values[curve.id])));
-      if (!active.length) continue;
+      const plotted = group.filter(row => comparable.some(curve =>
+        Number.isFinite(row.values[curve.id]) || isMarked(row, curve.id)));
+      if (!plotted.length) continue;
       const legend = el('div', 'legend');
       for (const curve of active) {
         const label = el('span');
@@ -350,12 +404,11 @@ function plotBenchmark(id, rows, meta, pairs) {
         label.append(swatch, document.createTextNode(curve.name));
         legend.append(label);
       }
-      const measured = group.filter(row => active.some(curve => Number.isFinite(row.values[curve.id])));
       const key = JSON.stringify([rows[0].group, id, parameters, unit]);
       const plotPairs = groupPairs.filter(pair => pair.unit === unit);
       const plot = el('div', 'series-plot');
       plot.append(
-        chartWithScales(key, measured, active, xLabel, unit),
+        chartWithScales(key, plotted, active, comparable, xLabel, unit),
         plotDetails([legend], errorStats(plotPairs), plotPairs.length)
       );
       section.append(plot);
@@ -432,7 +485,8 @@ function renderHeader(report, progress) {
 }
 
 function renderCharts(report, benchmarks, data) {
-  const measured = data.filter(point => Object.values(point.values).some(Number.isFinite));
+  const measured = data.filter(point => Object.values(point.values).some(Number.isFinite) ||
+    Object.keys(point.statuses ?? {}).some(id => isMarked(point, id)));
   const groups = [...new Set(measured.map(point => point.group))];
   const pairs = comparisonPairs(measured, benchmarks);
   const hasOverview = pairs.length > 0;

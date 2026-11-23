@@ -113,7 +113,21 @@
           "minProperties": 1,
           "propertyNames": {"minLength": 1},
           "additionalProperties": {"type": ["number", "null"]}
+        },
+        "statuses": {
+          "type": "object",
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"$ref": "#/$defs/valueStatus"}
         }
+      }
+    },
+    "valueStatus": {
+      "type": "object",
+      "required": ["state"],
+      "additionalProperties": false,
+      "properties": {
+        "state": {"enum": ["queued", "running", "failed", "timeout", "memory_limit", "unsupported"]},
+        "reason": {"type": "string", "minLength": 1}
       }
     }
   }

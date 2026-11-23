@@ -9,9 +9,10 @@
   },
   "progress": {
     "started_at": null,
-    "total": 1,
+    "total": 2,
     "completed": 1,
-    "running": 0
+    "running": 0,
+    "unsuccessful": 1
   },
   "benchmarks": {
     "polybench_fdtd2d": {
@@ -33,6 +34,14 @@
       "x": 64,
       "non_scaling_params": {"tmax": 10},
       "values": {"mi300x": 57889, "mgpusim": 79339}
+    },
+    {
+      "group": "mi300x",
+      "benchmark": "polybench_fdtd2d",
+      "x": 128,
+      "non_scaling_params": {"tmax": 10},
+      "values": {"mi300x": 103715, "mgpusim": null},
+      "statuses": {"mgpusim": {"state": "failed", "reason": "CPU verification mismatch"}}
     }
   ]
 }
