@@ -41,7 +41,7 @@
       "x": 128,
       "non_scaling_params": {"tmax": 10},
       "values": {"mi300x": 103715, "mgpusim": null},
-      "statuses": {"mgpusim": {"state": "failed", "reason": "CPU verification mismatch"}}
+      "statuses": {"mgpusim": {"state": "verification_failed", "symbol": "⚠️", "reason": "CPU verification mismatch"}}
     }
   ]
 }

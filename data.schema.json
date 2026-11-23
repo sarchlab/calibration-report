@@ -126,8 +126,9 @@
       "required": ["state"],
       "additionalProperties": false,
       "properties": {
-        "state": {"enum": ["queued", "running", "failed", "timeout", "memory_limit", "unsupported"]},
-        "reason": {"type": "string", "minLength": 1}
+        "state": {"enum": ["queued", "running", "failed", "verification_failed", "timeout", "memory_limit", "unsupported"]},
+        "reason": {"type": "string", "minLength": 1},
+        "symbol": {"type": "string", "minLength": 1}
       }
     }
   }

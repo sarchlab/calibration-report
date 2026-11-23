@@ -197,10 +197,12 @@ function preferLogScale(values) {
 }
 
 const visibleStates = new Map([
-  ['failed', 'Failed'],
-  ['timeout', 'Timed out'],
-  ['memory_limit', 'Memory limit'],
-  ['unsupported', 'Unsupported'],
+  ['failed', {label: 'Failed', symbol: '×'}],
+  ['verification_failed', {label: 'Verification failed', symbol: '⚠️'}],
+  ['timeout', {label: 'Timed out', symbol: '⏱️'}],
+  ['memory_limit', {label: 'Memory limit', symbol: '×'}],
+  ['unsupported', {label: 'Unsupported', symbol: '×'}],
+  ['running', {label: 'Running', symbol: '▶️'}],
 ]);
 
 function isMarked(row, id) {
@@ -216,13 +218,17 @@ function drawStatusMarkers(rows, series, xLabel, xPosition, statusPosition) {
   detail.setAttribute('aria-live', 'polite');
   detail.hidden = true;
   for (const row of rows) {
-    const messages = series.filter(curve => isMarked(row, curve.id)).map(curve => {
+    const marked = series.filter(curve => isMarked(row, curve.id));
+    if (!marked.length) continue;
+    const messages = marked.map(curve => {
       const {state, reason} = row.statuses[curve.id];
-      return curve.name + ' · ' + visibleStates.get(state) + (reason ? ' · ' + reason : '');
+      return curve.name + ' · ' + visibleStates.get(state).label + (reason ? ' · ' + reason : '');
     });
-    if (!messages.length) continue;
+    const main = marked.find(curve => row.statuses[curve.id].state !== 'running') ?? marked[0];
+    const {state, symbol} = row.statuses[main.id];
     const message = [xLabel + ' = ' + row.x, ...messages].join('\n');
-    const marker = el('button', 'plot-status-marker', '×');
+    const marker = el('button', 'plot-status-marker', symbol ?? visibleStates.get(state).symbol);
+    marker.dataset.state = state;
     marker.type = 'button';
     marker.style.left = (100 * xPosition(row.x)) + '%';
     marker.title = message;

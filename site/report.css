@@ -171,5 +171,6 @@ button[aria-pressed="true"] { color: #fff; background: var(--accent); border-col
 .plot-surface { position: relative; }
 .plot-status-track { position: absolute; left: 0; right: 0; }
 .plot-status-marker { position: absolute; top: 0; transform: translate(-50%, -50%); width: 21px; height: 24px; padding: 0; border: 0; background: transparent; color: var(--failed); font-size: 14px; font-weight: 400; line-height: 1; }
+.plot-status-marker[data-state="running"] { color: var(--running); }
 .plot-status-marker:hover, .plot-status-marker:focus-visible { z-index: 1; background: var(--stat-surface); }
 .plot-status-detail { margin: 4px 0 0; padding: 6px 8px; border-radius: 4px; background: var(--stat-surface); color: var(--text); font-size: 11px; white-space: pre-line; overflow-wrap: anywhere; }
