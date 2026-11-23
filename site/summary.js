@@ -41,7 +41,7 @@ function errorSummary(pairs, className = '') {
   return stats;
 }
 
-function summaryAxes(title, xLabel, yLabel, xRange, yRange, xTick, yTick) {
+function summaryAxes(title, xLabel, yLabel, xRange, yRange, xOptions = {}, yOptions = {}) {
   const canvas = el('canvas', 'curve');
   canvas.width = 640;
   canvas.height = 372;
@@ -51,25 +51,11 @@ function summaryAxes(title, xLabel, yLabel, xRange, yRange, xTick, yTick) {
   ctx.scale(2, 2);
   ctx.font = '10px system-ui';
   const left = 51, right = 306, top = 12, bottom = 143;
-  const x = value => left + (value - xRange[0]) / (xRange[1] - xRange[0]) * (right - left);
-  const y = value => bottom - (value - yRange[0]) / (yRange[1] - yRange[0]) * (bottom - top);
-  ctx.fillStyle = '#526a75';
-  ctx.strokeStyle = '#e5ecee';
-  for (let i = 0; i <= 4; i++) {
-    const a = i / 4;
-    const px = left + a * (right - left);
-    const py = bottom - a * (bottom - top);
-    ctx.beginPath();
-    ctx.moveTo(px, top);
-    ctx.lineTo(px, bottom);
-    ctx.moveTo(left, py);
-    ctx.lineTo(right, py);
-    ctx.stroke();
-    ctx.textAlign = 'center';
-    ctx.fillText(xTick(xRange[0] + a * (xRange[1] - xRange[0])), px, bottom + 13);
-    ctx.textAlign = 'right';
-    ctx.fillText(yTick(yRange[0] + a * (yRange[1] - yRange[0])), left - 5, py + 3);
-  }
+  const xAxis = numericAxis(xRange, [left, right], {count: 6, ...xOptions});
+  const yAxis = numericAxis(yRange, [bottom, top], yOptions);
+  const x = xAxis.position;
+  const y = yAxis.position;
+  drawAxisTicks(ctx, xAxis, yAxis, {left, right, top, bottom});
   ctx.textAlign = 'center';
   ctx.fillText(xLabel, (left + right) / 2, 179);
   ctx.save();
@@ -108,7 +94,7 @@ function rankedErrors(pairs, colors) {
   const chart = summaryAxes(
     'S-curve of signed relative error',
     'Case rank', 'Signed error (%)', [1, end], [minimum - margin, maximum + margin],
-    n => Math.round(n).toLocaleString(), n => (n > 0 ? '+' : '') + Number(n.toPrecision(2)) + '%'
+    {count: Math.min(6, end)}, {format: n => (n > 0 ? '+' : '') + formatTick(n) + '%'}
   );
   referenceLine(chart, 1, 0, end, 0);
   ranked.forEach((pair, i) => summaryPoint(chart, i + 1, pair.signedError, colors.get(pair.id).color));
@@ -118,16 +104,13 @@ function rankedErrors(pairs, colors) {
 function absoluteErrorCDF(pairs) {
   const errors = pairs.map(pair => Math.abs(pair.signedError)).sort((a, b) => a - b);
   const log = preferLogScale(errors);
-  const transform = log ? Math.log10 : n => n;
-  const inverse = log ? n => 10 ** n : n => n;
-  const left = log ? Math.floor(transform(errors[0])) : 0;
-  const maximum = transform(errors.at(-1));
-  const right = log ? Math.ceil(maximum) + 0.1 : maximum * 1.04 || 1;
+  const left = log ? 10 ** Math.floor(Math.log10(errors[0])) : 0;
+  const maximum = errors.at(-1);
+  const right = log ? 10 ** (Math.ceil(Math.log10(maximum)) + 0.1) : maximum * 1.04 || 1;
   const chart = summaryAxes(
     'Absolute error cumulative distribution',
     'Absolute error (%)' + (log ? ' · log' : ''), 'Cumulative fraction', [left, right], [0, 1],
-    x => inverse(x).toPrecision(2),
-    y => Number(y.toFixed(2)).toString()
+    {log}
   );
   const {ctx, x, y} = chart;
   ctx.strokeStyle = palette[0];
@@ -136,7 +119,7 @@ function absoluteErrorCDF(pairs) {
   ctx.moveTo(x(left), y(0));
   let fraction = 0;
   for (let i = 0; i < errors.length; i++) {
-    const px = x(transform(errors[i]));
+    const px = x(errors[i]);
     ctx.lineTo(px, y(fraction));
     fraction = (i + 1) / errors.length;
     ctx.lineTo(px, y(fraction));
@@ -228,17 +211,16 @@ function comparisonScatter(pairs, unit, colors, log) {
   const low = log ? transform(Math.min(...values)) : 0;
   const high = transform(Math.max(...values));
   const margin = log ? Math.max((high - low) * 0.04, 0.08) : high * 0.04;
-  const range = [log ? low - margin : 0, high + margin];
+  const range = [log ? inverse(low - margin) : 0, inverse(high + margin)];
   const axisUnit = [displayUnit(unit), log ? 'log' : ''].filter(Boolean).join(', ');
   const suffix = axisUnit ? ' (' + axisUnit + ')' : '';
-  const tick = n => formatValue(inverse(n), unit);
   const chart = summaryAxes(
     'Measured versus predicted values, ' + (log ? 'logarithmic' : 'linear') + ' X and Y axes',
-    'Measured' + suffix, 'Simulated' + suffix, range, range, tick, tick
+    'Measured' + suffix, 'Simulated' + suffix, range, range, {log, unit}, {log, unit}
   );
   referenceLine(chart, range[0], range[0], range[1], range[1]);
   for (const pair of pairs) {
-    summaryPoint(chart, transform(pair.actual), transform(pair.prediction), colors.get(pair.id).color);
+    summaryPoint(chart, pair.actual, pair.prediction, colors.get(pair.id).color);
   }
   return chart.canvas;
 }

@@ -18,13 +18,109 @@ function displayName(key) {
   return key.replaceAll('_', ' ');
 }
 
-function formatValue(value, unit) {
-  if (!Number.isFinite(value)) return '';
-  return unit === 'ns' ? (value / 1e6).toPrecision(4) : value.toPrecision(4);
+const tickNumber = new Intl.NumberFormat('en-US', {maximumSignificantDigits: 3, useGrouping: false});
+const tickPrefixes = new Map([[-12, 'p'], [-9, 'n'], [-6, 'µ'], [-3, 'm'],
+  [0, ''], [3, 'k'], [6, 'M'], [9, 'G'], [12, 'T']]);
+
+function formatTick(value) {
+  if (Math.abs(value) >= 0.1 && Math.abs(value) < 1) return tickNumber.format(value);
+  if (value === 0) return '0';
+  let exponent = 3 * Math.floor(Math.log10(Math.abs(value)) / 3);
+  let scaled = value / 10 ** exponent;
+  if (Math.abs(scaled) >= 999.5) {
+    exponent += 3;
+    scaled /= 1000;
+  }
+  const prefix = tickPrefixes.get(exponent);
+  return prefix === undefined ? value.toExponential(2) : tickNumber.format(scaled) + prefix;
 }
 
 function displayUnit(unit) {
   return unit === 'ns' ? 'ms' : unit;
+}
+
+function linearTicks(min, max, count) {
+  if (min === max) return [min];
+  const rough = (max - min) / (count - 1);
+  const power = 10 ** Math.floor(Math.log10(rough));
+  if (!power || !Number.isFinite(power)) return [min, max];
+  const multiplier = [1, 2, 5, 10].find(n => rough / power <= n * Math.SQRT2);
+  const step = power * multiplier;
+  const first = Math.ceil(min / step - 1e-10);
+  const last = Math.floor(max / step + 1e-10);
+  return Array.from({length: Math.max(0, last - first + 1)},
+    (_, i) => Number(((first + i) * step).toPrecision(13)));
+}
+
+function axisTicks(min, max, count, log) {
+  if (!log || min <= 0 || min === max || !Number.isFinite(max)) return linearTicks(min, max, count);
+  const low = Math.log10(min), high = Math.log10(max);
+  const major = [], minor = [];
+  for (let exponent = Math.floor(low); exponent <= Math.floor(high); exponent++) {
+    for (const factor of [1, 2, 5]) {
+      const tick = factor * 10 ** exponent;
+      if (tick >= min * (1 - 1e-12) && tick <= max * (1 + 1e-12)) {
+        (factor === 1 ? major : minor).push(tick);
+      }
+    }
+  }
+  if (major.length + minor.length < 2) return linearTicks(min, max, count);
+  if (major.length + minor.length <= count) return [...major, ...minor].sort((a, b) => a - b);
+  if (major.length >= count) {
+    const stride = Math.ceil(major.length / count);
+    return major.filter((_, i) => i % stride === 0);
+  }
+  const ticks = [...major];
+  for (const tick of minor) {
+    if (ticks.length === count) break;
+    if (ticks.every(other => Math.abs(Math.log10(tick / other)) >= (high - low) / count)) ticks.push(tick);
+  }
+  return ticks.sort((a, b) => a - b);
+}
+
+function numericAxis([min, max], [start, end], {log = false, unit = '', count = 5, format = formatTick} = {}) {
+  log = log && min > 0;
+  const transform = log ? Math.log10 : n => n;
+  const low = transform(min), high = transform(max);
+  const position = value => low === high ? (start + end) / 2 :
+    start + (transform(value) - low) / (high - low) * (end - start);
+  const divisor = unit === 'ns' ? 1e6 : 1;
+  const ticks = axisTicks(min / divisor, max / divisor, count, log).map(value => ({
+    label: format(value), position: position(value * divisor)
+  }));
+  return {position, ticks};
+}
+
+function drawAxisTicks(ctx, x, y, {left, right, top, bottom}) {
+  ctx.strokeStyle = '#e5ecee';
+  ctx.fillStyle = '#526a75';
+  ctx.textAlign = 'center';
+  let lastRight = -Infinity;
+  let lastLabel;
+  for (const {position, label} of x.ticks) {
+    ctx.beginPath();
+    ctx.moveTo(position, top);
+    ctx.lineTo(position, bottom);
+    ctx.stroke();
+    const half = ctx.measureText(label).width / 2;
+    if (label === lastLabel || position - half < lastRight + 6) continue;
+    ctx.fillText(label, position, bottom + 13);
+    lastRight = position + half;
+    lastLabel = label;
+  }
+  ctx.textAlign = 'right';
+  let lastY = Infinity;
+  lastLabel = undefined;
+  for (const {position, label} of y.ticks) {
+    ctx.beginPath();
+    ctx.moveTo(left, position);
+    ctx.lineTo(right, position);
+    ctx.stroke();
+    if (label === lastLabel || lastY - position < 12) continue;
+    ctx.fillText(label, left - 5, position + 3);
+    lastY = position;
+    lastLabel = label;
+  }
 }
 
 function preferLogScale(values) {
@@ -64,37 +160,18 @@ function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
   const transformY = scales.y ? Math.log10 : n => n;
   const inverseY = scales.y ? n => 10 ** n : n => n;
   let min = transformY(bounds.min), max = transformY(bounds.max);
-  const span = Math.max(max - min, Math.abs(max) * 0.02, 0.001);
+  const span = Math.max(max - min, Math.abs(max) * 0.02) || 0.001;
   min -= span * 0.12;
   max += span * 0.12;
+  const xAxis = numericAxis([rows[0].x, rows.at(-1).x], [left, right], {log: scales.x, count: 6});
+  const yAxis = numericAxis([inverseY(min), inverseY(max)], [bottom, top], {log: scales.y, unit});
+  drawAxisTicks(ctx, xAxis, yAxis, {left, right, top, bottom});
+  ctx.textAlign = 'left';
   ctx.fillText(displayUnit(unit) + (scales.y ? ' · log' : ''), 4, 9);
-  ctx.textAlign = 'right';
-  for (let i = 0; i < 4; i++) {
-    const fraction = i / 3;
-    const y = bottom - (bottom - top) * fraction;
-    ctx.strokeStyle = '#e5ecee';
-    ctx.beginPath();
-    ctx.moveTo(left, y);
-    ctx.lineTo(right, y);
-    ctx.stroke();
-    ctx.fillText(formatValue(inverseY(min + (max - min) * fraction), unit), left - 5, y + 3);
-  }
-
-  const sizes = rows.map(row => row.x);
-  const transformX = scales.x ? Math.log10 : n => n;
-  const xMin = transformX(sizes[0]), xMax = transformX(sizes[sizes.length - 1]);
-  const x = i => xMin === xMax ? (left + right) / 2 :
-    left + (transformX(sizes[i]) - xMin) / (xMax - xMin) * (right - left);
-  const y = v => bottom - (transformY(v) - min) / (max - min) * (bottom - top);
   ctx.textAlign = 'center';
-  let lastLabel = -Infinity;
-  sizes.forEach((size, i) => {
-    const px = x(i);
-    if (i > 0 && i < sizes.length - 1 && (px - lastLabel < 50 || right - px < 50)) return;
-    ctx.fillText(size.toLocaleString(), px, bottom + 12);
-    lastLabel = px;
-  });
   ctx.fillText(xLabel + (scales.x ? ' · log' : ''), (left + right) / 2, 161);
+  const x = index => xAxis.position(rows[index].x);
+  const y = yAxis.position;
 
   for (const curve of curves) {
     ctx.strokeStyle = ctx.fillStyle = curve.color;
