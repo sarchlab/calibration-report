@@ -175,3 +175,61 @@ button[aria-pressed="true"] { color: #fff; background: var(--accent); border-col
 .plot-status-marker[data-state="running"] { color: var(--running); }
 .plot-status-marker:hover, .plot-status-marker:focus-visible { z-index: 1; background: var(--stat-surface); }
 .plot-status-detail { margin: 4px 0 0; padding: 6px 8px; border-radius: 4px; background: var(--stat-surface); color: var(--text); font-size: 11px; white-space: pre-line; overflow-wrap: anywhere; }
+
+.interactive-plot, .point-surface { position: relative; }
+.interactive-plot:has(.point-detail:not([hidden])) { z-index: 2; }
+.point-highlight { position: absolute; width: 12px; height: 12px; box-sizing: border-box; transform: translate(-50%, -50%); border: 2px solid var(--text); border-radius: 50%; box-shadow: 0 0 0 2px var(--surface); pointer-events: none; }
+.point-detail { position: absolute; top: calc(100% - 18px); left: 0; right: 0; padding: 14px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--text); box-shadow: 0 8px 28px #0002, 0 2px 6px #0001; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.point-header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 5px 8px; }
+.point-title { font-size: 15px; line-height: 1.25; letter-spacing: -.02em; }
+.point-group { color: var(--muted); font-size: 10px; font-weight: 600; }
+.point-kernel { margin-top: 5px; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); overflow-wrap: anywhere; }
+.point-measurements { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 12px 0; }
+.point-measurement { min-width: 0; padding: 8px; border: 1px solid transparent; border-radius: 6px; background: var(--stat-surface); }
+.point-measurement-selected { border-color: var(--control-border); }
+.point-measurement-label { font-size: 10px; font-weight: 650; color: var(--muted); }
+.point-measurement-label::before { content: ''; display: inline-block; width: 5px; height: 5px; margin-right: 4px; border-radius: 50%; background: var(--chart-series-1); vertical-align: 1px; }
+.point-measurement[data-role="hardware_measurement"] .point-measurement-label::before { background: var(--chart-hardware); }
+.point-measurement[data-role="simulator_output"] .point-measurement-label::before { background: var(--chart-simulator); }
+.point-measurement-source { display: block; font-size: 10px; font-weight: 400; margin-top: 1px; }
+.point-measurement-value { margin: 5px 0 0; font-size: 14px; letter-spacing: -.025em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.point-measurement-value strong { font-weight: 650; }
+.point-unit { color: var(--muted); font-size: 10px; font-weight: 400; margin-left: 3px; letter-spacing: 0; }
+.point-measurement-unavailable { font-size: 11px; font-weight: 500; white-space: normal; letter-spacing: 0; }
+.point-measurement-reason { margin: 5px 0 0; color: var(--muted); font-size: 10px; }
+.point-metrics { display: grid; gap: 8px; padding-bottom: 12px; }
+.point-metric-row { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.point-metric-label { color: var(--muted); font-size: 11px; }
+.point-metric-value, .point-error-value { font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
+.point-error-result { display: flex; justify-content: flex-end; align-items: baseline; flex-wrap: wrap; gap: 3px 6px; }
+.point-error-value { font-size: 14px; }
+.point-direction { padding: 2px 5px; border-radius: 4px; background: var(--stat-surface); color: var(--secondary); font-size: 9px; font-weight: 500; }
+.point-comparison-name { font-size: 10px; color: var(--muted); margin-bottom: 4px; }
+.point-configuration { border-top: 1px solid var(--divider); padding-top: 10px; }
+.point-section-label { color: var(--muted); font-size: 9px; font-weight: 650; text-transform: uppercase; letter-spacing: .08em; }
+.point-parameters { display: grid; gap: 5px; margin: 7px 0 0; font-size: 11px; }
+.point-parameters > div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.point-parameters dt { color: var(--muted); }
+.point-parameters dd { margin: 0; text-align: right; font-weight: 500; font-variant-numeric: tabular-nums; }
+.point-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--divider); }
+.point-controls button { min-height: 44px; color: var(--text); font-size: 12px; padding: 6px 9px; }
+/* Allow rapid taps without double-tap zoom; retain scrolling and pinch zoom. */
+.point-controls, .point-controls button, .interactive-plot .curve { touch-action: manipulation; }
+.point-controls span { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.point-controls button:last-child { margin-left: auto; color: var(--muted); }
+.point-pinned .point-detail { position: static; margin-top: 6px; box-shadow: none; }
+.point-detail[hidden], .point-highlight[hidden], .point-controls[hidden] { display: none; }
+.point-hint { margin: 3px 0; font-size: 10px; color: var(--muted); }
+.curve:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+@media (hover: none), (pointer: coarse), (max-width: 520px) {
+  .point-detail { position: static; margin-top: 6px; box-shadow: none; }
+}
+
+.point-description { container-type: inline-size; }
+@container (max-width: 230px) {
+  .point-measurements { grid-template-columns: 1fr; }
+  .point-measurement { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 8px; }
+  .point-measurement-value { font-size: 13px; margin: 0; }
+  .point-measurement-reason { grid-column: 1 / -1; }
+  .point-metric-label { flex-shrink: 0; }
+}
