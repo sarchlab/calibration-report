@@ -49,13 +49,14 @@ let selectedGroup;
 let previousCharts;
 let pointContext;
 let closePointDetails = () => {};
+let openPointDetails;
 let pointTooltipId = 0;
 
 document.addEventListener('pointerdown', event => {
-  if (!event.target.closest('.interactive-plot')) closePointDetails();
+  if (openPointDetails && !openPointDetails.wrapper.contains(event.target)) closePointDetails();
 });
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape') closePointDetails();
+  if (event.key === 'Escape') closePointDetails(true);
 });
 
 const detailNumber = new Intl.NumberFormat('en-US', {maximumSignificantDigits: 7});
@@ -165,6 +166,7 @@ function interactivePlot(canvas, points) {
   const text = el('div', 'point-description');
   text.setAttribute('aria-live', 'polite');
   text.setAttribute('aria-atomic', 'true');
+  const previewHint = el('p', 'point-preview-hint', 'Click for full details');
   const controls = el('div', 'point-controls');
   const hint = el('p', 'point-hint', 'Hover or tap a point · Arrow keys browse');
   let selected = -1;
@@ -175,19 +177,24 @@ function interactivePlot(canvas, points) {
   canvas.setAttribute('aria-label', canvas.getAttribute('aria-label') +
     '. Interactive data points. Use arrow keys to browse; Escape to close.');
 
-  function hide() {
+  function hide(restoreFocus = false) {
+    const wasPinned = pinned;
+    if (openPointDetails?.wrapper === wrapper) openPointDetails = undefined;
     detail.hidden = ring.hidden = true;
     wrapper.classList.remove('point-pinned');
     selected = -1;
     pinned = false;
     canvas.style.cursor = '';
+    if (restoreFocus && wasPinned) canvas.focus({preventScroll: true});
   }
 
   function show(index, pin) {
+    if (!pin && openPointDetails?.pinned) return;
     if (selected === index && pinned === pin && !detail.hidden) return;
     // Keep this plot's controls visible and focused when browsing its points.
     if (closePointDetails !== hide) closePointDetails();
     closePointDetails = hide;
+    openPointDetails = {wrapper, pinned: pin};
     selected = index;
     pinned = pin;
     const point = points[index];
@@ -196,6 +203,8 @@ function interactivePlot(canvas, points) {
     wrapper.classList.toggle('point-pinned', pin);
     detail.setAttribute('role', pin ? 'group' : 'tooltip');
     detail.setAttribute('aria-label', 'Point details');
+    text.tabIndex = pin ? 0 : -1;
+    previewHint.hidden = pin;
     controls.hidden = !pin;
     detail.hidden = ring.hidden = false;
     ring.style.left = (100 * point.x / (canvas.width / 2)) + '%';
@@ -225,9 +234,9 @@ function interactivePlot(canvas, points) {
   for (const button of [previous, next, close]) button.type = 'button';
   previous.addEventListener('click', () => step(-1));
   next.addEventListener('click', () => step(1));
-  close.addEventListener('click', () => { hide(); canvas.focus({preventScroll: true}); });
+  close.addEventListener('click', () => hide(true));
   controls.append(previous, counter, next, close);
-  detail.append(text, controls);
+  detail.append(text, previewHint, controls);
   surface.append(canvas, ring);
   wrapper.append(surface, detail, hint);
   canvas.addEventListener('pointermove', event => {

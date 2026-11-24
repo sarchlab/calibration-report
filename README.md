@@ -21,7 +21,7 @@ JSON Schema validates the structure. Producers and consumers also check cross-re
 - Every series key in a point's `values` or `statuses` is declared in its benchmark's `values`. Status entries describe unavailable results.
 - Each combination of group, benchmark, `x`, and non-scaling parameter values appears at most once.
 
-Within a tab, the renderer makes one plot for each benchmark and non-scaling parameter combination. Each value key is a curve over `x`. Each benchmark occupies a full-width card. Its series cards wrap into three, two, or one columns as the viewport narrows, with equal widths and heights within that benchmark. Different benchmarks can have different series-card heights; content, including pinned point details, remains fully visible.
+Within a tab, the renderer makes one plot for each benchmark and non-scaling parameter combination. Each value key is a curve over `x`. Each benchmark occupies a full-width card. Its series cards wrap into three, two, or one columns as the viewport narrows, with equal widths and heights within that benchmark. Different benchmarks can have different series-card heights. Point details open in an overlay without changing chart or series-card dimensions.
 
 ## Accuracy summary
 
@@ -33,11 +33,11 @@ For a positive axis with at least three distinct values, the default scale minim
 
 ## Point details
 
-Hover over a point in a benchmark plot, S-curve, CDF, or scatter plot to inspect its benchmark, group, parameters, and measurements. Details separate the benchmark and GPU header, measured and simulated values, error metrics, and configuration. Comparison plots show signed error with its direction; the S-curve includes rank and the CDF includes absolute error and cumulative fraction (labeled CDF percentile). Values use the same units as the axes.
+Hover over a point in a benchmark plot, S-curve, CDF, or scatter plot for a compact preview of its measurements and error. Click, tap, or use keyboard navigation for full details. Details separate the benchmark and GPU header, measured and simulated values, error metrics, and configuration. Comparison plots show signed error with its direction; the S-curve includes rank and the CDF includes absolute error and cumulative fraction (labeled CDF percentile). Values use the same units as the axes.
 
-Click or tap a point to keep its details open below the chart. Touch targets include a 28 CSS-pixel radius around each point; the nearest point is selected. Previous and Next browse every plotted point, including overlapping points. Tap the selected point again, tap outside the chart, or use Close to dismiss. On phones, details stay in the page below the chart so they do not cover the selected point or block scrolling.
+Selected point details stay in a fixed overlay on the right on desktop. On narrow screens (820px or less) and touch-first devices, the panel sits at the bottom and occupies at most half the viewport. Its content scrolls independently while Previous, Next, and Close remain visible; the page and charts do not resize. Touch targets include a 28 CSS-pixel radius around each point; the nearest point is selected. Previous and Next browse every plotted point, including overlapping points. Selecting another point updates the sole panel; hovering other plots does not replace a pinned selection. Tap the selected point again, tap outside its plot and panel, or use Close to dismiss.
 
-Keyboard users can Tab to a chart and use arrow keys, Home, or End to inspect points. Escape dismisses details. Switching views, changing scales or themes, or receiving changed live data clears the selection; unchanged live polling preserves it.
+Keyboard users can Tab to a chart and use arrow keys, Home, or End to inspect points. Escape dismisses details and returns focus to the selected chart, as Close does. Switching views, changing scales or themes, or receiving changed live data clears the selection; unchanged live polling preserves it.
 
 ## Validation
 

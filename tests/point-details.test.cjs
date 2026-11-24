@@ -166,6 +166,51 @@ test('keyboard browsing and intentional dismiss paths still work', () => {
   f.tap(); f.plot.fire('focusout', {relatedTarget: new Element('button')}); assert.equal(f.detail.hidden, true);
 });
 
+test('pinned details survive other-plot hover and selection transfers the sole panel', () => {
+  const f = fixture(); f.tap();
+  const otherCanvas = new Element('canvas');
+  otherCanvas.width = 640; otherCanvas.height = 320;
+  otherCanvas.setAttribute('aria-label', 'Other plot');
+  const otherPlot = f.context.interactivePlot(otherCanvas, [
+    {x: 100, y: 50, description: f.context.pointDescription({...f.row, x: 512})},
+  ]);
+  const otherDetail = byClass(otherPlot, 'point-detail')[0];
+  otherCanvas.fire('pointermove', {pointerType: 'mouse', clientX: 110, clientY: 70});
+  assert.equal(f.detail.hidden, false, 'hover must not replace a pinned selection');
+  assert.equal(otherDetail.hidden, true);
+  otherCanvas.fire('click', {pointerType: 'touch', clientX: 110, clientY: 70});
+  assert.equal(f.detail.hidden, true);
+  assert.equal(otherDetail.hidden, false);
+  assert.match(otherDetail.textContent, /512/);
+  f.document.fire('pointerdown', {target: otherDetail});
+  assert.equal(otherDetail.hidden, false, 'interacting with panel content is not an outside tap');
+  f.document.fire('pointerdown', {target: f.canvas});
+  assert.equal(otherDetail.hidden, true, 'even an empty area in another plot is outside this selection');
+});
+
+test('pinned content is keyboard reachable and dismissal restores focus without redraw stealing it', () => {
+  const f = fixture();
+  f.canvas.fire('pointermove', {pointerType: 'mouse', clientX: 110, clientY: 70});
+  const content = byClass(f.detail, 'point-description')[0];
+  const previewHint = byClass(f.detail, 'point-preview-hint')[0];
+  assert.equal(content.tabIndex, -1);
+  assert.equal(previewHint.hidden, false);
+  f.canvas.fire('keydown', {key: 'Enter'});
+  assert.equal(content.tabIndex, 0, 'keyboard users can focus and scroll the panel content');
+  assert.equal(previewHint.hidden, true);
+  assert.equal(f.controls.hidden, false);
+  f.document.fire('keydown', {key: 'Escape'});
+  assert.equal(f.detail.hidden, true);
+  assert.equal(f.canvas.focused, true);
+  f.canvas.focused = false;
+  f.tap();
+  vm.runInContext('closePointDetails()', f.context);
+  assert.equal(f.detail.hidden, true);
+  assert.equal(f.canvas.focused, false, 'redraw cleanup must not refocus a disappearing chart');
+  f.canvas.fire('pointermove', {pointerType: 'mouse', clientX: 110, clientY: 70});
+  assert.equal(f.detail.hidden, false, 'cleanup releases the pinned-owner guard');
+});
+
 test('rapid-tap targets retain scrolling and pinch zoom through manipulation touch action', () => {
   const css = fs.readFileSync(path.join(__dirname, '../site/report.css'), 'utf8');
   const rules = [...css.matchAll(/([^{}]+)\{([^{}]+)\}/g)];
