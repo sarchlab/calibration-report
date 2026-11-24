@@ -169,6 +169,7 @@ function interactivePlot(canvas, points) {
   const hint = el('p', 'point-hint', 'Hover or tap a point · Arrow keys browse');
   let selected = -1;
   let pinned = false;
+  let clickPointerType;
   canvas.tabIndex = 0;
   canvas.setAttribute('aria-describedby', detail.id);
   canvas.setAttribute('aria-label', canvas.getAttribute('aria-label') +
@@ -201,9 +202,9 @@ function interactivePlot(canvas, points) {
     ring.style.top = (100 * point.y / (canvas.height / 2)) + '%';
   }
 
-  function nearest(event) {
+  function nearest(event, pointerType = event.pointerType) {
     const rect = canvas.getBoundingClientRect();
-    const radius = event.pointerType === 'touch' || event.pointerType === 'pen' ? 28 : 14;
+    const radius = pointerType === 'touch' || pointerType === 'pen' ? 28 : 14;
     let best = -1, distance = radius * radius;
     points.forEach((point, index) => {
       const dx = event.clientX - rect.left - point.x * rect.width / (canvas.width / 2);
@@ -237,8 +238,12 @@ function interactivePlot(canvas, points) {
     else show(index, false);
   });
   wrapper.addEventListener('pointerleave', () => { if (!pinned) hide(); });
+  // Some touch browsers emit a MouseEvent for click, without pointerType.
+  canvas.addEventListener('pointerdown', event => { clickPointerType = event.pointerType; });
+  canvas.addEventListener('pointercancel', () => { clickPointerType = undefined; });
   canvas.addEventListener('click', event => {
-    const index = nearest(event);
+    const index = nearest(event, event.pointerType || clickPointerType);
+    clickPointerType = undefined;
     if (index < 0 || (pinned && index === selected)) hide();
     else show(index, true);
   });

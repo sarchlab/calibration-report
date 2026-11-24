@@ -118,6 +118,28 @@ test('CSS-pixel hit targets work with scaling, and touch allows a wider target t
   assert.equal(f.detail.hidden, true);
 });
 
+test('plain click events retain the initiating pointer type without leaking it to later input', () => {
+  const f = fixture();
+  const plainClick = () => f.canvas.fire('click', {clientX: 135, clientY: 70});
+  f.canvas.fire('pointerdown', {pointerType: 'touch'});
+  plainClick();
+  assert.equal(f.detail.hidden, false, 'touch-origin MouseEvent keeps the wider hit target');
+  f.close.fire('click');
+  plainClick();
+  assert.equal(f.detail.hidden, true, 'the initiating pointer type is consumed after one click');
+  f.canvas.fire('pointerdown', {pointerType: 'touch'});
+  f.canvas.fire('pointerdown', {pointerType: 'mouse'});
+  plainClick();
+  assert.equal(f.detail.hidden, true, 'a subsequent mouse press replaces earlier touch input');
+  f.canvas.fire('pointerdown', {pointerType: 'touch'});
+  f.canvas.fire('pointercancel');
+  plainClick();
+  assert.equal(f.detail.hidden, true, 'a canceled gesture must not affect later clicks');
+  f.canvas.fire('pointerdown', {pointerType: 'touch'});
+  f.canvas.fire('click', {pointerType: 'mouse', clientX: 135, clientY: 70});
+  assert.equal(f.detail.hidden, true, 'an explicit click pointer type takes precedence');
+});
+
 test('mobile null-focus blur and repeated Next/Previous retain the open card and controls', () => {
   const f = fixture(); f.tap();
   const hideCount = f.detail.hideCount;
