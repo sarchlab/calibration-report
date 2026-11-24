@@ -206,14 +206,21 @@ const visibleStates = new Map([
 ]);
 
 function isMarked(row, id) {
-  return !Number.isFinite(row.values[id]) && visibleStates.has(row.statuses?.[id]?.state);
+  const state = row.statuses?.[id]?.state;
+  return visibleStates.has(state) && (state === 'verification_failed' || !Number.isFinite(row.values[id]));
+}
+
+function statusLabel(state, symbol) {
+  return state === 'unsupported' && symbol === '↷'
+    ? 'Skipped after timeout'
+    : visibleStates.get(state).label;
 }
 
 function drawStatusMarkers(rows, series, xLabel, xPosition, statusPosition) {
   const track = el('div', 'plot-status-track');
   track.style.top = (100 * statusPosition) + '%';
   track.setAttribute('role', 'group');
-  track.setAttribute('aria-label', 'Unavailable results');
+  track.setAttribute('aria-label', 'Simulation run status');
   const detail = el('p', 'plot-status-detail');
   detail.setAttribute('aria-live', 'polite');
   detail.hidden = true;
@@ -221,8 +228,8 @@ function drawStatusMarkers(rows, series, xLabel, xPosition, statusPosition) {
     const marked = series.filter(curve => isMarked(row, curve.id));
     if (!marked.length) continue;
     const messages = marked.map(curve => {
-      const {state, reason} = row.statuses[curve.id];
-      return curve.name + ' · ' + visibleStates.get(state).label + (reason ? ' · ' + reason : '');
+      const {state, reason, symbol} = row.statuses[curve.id];
+      return curve.name + ' · ' + statusLabel(state, symbol) + (reason ? ' · ' + reason : '');
     });
     const main = marked.find(curve => row.statuses[curve.id].state !== 'running') ?? marked[0];
     const {state, symbol} = row.statuses[main.id];

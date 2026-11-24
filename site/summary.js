@@ -10,6 +10,8 @@ function comparisonPairs(rows, benchmarks) {
       const [reference, measured] = references[0];
       const actual = point.values[reference];
       const prediction = point.values[id];
+      if (point.statuses?.[id]?.state === 'verification_failed' ||
+          point.statuses?.[reference]?.state === 'verification_failed') continue;
       if (!Number.isFinite(actual) || actual <= 0 || !Number.isFinite(prediction) || prediction <= 0) continue;
       pairs.push({
         point,
