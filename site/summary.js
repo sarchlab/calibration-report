@@ -51,14 +51,15 @@ function summaryAxes(title, xLabel, yLabel, xRange, yRange, xOptions = {}, yOpti
   const y = yAxis.position;
   drawAxisTicks(ctx, xAxis, yAxis, frame);
   drawAxisTitles(ctx, xLabel, yLabel, frame, 179);
-  return {canvas, ctx, x, y};
+  return {canvas, ctx, x, y, points: []};
 }
 
-function summaryPoint(chart, x, y, color) {
+function summaryPoint(chart, x, y, color, description) {
   chart.ctx.fillStyle = color;
   chart.ctx.beginPath();
   chart.ctx.arc(chart.x(x), chart.y(y), 2.15, 0, 2 * Math.PI);
   chart.ctx.fill();
+  chart.points.push({x: chart.x(x), y: chart.y(y), description});
 }
 
 function referenceLine(chart, x0, y0, x1, y1) {
@@ -85,12 +86,14 @@ function rankedErrors(pairs, colors) {
     {count: Math.min(6, end)}, {format: n => (n > 0 ? '+' : '') + formatTick(n) + '%'}
   );
   referenceLine(chart, 1, 0, end, 0);
-  ranked.forEach((pair, i) => summaryPoint(chart, i + 1, pair.signedError, colors.get(pair.id).color));
-  return chart.canvas;
+  ranked.forEach((pair, i) => summaryPoint(chart, i + 1, pair.signedError, colors.get(pair.id).color,
+    pairDescription(pair, {'Case rank': (i + 1).toLocaleString('en-US')})));
+  return interactivePlot(chart.canvas, chart.points);
 }
 
 function absoluteErrorCDF(pairs) {
-  const errors = pairs.map(pair => Math.abs(pair.signedError)).sort((a, b) => a - b);
+  const ranked = [...pairs].sort((a, b) => Math.abs(a.signedError) - Math.abs(b.signedError));
+  const errors = ranked.map(pair => Math.abs(pair.signedError));
   const log = preferLogScale(errors);
   const left = log ? 10 ** Math.floor(Math.log10(errors[0])) : 0;
   const maximum = errors.at(-1);
@@ -111,6 +114,10 @@ function absoluteErrorCDF(pairs) {
     ctx.lineTo(px, y(fraction));
     fraction = (i + 1) / errors.length;
     ctx.lineTo(px, y(fraction));
+    chart.points.push({x: px, y: y(fraction), description: pairDescription(ranked[i], {
+      'Absolute error': errors[i].toFixed(2) + '%',
+      'CDF percentile': (fraction * 100).toFixed(2) + '%',
+    })});
   }
   ctx.lineTo(x(right), y(1));
   ctx.stroke();
@@ -122,7 +129,7 @@ function absoluteErrorCDF(pairs) {
     pairs.length
   );
   details.append(renderStats(errorStats(pairs), pairs.length));
-  return [chart.canvas, details];
+  return [interactivePlot(chart.canvas, chart.points), details];
 }
 
 const scatterLogPreferences = new Map();
@@ -204,9 +211,9 @@ function comparisonScatter(pairs, unit, colors, log) {
   );
   referenceLine(chart, range[0], range[0], range[1], range[1]);
   for (const pair of pairs) {
-    summaryPoint(chart, pair.actual, pair.prediction, colors.get(pair.id).color);
+    summaryPoint(chart, pair.actual, pair.prediction, colors.get(pair.id).color, pairDescription(pair));
   }
-  return chart.canvas;
+  return interactivePlot(chart.canvas, chart.points);
 }
 
 function scatterWithScale(key, pairs, unit, colors) {
@@ -218,6 +225,7 @@ function scatterWithScale(key, pairs, unit, colors) {
   button.setAttribute('aria-pressed', String(log));
   let canvas = comparisonScatter(pairs, unit, colors, log);
   button.addEventListener('click', () => {
+    closePointDetails();
     log = !log;
     scatterLogPreferences.set(key, log);
     button.setAttribute('aria-pressed', String(log));

@@ -31,6 +31,18 @@ The scatter plot can switch both axes to logarithmic scale. It reports Kendallâ€
 
 For a positive axis with at least three distinct values, the default scale minimizes the variance of adjacent gaps after normalizing the axis to the same span. Ties and axes with nonpositive values use a linear scale. Manual scale selections are kept during live refreshes. The scatter plot applies the same scale to both axes.
 
+## Point details
+
+Hover over a point in a benchmark plot, S-curve, CDF, or scatter plot to inspect its benchmark, group, parameters, and measurements. Details separate the benchmark and GPU header, measured and simulated values, error metrics, and configuration. Comparison plots show signed error with its direction; the S-curve includes rank and the CDF includes absolute error and cumulative fraction (labeled CDF percentile). Values use the same units as the axes.
+
+Click or tap a point to keep its details open below the chart. Touch targets include a 28 CSS-pixel radius around each point; the nearest point is selected. Previous and Next browse every plotted point, including overlapping points. Tap the selected point again, tap outside the chart, or use Close to dismiss. On phones, details stay in the page below the chart so they do not cover the selected point or block scrolling.
+
+Keyboard users can Tab to a chart and use arrow keys, Home, or End to inspect points. Escape dismisses details. Switching views, changing scales or themes, or receiving changed live data clears the selection; unchanged live polling preserves it.
+
+## Validation
+
+Run `node --test tests/point-details.test.cjs` for the dependency-free point-detail regression checks. These exercise rendering and interaction handlers with a small DOM fixture; verify actual hover, mobile tapping, layout, scrolling, and pinch zoom in a browser as well.
+
 ## Hosting
 
 - **GitHub Pages:** Copy the contents of [`site/`](site/) and an exported `data.json` into the Pages publishing branch. The viewer loads its data using a relative URL.

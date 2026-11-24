@@ -47,6 +47,222 @@ function setupTheme() {
 const scalePreferences = new Map();
 let selectedGroup;
 let previousCharts;
+let pointContext;
+let closePointDetails = () => {};
+let pointTooltipId = 0;
+
+document.addEventListener('pointerdown', event => {
+  if (!event.target.closest('.interactive-plot')) closePointDetails();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closePointDetails();
+});
+
+const detailNumber = new Intl.NumberFormat('en-US', {maximumSignificantDigits: 7});
+const parameterNumber = new Intl.NumberFormat('en-US', {maximumSignificantDigits: 17});
+
+function pointDescription(point, comparisons = [], extra = {}, selectedSeries) {
+  return {point, comparisons, extra, selectedSeries};
+}
+
+function pairDescription(pair, extra = {}) {
+  return pointDescription(pair.point, [pair], extra);
+}
+
+function renderPointDescription({point, comparisons, extra, selectedSeries}) {
+  const meta = pointContext.benchmarks[point.benchmark];
+  const content = el('div', 'point-content');
+  const header = el('div', 'point-header');
+  const title = displayName(point.benchmark).replace(/\b(fp\d+|int\d+)\b/gi, word => word.toUpperCase());
+  header.append(el('strong', 'point-title', title),
+    el('span', 'point-group', pointContext.groups[point.group].name));
+  content.append(header);
+  const launch = point.non_scaling_params.launch;
+  if (launch !== undefined) content.append(el('div', 'point-kernel', String(launch)));
+
+  const measurements = el('dl', 'point-measurements');
+  for (const [id, series] of Object.entries(meta.values)) {
+    const value = point.values[id];
+    const status = point.statuses?.[id];
+    if (!(id in point.values) && !status) continue;
+    const item = el('div', 'point-measurement');
+    item.dataset.role = series.role ?? 'other';
+    if (id === selectedSeries) item.classList.add('point-measurement-selected');
+    const role = series.role === 'hardware_measurement' ? 'Measured' :
+      series.role === 'simulator_output' ? 'Simulated' : 'Value';
+    const label = el('dt', 'point-measurement-label', role);
+    const source = el('span', 'point-measurement-source', series.name.replace(/ kernel time(?: \(median\))?$/i, ''));
+    source.title = series.name;
+    label.append(source);
+    label.setAttribute('aria-label', role + ': ' + series.name);
+    const measure = el('dd', 'point-measurement-value');
+    if (Number.isFinite(value)) {
+      const converted = series.unit === 'ns' ? value / 1e6 : value;
+      measure.append(el('strong', '', detailNumber.format(converted)));
+      if (series.unit) measure.append(el('span', 'point-unit', displayUnit(series.unit)));
+      measure.title = String(value) + (series.unit ? ' ' + series.unit : '');
+    } else {
+      measure.classList.add('point-measurement-unavailable');
+      measure.textContent = status ? displayName(status.state) : 'Unavailable';
+    }
+    item.append(label, measure);
+    if (status?.reason && !Number.isFinite(value)) item.append(el('dd', 'point-measurement-reason', status.reason));
+    measurements.append(item);
+  }
+  content.append(measurements);
+
+  const metrics = el('div', 'point-metrics');
+  for (const pair of comparisons) {
+    const row = el('div', 'point-error');
+    if (comparisons.length > 1) row.append(el('div', 'point-comparison-name', pair.name));
+    const line = el('div', 'point-metric-row');
+    const error = pair.signedError;
+    const value = (error > 0 ? '+' : error < 0 ? '−' : '') + Math.abs(error).toFixed(2) + '%';
+    const direction = error < 0 ? 'Underestimate' : error > 0 ? 'Overestimate' : 'Exact match';
+    const result = el('span', 'point-error-result');
+    result.append(el('strong', 'point-error-value', value), el('span', 'point-direction', direction));
+    line.append(el('span', 'point-metric-label', 'Signed error'), result);
+    row.append(line);
+    metrics.append(row);
+  }
+  for (const [label, value] of Object.entries(extra)) {
+    const row = el('div', 'point-metric-row');
+    row.append(el('span', 'point-metric-label', label), el('strong', 'point-metric-value', value));
+    metrics.append(row);
+  }
+  if (metrics.children.length) content.append(metrics);
+
+  const configuration = el('div', 'point-configuration');
+  configuration.append(el('div', 'point-section-label', 'Configuration'));
+  const params = el('dl', 'point-parameters');
+  for (const [key, value] of Object.entries({[meta.scaling_param]: point.x, ...point.non_scaling_params})) {
+    if (key === 'launch' && key !== meta.scaling_param) continue;
+    const row = el('div');
+    const label = displayName(key).replace(/\b(fmas|mads)\b/gi, word => word.slice(0, -1).toUpperCase() + 's')
+      .replace(/ per /g, ' / ').replace(/^num blocks$/, 'Blocks').replace(/^threads/, 'Threads');
+    const unit = meta.params[key].unit;
+    const formatted = typeof value === 'number' ? parameterNumber.format(value) : String(value);
+    row.append(el('dt', '', label.charAt(0).toUpperCase() + label.slice(1)),
+      el('dd', '', formatted + (unit ? ' ' + unit : '')));
+    params.append(row);
+  }
+  configuration.append(params);
+  content.append(configuration);
+  return content;
+}
+
+// Hit testing uses CSS pixels, so targets stay usable at any chart size or scale.
+function interactivePlot(canvas, points) {
+  if (!points.length) return canvas;
+  const wrapper = el('div', 'interactive-plot');
+  const surface = el('div', 'point-surface');
+  const ring = el('span', 'point-highlight');
+  ring.hidden = true;
+  ring.setAttribute('aria-hidden', 'true');
+  const detail = el('div', 'point-detail');
+  detail.id = 'point-detail-' + (++pointTooltipId);
+  detail.hidden = true;
+  const text = el('div', 'point-description');
+  text.setAttribute('aria-live', 'polite');
+  text.setAttribute('aria-atomic', 'true');
+  const controls = el('div', 'point-controls');
+  const hint = el('p', 'point-hint', 'Hover or tap a point · Arrow keys browse');
+  let selected = -1;
+  let pinned = false;
+  let clickPointerType;
+  canvas.tabIndex = 0;
+  canvas.setAttribute('aria-describedby', detail.id);
+  canvas.setAttribute('aria-label', canvas.getAttribute('aria-label') +
+    '. Interactive data points. Use arrow keys to browse; Escape to close.');
+
+  function hide() {
+    detail.hidden = ring.hidden = true;
+    wrapper.classList.remove('point-pinned');
+    selected = -1;
+    pinned = false;
+    canvas.style.cursor = '';
+  }
+
+  function show(index, pin) {
+    if (selected === index && pinned === pin && !detail.hidden) return;
+    // Keep this plot's controls visible and focused when browsing its points.
+    if (closePointDetails !== hide) closePointDetails();
+    closePointDetails = hide;
+    selected = index;
+    pinned = pin;
+    const point = points[index];
+    text.replaceChildren(renderPointDescription(point.description));
+    counter.textContent = (index + 1) + ' / ' + points.length;
+    wrapper.classList.toggle('point-pinned', pin);
+    detail.setAttribute('role', pin ? 'group' : 'tooltip');
+    detail.setAttribute('aria-label', 'Point details');
+    controls.hidden = !pin;
+    detail.hidden = ring.hidden = false;
+    ring.style.left = (100 * point.x / (canvas.width / 2)) + '%';
+    ring.style.top = (100 * point.y / (canvas.height / 2)) + '%';
+  }
+
+  function nearest(event, pointerType = event.pointerType) {
+    const rect = canvas.getBoundingClientRect();
+    const radius = pointerType === 'touch' || pointerType === 'pen' ? 28 : 14;
+    let best = -1, distance = radius * radius;
+    points.forEach((point, index) => {
+      const dx = event.clientX - rect.left - point.x * rect.width / (canvas.width / 2);
+      const dy = event.clientY - rect.top - point.y * rect.height / (canvas.height / 2);
+      const d = dx * dx + dy * dy;
+      if (d < distance) { best = index; distance = d; }
+    });
+    return best;
+  }
+
+  const previous = el('button', '', 'Previous');
+  const counter = el('span');
+  const next = el('button', '', 'Next');
+  const close = el('button', '', 'Close');
+  function step(delta) {
+    show((selected + delta + points.length) % points.length, true);
+  }
+  for (const button of [previous, next, close]) button.type = 'button';
+  previous.addEventListener('click', () => step(-1));
+  next.addEventListener('click', () => step(1));
+  close.addEventListener('click', () => { hide(); canvas.focus({preventScroll: true}); });
+  controls.append(previous, counter, next, close);
+  detail.append(text, controls);
+  surface.append(canvas, ring);
+  wrapper.append(surface, detail, hint);
+  canvas.addEventListener('pointermove', event => {
+    if (event.pointerType !== 'mouse' || pinned) return;
+    const index = nearest(event);
+    canvas.style.cursor = index < 0 ? '' : 'pointer';
+    if (index < 0) hide();
+    else show(index, false);
+  });
+  wrapper.addEventListener('pointerleave', () => { if (!pinned) hide(); });
+  // Some touch browsers emit a MouseEvent for click, without pointerType.
+  canvas.addEventListener('pointerdown', event => { clickPointerType = event.pointerType; });
+  canvas.addEventListener('pointercancel', () => { clickPointerType = undefined; });
+  canvas.addEventListener('click', event => {
+    const index = nearest(event, event.pointerType || clickPointerType);
+    clickPointerType = undefined;
+    if (index < 0 || (pinned && index === selected)) hide();
+    else show(index, true);
+  });
+  canvas.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Enter', ' '].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === 'End') show(points.length - 1, true);
+    else if (event.key === 'Home' || selected < 0) show(0, true);
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') step(-1);
+    else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') step(1);
+    else show(selected, true);
+  });
+  wrapper.addEventListener('focusout', event => {
+    // Touch browsers can blur the canvas without focusing the tapped button.
+    // Outside taps are handled by pointerdown; a null focus target is ambiguous.
+    if (event.relatedTarget && !wrapper.contains(event.relatedTarget)) hide();
+  });
+  return wrapper;
+}
 
 function el(tag, className, text) {
   const item = document.createElement(tag);
@@ -245,6 +461,7 @@ function drawStatusMarkers(rows, series, xLabel, xPosition, statusPosition) {
 }
 
 function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
+  const hitPoints = [];
   const canvas = el('canvas', 'curve');
   canvas.width = 640;
   canvas.height = bounds ? 318 : 70;
@@ -300,10 +517,13 @@ function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
       ctx.beginPath();
       ctx.arc(x(i), y(value), 2.6, 0, 2 * Math.PI);
       ctx.fill();
+      hitPoints.push({x: x(i), y: y(value), description: pointDescription(row,
+        comparisonPairs([row], pointContext.benchmarks).filter(pair => pair.unit === unit), {}, curve.id)});
     });
   }
   return {
     canvas,
+    hitPoints,
     xPosition: value => xAxis.position(value) / (canvas.width / 2),
     statusPosition: (bounds ? bottom - 4 : bottom) / (canvas.height / 2),
   };
@@ -326,15 +546,22 @@ function chartWithScales(key, rows, curves, series, xLabel, unit) {
   const figure = el('div', 'plot-figure');
   const hasStatuses = rows.some(row => series.some(curve => isMarked(row, curve.id)));
   function redrawPlot() {
-    const {canvas, xPosition, statusPosition} = drawCurve(rows, curves, xLabel, unit, bounds, scales);
+    closePointDetails();
+    const {canvas, hitPoints, xPosition, statusPosition} = drawCurve(rows, curves, xLabel, unit, bounds, scales);
+    const interactive = interactivePlot(canvas, hitPoints);
     if (!hasStatuses) {
-      figure.replaceChildren(canvas);
+      figure.replaceChildren(interactive);
       return;
     }
     const surface = el('div', 'plot-surface');
     const {track, detail} = drawStatusMarkers(rows, series, xLabel, xPosition, statusPosition);
-    surface.append(canvas, track);
-    figure.replaceChildren(surface, detail);
+    if (hitPoints.length) {
+      interactive.querySelector('.point-surface').append(track);
+      figure.replaceChildren(interactive, detail);
+    } else {
+      surface.append(canvas, track);
+      figure.replaceChildren(surface, detail);
+    }
   }
   redrawPlot();
   for (const axis of ['x', 'y']) {
@@ -502,6 +729,9 @@ function renderHeader(report, progress) {
 }
 
 function renderCharts(report, benchmarks, data) {
+  closePointDetails();
+  closePointDetails = () => {};
+  pointContext = {benchmarks, groups: report.groups};
   const measured = data.filter(point => Object.values(point.values).some(Number.isFinite) ||
     Object.keys(point.statuses ?? {}).some(id => isMarked(point, id)));
   const groups = [...new Set(measured.map(point => point.group))];
