@@ -21,7 +21,7 @@ JSON Schema validates the structure. Producers and consumers also check cross-re
 - Every series key in a point's `values` or `statuses` is declared in its benchmark's `values`. Status entries describe unavailable results.
 - Each combination of group, benchmark, `x`, and non-scaling parameter values appears at most once.
 
-Within a tab, the renderer makes one plot for each benchmark and non-scaling parameter combination. Each value key is a curve over `x`.
+Within a tab, the renderer makes one plot for each benchmark and non-scaling parameter combination. Each value key is a curve over `x`. Each benchmark occupies a full-width card. Its series cards wrap into three, two, or one columns as the viewport narrows, with equal widths and heights within that benchmark. Different benchmarks can have different series-card heights; content, including pinned point details, remains fully visible.
 
 ## Accuracy summary
 

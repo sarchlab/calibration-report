@@ -628,6 +628,7 @@ function plotBenchmark(id, rows, meta, pairs) {
   const units = Map.groupBy(curves, curve => curve.unit);
   const axisUnit = meta.params[meta.scaling_param].unit;
   const xLabel = displayName(meta.scaling_param) + (axisUnit ? ' (' + axisUnit + ')' : '');
+  const seriesGrid = el('div', 'series-grid');
 
   for (const [parameters, group] of fixed) {
     group.sort((a, b) => a.x - b.x);
@@ -657,8 +658,9 @@ function plotBenchmark(id, rows, meta, pairs) {
       );
       section.append(plot);
     }
-    card.append(section);
+    seriesGrid.append(section);
   }
+  card.append(seriesGrid);
   return card;
 }
 
