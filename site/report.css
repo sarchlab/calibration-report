@@ -235,7 +235,7 @@ button[aria-pressed="true"] { color: #fff; background: var(--accent); border-col
   body { --point-panel-width: 300px; }
 }
 @media (max-width: 820px) and (orientation: portrait), (hover: none) and (orientation: portrait), (pointer: coarse) and (orientation: portrait) {
-  body.point-details-open { padding-right: 0; }
+  body.point-details-open { padding-right: 0; padding-bottom: 50vh; padding-bottom: 50dvh; }
   .point-detail-pinned { top: auto; right: 0; bottom: 0; left: 0; width: auto; max-width: none; max-height: 50vh; max-height: 50dvh; border-radius: 12px 12px 0 0; padding-bottom: max(14px, env(safe-area-inset-bottom)); }
 }
 
