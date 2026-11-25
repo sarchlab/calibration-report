@@ -56,11 +56,11 @@ CREATE TABLE cr.runs (
   id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   -- one URL segment: no '/', no '.' or '..'
   key         text NOT NULL UNIQUE CHECK (key ~ '^[A-Za-z0-9_-][A-Za-z0-9._-]{0,199}$'),
-  title       text NOT NULL CHECK (title <> '' AND char_length(title) <= 500),
-  description text NOT NULL DEFAULT '' CHECK (char_length(description) <= 10000),
+  title       text NOT NULL CHECK (title <> '' AND octet_length(title) <= 500),
+  description text NOT NULL DEFAULT '' CHECK (octet_length(description) <= 10000),
   state       text NOT NULL DEFAULT 'running'
               CHECK (state IN ('running', 'completed', 'failed')),
-  progress    jsonb NOT NULL CHECK (jsonb_typeof(progress) = 'object'),  -- data.json "progress", verbatim
+  progress    jsonb NOT NULL CHECK (jsonb_typeof(progress) = 'object' AND octet_length(progress::text) <= 4096),  -- data.json "progress", verbatim
   revision    bigint NOT NULL DEFAULT 0,  -- incremented by every data write, under the run row lock
   created_at  timestamptz NOT NULL DEFAULT now(),
   updated_at  timestamptz NOT NULL DEFAULT now()
@@ -69,8 +69,8 @@ CREATE TABLE cr.runs (
 CREATE TABLE cr.groups (
   id     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   run_id bigint NOT NULL REFERENCES cr.runs ON DELETE CASCADE,
-  key    text NOT NULL CHECK (key <> '' AND char_length(key) <= 200),
-  name   text NOT NULL CHECK (name <> '' AND char_length(name) <= 200),
+  key    text NOT NULL CHECK (key <> '' AND octet_length(key) <= 200 AND key !~ '[[:cntrl:]]'),
+  name   text NOT NULL CHECK (name <> '' AND octet_length(name) <= 200 AND name !~ '[[:cntrl:]]'),
   UNIQUE (run_id, key),
   UNIQUE (id, run_id)
 );
@@ -78,7 +78,7 @@ CREATE TABLE cr.groups (
 CREATE TABLE cr.benchmarks (
   id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   run_id        bigint NOT NULL REFERENCES cr.runs ON DELETE CASCADE,
-  key           text NOT NULL CHECK (key <> '' AND char_length(key) <= 200),
+  key           text NOT NULL CHECK (key <> '' AND octet_length(key) <= 200 AND key !~ '[[:cntrl:]]'),
   scaling_param text NOT NULL,
   UNIQUE (run_id, key),
   UNIQUE (id, run_id)
@@ -86,8 +86,8 @@ CREATE TABLE cr.benchmarks (
 
 CREATE TABLE cr.params (
   benchmark_id bigint NOT NULL REFERENCES cr.benchmarks ON DELETE CASCADE,
-  key          text NOT NULL CHECK (key <> '' AND char_length(key) <= 200),
-  unit         text NOT NULL CHECK (char_length(unit) <= 50),
+  key          text NOT NULL CHECK (key <> '' AND octet_length(key) <= 200 AND key !~ '[[:cntrl:]]'),
+  unit         text NOT NULL CHECK (octet_length(unit) <= 50 AND unit !~ '[[:cntrl:]]'),
   ordinal      integer NOT NULL CHECK (ordinal >= 0),  -- declaration order in data.json
   PRIMARY KEY (benchmark_id, key),
   UNIQUE (benchmark_id, ordinal)
@@ -102,9 +102,9 @@ ALTER TABLE cr.benchmarks
 CREATE TABLE cr.series (
   id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   benchmark_id bigint NOT NULL REFERENCES cr.benchmarks ON DELETE CASCADE,
-  key          text NOT NULL CHECK (key <> '' AND char_length(key) <= 200),
-  name         text NOT NULL CHECK (name <> '' AND char_length(name) <= 200),
-  unit         text NOT NULL CHECK (char_length(unit) <= 50),
+  key          text NOT NULL CHECK (key <> '' AND octet_length(key) <= 200 AND key !~ '[[:cntrl:]]'),
+  name         text NOT NULL CHECK (name <> '' AND octet_length(name) <= 200 AND name !~ '[[:cntrl:]]'),
+  unit         text NOT NULL CHECK (octet_length(unit) <= 50 AND unit !~ '[[:cntrl:]]'),
   role         text CHECK (role IN ('hardware_measurement', 'simulator_output')),
   UNIQUE (benchmark_id, key),
   UNIQUE (id, benchmark_id)
@@ -149,8 +149,8 @@ CREATE TABLE cr.observations (
   value        double precision CHECK (value NOT IN ('NaN', 'Infinity', '-Infinity')),
   state        text CHECK (state IN ('queued', 'running', 'failed', 'verification_failed',
                                      'timeout', 'memory_limit', 'unsupported')),
-  reason       text CHECK (reason <> '' AND char_length(reason) <= 1000),
-  symbol       text CHECK (symbol <> '' AND char_length(symbol) <= 16),
+  reason       text CHECK (reason <> '' AND octet_length(reason) <= 1000),
+  symbol       text CHECK (symbol <> '' AND octet_length(symbol) <= 16),
   PRIMARY KEY (point_id, series_id),
   FOREIGN KEY (point_id, benchmark_id) REFERENCES cr.points (id, benchmark_id) ON DELETE CASCADE,
   -- Rule: every series key in values/statuses is declared by the point's benchmark.
@@ -171,7 +171,7 @@ Some rules compare a row with a set of rows, so they cannot be constraints. The 
 - `non_scaling_params` has exactly the declared parameters other than the scaling parameter.
 - `values` has at least one key (`minProperties: 1`).
 - A benchmark has at most 32 parameters and 64 series, which bounds one serialized point to well under 100 KB. A run has at most 16 groups, 1,000 benchmarks, and 32 distinct role-tagged series keys, which bounds the exact part of a summary (§5).
-- A run's declared metadata (`report` and `benchmarks`, serialized) is at most **2 MB**, checked by `open_run` on create and on every append. With the index arrays of §5 this keeps the manifest under 2.5 MB, well inside the 6 MB Function limit.
+- A run's declared metadata (`report` and `benchmarks`, serialized as JSON) is at most **2 MB**, checked by `open_run` on create and on every append. Keys, names, and units are bounded in UTF-8 bytes (`octet_length`) and contain no control characters, so JSON escaping at most doubles them. The manifest adds `benchmark_keys` (≤ 1,000 × 403 bytes ≈ 400 KB), `plots` arrays (≤ 16 × 1,000 × ≈ 12 bytes ≈ 190 KB), `group_order`, and `progress` (≤ 4 KB), so it stays under about 2.6 MB, well inside the 6 MB Function limit.
 - Metadata is append-only. `cr.open_run` may add groups, benchmarks, and series. It rejects a changed scaling parameter, series unit or role, or group name, and **any change to an existing benchmark's parameter set**, because stored points were validated against that set. It also rejects a role-tagged series key whose name, unit, or role differs from an earlier declaration of the same key in the run, so the 32-key cap bounds distinct series definitions.
 
 `plots.visible` is true when the plot has a point with a finite value or a drawn status (`failed`, `verification_failed`, `timeout`, `memory_limit`, `unsupported`, `running`), mirroring `isMarked` and `visibleStates` in `site/model.js`, which `indexReport` uses to drop rows. `cr.put_points` recomputes it for touched plots, so it can turn false.
@@ -197,7 +197,7 @@ Each function locks the run row (`SELECT ... FOR UPDATE`; `open_run` first runs 
 
 | Call | Arguments | Effect |
 |---|---|---|
-| `cr.open_run(run_key, report, benchmarks, progress)` | `report`, `benchmarks`, and `progress` objects from `data.json` (`report.live` is ignored) | Creates the run in state `running` with the given `progress`, appends metadata to a `running` run, or **reopens a `failed` run**. Each of these increments `revision` and sets `updated_at`; a call that changes nothing writes nothing. Never touches the progress of an existing run. Rejects a `completed` run, which is terminal. |
+| `cr.open_run(run_key, report, benchmarks, progress)` | `report`, `benchmarks`, and `progress` objects from `data.json` (`report.live` is ignored) | Creates the run in state `running` with the given `progress`, appends metadata to a `running` run, or **reopens a `failed` run**. A changed `title` or `description` is updated in place. Each of these increments `revision` and sets `updated_at`; a call that changes nothing writes nothing. Any other difference from stored metadata (for example a parameter unit or an untagged series name) is rejected with an error naming the field. Never touches the progress of an existing run. Rejects a `completed` run, which is terminal. |
 | `cr.put_points(run_key, points, progress)` | array of `data.json` points (may be empty); optional `progress` | Requires `running`. Upserts plots, points, and observations; recomputes `visible` for touched plots; replaces `progress` when given; sets `updated_at`; increments `revision`. |
 | `cr.heartbeat(run_key)` | | Requires `running`. Sets `updated_at` only. It does **not** increment `revision`, so it never invalidates a cached summary (§5). |
 | `cr.finish_run(run_key, state, progress)` | `state` is `completed` or `failed` | From `running`, sets the final state and progress and increments `revision`. Succeeds without writing if the run is already in the requested state; rejects the other terminal state. |
@@ -261,7 +261,7 @@ Every endpoint is a Netlify Function under `/api/v1/` that returns JSON. `v1` is
 | `/{key}` | manifest (below) | header, progress, tabs, benchmark pagination, live polling |
 | `/{key}/summary?rid=&scope=` | summary of one scope: `group:<id>` or `overview` (below) | summary section, benchmark-wide error |
 | `/{key}/plots?rid=&group=&benchmark=&offset=&limit=[&after=PLOT:X][&all=1]` | `{revision, total, plots: [{id, non_scaling_params, rows: [point]}], next}` | series pages inside one benchmark card; export |
-| `/{key}/points/{plot}/{x}?rid=` | one full `data.json` point | point details opened from a summary chart |
+| `/{key}/points/{plot}/{x}?rid=` | `{revision, point}`: one full `data.json` point and the revision it was read at | point details opened from a summary chart |
 
 HTTP caching: only data responses whose URL carries `rid` (`summary`, `plots`, `points`) may be `Cache-Control: public, max-age=31536000, immutable`, and only once the run is `completed`; such a URL names a historical run, so it stays valid after the key is reused. Data responses about `running` and `failed` runs are `no-cache`. `/runs` and the key-only manifest are **always** `no-cache` with an ETag and `304`, also for completed runs, so a deleted and reimported key is picked up. The manifest's ETag is `"<run id>-<revision>-<updated_at>"` (data writes increment `revision`, a heartbeat changes only `updated_at`); `/runs` uses a hash of its body. The viewer derives staleness from `updated_at` (§6).
 
@@ -318,7 +318,8 @@ Sampled charts say so ("3,000 of 212,000 comparisons shown").
 ```json
 {
   "rid": 7, "key": "mgpusim.mi300x.2026-11-25-434ad66", "scope": "group:3", "revision": 418,
-  "state": "running", "computed_at": "2026-11-25T16:20:05Z", "count": 212000,
+  "state": "running", "computed_at": "2026-11-25T16:20:05Z", "min_interval": 60, "count": 212000,
+  "groups": [[3, "mi300x", "AMD MI300X"]],
   "stats": [["Average error", "18.2%"], ["Max error", "412%"]],
   "percentiles": [["P50", "9.81%"], ["P90", "41.0%"], ...],
   "series": [["mi300x", "MI300X kernel time", "ns"], ["mgpusim", "MGPUSim kernel time", "ns"]],
@@ -329,19 +330,19 @@ Sampled charts say so ("3,000 of 212,000 comparisons shown").
   "scurve": {"sample": [0], "rank": [118000]},
   "cdf": {"log": true, "sample": [0], "rank": [160500]},
   "scatter": {"ns": {"log": true, "count": 212000, "sample": [0], "stats": [["Kendall’s τ-b", "0.912"], ...]}},
-  "benchmark_stats": {"polybench_fdtd2d": {"count": 1184, "stats": [["Average error", "12.0%"], ["Max error", "88.1%"]]}}
+  "benchmark_stats": [[0, 1184, [["Average error", "12.0%"], ["Max error", "88.1%"]]]]
 }
 ```
 
-`samples` holds the union of the three samples in columns, and the charts index into it. A sample carries what click-through needs (`plot`, `x`, `pair`) and, through `plots` (`[group index, benchmark index, non_scaling_params]`), what hover needs (`PointDescription` reads `point.non_scaling_params.launch`, `site/PointDetails.jsx:41`). The full point is loaded on selection. In a multi-group Overview, pairs are relabeled per group as today, and the group index identifies the sample's group.
+`samples` holds the union of the three samples in columns, and the charts index into it. A sample carries what click-through needs (`plot`, `x`, `pair`) and, through `plots` (`[group index, benchmark index, non_scaling_params]`), what hover needs (`PointDescription` reads `point.non_scaling_params.launch`, `site/PointDetails.jsx:41`). The full point is loaded on selection. Group indices refer to the summary's own `groups` array (`[id, key, name]` from the same snapshot, in id order), never to the manifest's `group_order`. In a multi-group Overview, pairs are relabeled per group as today. `benchmark_stats` entries are `[benchmark index, comparison count, statistics]`, so each benchmark key is serialized once.
 
-**Byte budget: 2 MB serialized**, well under the 6 MB buffered limit. The §3 limits bound the exact part: `benchmarks` and `benchmark_stats` ≤ 1,000 × (≤ 200-byte key + ≤ 300 bytes of count and statistics) ≈ 500 KB; `series` ≤ 32 distinct definitions × ≤ 500 bytes ≈ 16 KB; `pairs` ≤ 32 × 32 index pairs per group × 16 groups ≈ 160 KB; per-unit statistics ≤ 32 × ≈ 300 bytes ≈ 10 KB; totals and percentiles ≈ 1 KB. That is under 700 KB, leaving at least 1.3 MB for samples. If the samples do not fit, `buildSummary` halves every sample limit and samples again until they fit. The result is deterministic and the exact part is unchanged.
+**Byte budget: 2 MB serialized**, well under the 6 MB buffered limit. Worst cases follow from the §3 limits, with JSON escaping at most doubling a key, name, or unit (no control characters): `benchmarks` ≤ 1,000 × 403 bytes ≈ 400 KB; `benchmark_stats` ≤ 1,000 × ≈ 110 bytes ≈ 110 KB; `groups` ≤ 16 × ≈ 830 bytes ≈ 13 KB; `series` ≤ 32 × ≈ 930 bytes ≈ 30 KB; `pairs` ≤ 16 groups × 1,024 × ≈ 12 bytes ≈ 200 KB; per-unit statistics ≤ 32 × ≈ 400 bytes ≈ 13 KB; totals and percentiles ≈ 1 KB. The exact part is therefore under 800 KB, leaving at least 1.2 MB for samples. If the samples do not fit, `buildSummary` halves every sample limit and samples again; at limit 0 it returns the exact part alone, which fits by construction. If a response still exceeds 2 MB (the invariant is broken), the Function returns `500`, logs an error, and caches nothing. Sampling is deterministic and never changes the exact part.
 
 ### Summary cache
 
 Rule: compute only on request, and recompute only when new data has arrived and the cached result is at least `SUMMARY_MIN_INTERVAL` old. That is one Netlify environment variable (default 60 s) set from the plan-tier answer (§8): 60 s if the tier's database egress allows it, about 10 minutes on Free. The tier gate changes this value, not the design. Nothing is computed on write; there are no background jobs and no locks.
 
-Each scope has one record in the site-wide Netlify Blobs store `getStore({name: "summaries", consistency: "strong"})` under `v1/<run id>/<scope>` (`group:<id>` or `overview`) ([Netlify Blobs](https://docs.netlify.com/build/data-and-storage/netlify-blobs/); Functions use it without configuration; keys ≤ 600 bytes, metadata ≤ 2 KB). The value is the response body; the metadata is `{key, revision, state, computed_at}`.
+Each scope has one record in the site-wide Netlify Blobs store `getStore({name: "summaries", consistency: "strong"})` under `v1/<run id>/<scope>` (`group:<id>` or `overview`) ([Netlify Blobs](https://docs.netlify.com/build/data-and-storage/netlify-blobs/); Functions use it without configuration; keys ≤ 600 bytes, metadata ≤ 2 KB). The value is the response body; the metadata is `{key, revision, state, computed_at}`. A live response carries `ETag: "<rid>-<scope>-<revision computed at>"` and answers a matching `If-None-Match` with `304`.
 
 On each request the Function:
 
@@ -370,13 +371,14 @@ A build setting, `VITE_HOSTED=1`, is set only in the Netlify build (`netlify.tom
 - Tabs follow `group_order` (groups with a non-zero visible plot count); Overview exists when the Overview summary's `count` is non-zero. The file source derives the same from `indexReport` (`site/App.jsx:244,285-286`).
 - `Summary` and the summary drawings in `site/drawing.js` consume the summary object (exact statistics, sampled series) instead of the full pair list.
 - Benchmark cards take counts from the manifest, rows from `plots` pages, and benchmark-wide error from `benchmark_stats`.
-- Opening a sampled point fetches `/points/{plot}/{x}`. `PointDetails` shows the result only if the selection is still that point and the summary revision is unchanged, so a late response cannot replace a newer selection.
+- A sampled point's details show the sample's own values and derived metrics (error, rank, percentile). The panel also fetches `/points/{plot}/{x}` and merges the raw point only if its `revision` equals the summary's; otherwise it shows it separately, labeled as newer. A response for a selection that has since changed is dropped.
 
 Polling, API source only:
 
 - Poll the manifest every 10 s while the run is `running`, not stale, and the tab is visible; every 60 s after 5 minutes without a new revision.
 - Stop once the run is stale (`updated_at` more than 30 minutes old; writers heartbeat every 5 minutes) and offer a manual refresh.
-- On a new revision, refetch the visible `plots` pages. Request the summary whenever its revision is older than the manifest's; the server decides whether to recompute.
+- On a new revision, refetch the visible `plots` pages.
+- After every manifest poll, including a `304`, re-request the active summary only if the manifest's revision is greater than the summary's **and** `computed_at + min_interval` has passed, so a run that only heartbeats still catches up. On observing `completed`, fetch the final summary once.
 
 Import and export mapping:
 
