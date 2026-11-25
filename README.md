@@ -55,13 +55,13 @@ Run `npm test` for the React interaction and statistics checks plus the Python s
 
 ## Generate a report with npm
 
-The npm package includes the prebuilt viewer and a small command-line tool. Generate a static report without cloning this repository or installing frontend build dependencies:
+The npm package includes the prebuilt viewer and a small command-line tool. Running the CLI requires Node.js 22.22.2+ on the 22.x line, 24.15.0+ on the 24.x line, or Node.js 26+. Generate a static report without cloning this repository or installing frontend build dependencies:
 
 ```sh
 npx calibration-report@0.3.0 --data ./data.json --out ./report
 ```
 
-The output contains `index.html`, bundled `assets/`, and a byte-for-byte copy of the supplied `data.json`. Publish this directory on a static host, or preview it over HTTP:
+The output contains `index.html`, bundled `assets/`, `THIRD_PARTY_LICENSES.md`, and a byte-for-byte copy of the supplied `data.json`. Publish this directory on a static host, or preview it over HTTP:
 
 ```sh
 python3 -m http.server 8000 --directory ./report
@@ -93,7 +93,7 @@ The viewer reads only `data.json`. With `report.live: true`, it shows a live ind
 
 ## Package publishing
 
-`npm pack` runs the production build through `prepack`. The publish allowlist includes only the CLI, built HTML/JavaScript/CSS, JSON Schema, README and package metadata. It excludes exported report data, source maps, source files, tests and development dependencies. Consumers do not run a build during installation. Inspect the tarball and run `npm test` before publishing; version changes should update both `package.json` and `package-lock.json`.
+`npm pack` runs the production build through `prepack`. The publish allowlist includes only the CLI, built HTML/JavaScript/CSS, generated third-party license notices, JSON Schema, README and package metadata. Vite collects the full license text for dependencies included in the final browser bundle. Keep `THIRD_PARTY_LICENSES.md` with the generated site when redistributing it. The package excludes exported report data, source maps, source files, tests and development dependencies. Consumers do not run a build during installation. Inspect the tarball and run `npm test` before publishing; version changes should update both `package.json` and `package-lock.json`.
 
 ## Repository scope
 

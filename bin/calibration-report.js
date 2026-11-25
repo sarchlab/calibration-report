@@ -52,7 +52,11 @@ async function main() {
   const viewer = join(packageRoot, 'dist');
   const assets = (await readdir(join(viewer, 'assets')))
     .filter((name) => /\.(js|css)$/.test(name));
-  const files = ['index.html', ...assets.map((name) => join('assets', name))];
+  const files = [
+    'index.html',
+    'THIRD_PARTY_LICENSES.md',
+    ...assets.map((name) => join('assets', name)),
+  ];
   if (!assets.length) throw new Error('Bundled viewer assets are missing. Reinstall calibration-report.');
   for (const file of files) {
     if (!(await lstat(join(viewer, file))).isFile())

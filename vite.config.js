@@ -5,7 +5,11 @@ export default defineConfig({
   root: 'site',
   base: './',
   plugins: [react()],
-  build: {outDir: '../dist', emptyOutDir: true},
+  build: {
+    outDir: '../dist',
+    emptyOutDir: true,
+    license: {fileName: 'THIRD_PARTY_LICENSES.md'},
+  },
   test: {
     root: '.',
     environment: 'jsdom',

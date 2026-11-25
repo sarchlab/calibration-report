@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {after, before, test} from 'node:test';
-import {mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile} from 'node:fs/promises';
+import {cp, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const metadata = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
-let temporary, install, executable, packageRoot, packedFiles;
+let temporary, install, executable, packageRoot, packedFiles, originalDistData;
 const inputBytes = await readFile(join(root, 'examples/data.json'));
 const run = (command, args, cwd = temporary) => spawnSync(command, args, {
   cwd, encoding: 'utf8', timeout: 60000,
@@ -21,16 +21,27 @@ const cli = (...args) => run(executable, args);
 
 before(async () => {
   temporary = await mkdtemp(join(tmpdir(), 'calibration-report-package-'));
-  // Exercise the actual prepack hook: installed consumers need no build tools.
-  succeed(run('npm', ['pack', '--pack-destination', temporary], root));
-  const privateData = join(root, 'dist/data.json');
-  const sourceMap = join(root, 'dist/assets/private.js.map');
-  const extraAsset = join(root, 'dist/assets/private.json');
+  originalDistData = await readFile(join(root, 'dist/data.json')).catch((error) => {
+    if (error.code !== 'ENOENT') throw error;
+    return null;
+  });
+  // Exercise prepack in a copied checkout, preserving the real preview/data.
+  const fixture = join(temporary, 'source');
+  await mkdir(fixture);
+  for (const path of ['package.json', 'README.md', 'vite.config.js', 'bin', 'site', 'data.schema.json'])
+    await cp(join(root, path), join(fixture, path), {
+      recursive: true, filter: (source) => source !== join(root, 'site/data.json'),
+    });
+  await symlink(join(root, 'node_modules'), join(fixture, 'node_modules'), 'dir');
+  succeed(run('npm', ['pack', '--pack-destination', temporary], fixture));
+  const privateData = join(fixture, 'dist/data.json');
+  const sourceMap = join(fixture, 'dist/assets/private.js.map');
+  const extraAsset = join(fixture, 'dist/assets/private.json');
   await writeFile(privateData, 'PRIVATE_CALIBRATION_DATA');
   await writeFile(sourceMap, 'PRIVATE_SOURCE_MAP');
   await writeFile(extraAsset, 'PRIVATE_EXTRA_ASSET');
   try {
-    const result = succeed(run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', temporary], root));
+    const result = succeed(run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', temporary], fixture));
     packedFiles = JSON.parse(result.stdout)[0].files.map((file) => file.path);
   } finally {
     await Promise.all([privateData, sourceMap, extraAsset].map((file) => rm(file)));
@@ -47,9 +58,17 @@ after(async () => {
   if (temporary) await rm(temporary, {recursive: true, force: true});
 });
 
+test('packing leaves the source checkout report data unchanged', async () => {
+  const current = await readFile(join(root, 'dist/data.json')).catch((error) => {
+    if (error.code !== 'ENOENT') throw error;
+    return null;
+  });
+  assert.deepEqual(current, originalDistData);
+});
+
 test('published contents exclude local data, source maps and development files', async () => {
   assert.deepEqual(packedFiles.filter((name) => !name.startsWith('dist/assets/')), [
-    'README.md', 'bin/calibration-report.js', 'data.schema.json', 'dist/index.html', 'package.json',
+    'README.md', 'bin/calibration-report.js', 'data.schema.json', 'dist/index.html', 'dist/THIRD_PARTY_LICENSES.md', 'package.json',
   ]);
   assert.equal(packedFiles.filter((name) => name.startsWith('dist/assets/')).length, 2);
   assert(packedFiles.every((name) => !name.endsWith('data.json') && !name.endsWith('.map')));
@@ -58,6 +77,18 @@ test('published contents exclude local data, source maps and development files',
   assert.equal(installed.scripts.install, undefined);
   assert.equal(installed.scripts.postinstall, undefined);
   assert.deepEqual((await readdir(join(install, 'node_modules'))).filter((name) => !name.startsWith('.')), ['calibration-report']);
+});
+
+test('the bundled viewer preserves complete dependency license notices', async () => {
+  const notices = await readFile(join(packageRoot, 'dist/THIRD_PARTY_LICENSES.md'), 'utf8');
+  for (const dependency of ['@mantine/core', '@mantine/hooks', 'clsx', 'react', 'react-dom', 'react-number-format', 'scheduler']) {
+    const directory = join(root, 'node_modules', dependency);
+    const pkg = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'));
+    const filename = dependency === 'clsx' ? 'license' : 'LICENSE';
+    const license = await readFile(join(directory, filename), 'utf8');
+    assert(notices.includes(`## ${dependency} - ${pkg.version} (MIT)`), dependency);
+    assert(notices.includes(license.trim()), dependency + ' full license text');
+  }
 });
 
 test('installed executable generates byte-identical data and relative assets in a path with spaces', async () => {
@@ -70,7 +101,7 @@ test('installed executable generates byte-identical data and relative assets in 
   const html = await readFile(join(output, 'index.html'), 'utf8');
   const references = [...html.matchAll(/(?:src|href)="\.\/([^"]+)"/g)].map((match) => match[1]);
   assert.equal(references.length, 2);
-  for (const asset of ['index.html', ...references])
+  for (const asset of ['index.html', 'THIRD_PARTY_LICENSES.md', ...references])
     assert.deepEqual(await readFile(join(output, asset)), await readFile(join(packageRoot, 'dist', asset)));
   const empty = join(temporary, 'existing empty');
   await mkdir(empty);
