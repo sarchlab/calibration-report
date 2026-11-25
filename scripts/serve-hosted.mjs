@@ -12,6 +12,8 @@ import {handleApi} from '../netlify/lib/api.js';
 const root = new URL('../dist/', import.meta.url).pathname;
 const port = Number(process.argv[2] ?? 8888);
 const pool = new pg.Pool({connectionString: process.env.NETLIFY_DB_URL});
+// An idle client's disconnect is emitted here; unhandled, it ends the process.
+pool.on('error', (error) => console.error('Idle database client error:', error.message));
 const types = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',

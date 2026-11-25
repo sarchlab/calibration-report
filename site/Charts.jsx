@@ -100,6 +100,20 @@ export function PlotCanvas({spec, theme, summary = false}) {
     pointer = useRef();
   const id = useId();
   useLayoutEffect(() => () => removePlot(id), [id, removePlot]);
+  // Refreshed rows replace what a hover or pinned selection pointed at.
+  // Rebuilt arrays of the same row objects (new metadata) are not a refresh.
+  const shownRows = useRef(spec.rows);
+  useLayoutEffect(() => {
+    const previous = shownRows.current;
+    shownRows.current = spec.rows;
+    if (
+      previous === spec.rows ||
+      (previous?.length === spec.rows?.length &&
+        previous.every((row, i) => row === spec.rows[i]))
+    )
+      return;
+    removePlot(id);
+  }, [spec.rows, id, removePlot]);
   const [drawing, setDrawing] = useState(null);
   const [statusDetail, setStatusDetail] = useState('');
   useLayoutEffect(() => {

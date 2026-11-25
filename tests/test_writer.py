@@ -71,6 +71,40 @@ class WriterTest(unittest.TestCase):
         self.assertEqual([call for call, _ in log], ["cr.open_run", "cr.put_points", "cr.put_points", "cr.put_points"])
         self.assertEqual([[p["x"] for p in args[1]] for call, args in log[1:]], [[0, 1], [2, 3], [4]])
 
+    def test_points_and_progress_are_snapshots(self):
+        log = []
+        w = self.writer(log, batch_points=10)
+        w.open({}, {}, {})
+        point = {"x": 1, "values": {"hw": 1}}
+        w.add(point)
+        point["x"] = 2
+        point["values"]["hw"] = 2
+        w.add(point)
+        progress = {"total": 2, "completed": 1, "running": 0}
+        w.set_progress(progress)
+        progress["completed"] = 2
+        w.flush()
+        _, (_, batch, sent) = log[-1]
+        self.assertEqual(batch, [{"x": 1, "values": {"hw": 1}}, {"x": 2, "values": {"hw": 2}}])
+        self.assertEqual(sent["completed"], 1)
+
+    def test_pending_progress_flushes_instead_of_heartbeats(self):
+        log, clock = [], Clock()
+        w = self.writer(log, clock=clock, flush_seconds=30, heartbeat_seconds=10)
+        w._timer = object()
+        w.open({}, {}, {})
+        w.set_progress({"total": 1, "completed": 1, "running": 0})
+        clock.now = 15
+        w.tick()  # past the heartbeat interval, before the flush deadline
+        self.assertEqual(len(log), 1)
+        clock.now = 31
+        w.tick()
+        self.assertEqual(log[-1], ("cr.put_points", ["run", [], {"total": 1, "completed": 1, "running": 0}]))
+        clock.now = 42
+        w.tick()
+        self.assertEqual(log[-1], ("cr.heartbeat", ["run"]))
+        w._timer = None
+
     def test_lost_connection_replays_the_same_batch(self):
         log = []
         w = self.writer(log, batch_points=10)

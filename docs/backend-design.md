@@ -342,11 +342,12 @@ Sampled charts say so ("3,000 of 212,000 comparisons shown").
 {
   "rid": 7, "key": "mgpusim.mi300x.2026-11-25-434ad66", "scope": "group:3", "revision": 418,
   "state": "running", "computed_at": "2026-11-25T16:20:05Z", "min_interval": 60, "count": 212000,
+  "relabeled": false,
   "groups": [[3, "mi300x", "AMD MI300X"]],
   "stats": [["Average error", "18.2%"], ["Max error", "412%"]],
   "percentiles": [["P50", "9.81%"], ["P90", "41.0%"], ...],
   "series": [["mi300x", "MI300X kernel time", "ns"], ["mgpusim", "MGPUSim kernel time", "ns"]],
-  "pairs": [[0, 1]],
+  "pairs": [[null, 0, 1]],
   "benchmarks": ["polybench_fdtd2d"],
   "plots": {"17": [0, 0, {"tmax": 10}]},
   "samples": {"plot": [17], "x": [64], "pair": [0], "actual": [57889], "prediction": [79339]},
@@ -357,7 +358,7 @@ Sampled charts say so ("3,000 of 212,000 comparisons shown").
 }
 ```
 
-`samples` holds the union of the three samples in columns, and the charts index into it. A sample carries what click-through needs (`plot`, `x`, `pair`) and, through `plots` (`[group index, benchmark index, non_scaling_params]`), what hover needs (`PointDescription` reads `point.non_scaling_params.launch`, `site/PointDetails.jsx:41`). The full point is loaded on selection. Group indices refer to the summary's own `groups` array (`[id, key, name]` from the same snapshot, in id order), never to the manifest's `group_order`. In a multi-group Overview, pairs are relabeled per group as today. `benchmark_stats` entries are `[benchmark index, comparison count, statistics]`, so each benchmark key is serialized once.
+`samples` holds the union of the three samples in columns, and the charts index into it. A sample carries what click-through needs (`plot`, `x`, `pair`) and, through `plots` (`[group index, benchmark index, non_scaling_params]`), what hover needs (`PointDescription` reads `point.non_scaling_params.launch`, `site/PointDetails.jsx:41`). The full point is loaded on selection. Group indices refer to the summary's own `groups` array (`[id, key, name]` from the same snapshot, in id order), never to the manifest's `group_order`. `series` entries are `[key, name, unit]`. `pairs` lists each comparison once as `[group index, reference series index, simulated series index]`, where the series indices refer to `series`. The group index is `null` unless `relabeled` is true. That happens only in a multi-group Overview, where the same comparison in different groups is a separate curve, as today. `benchmark_stats` entries are `[benchmark index, comparison count, statistics]`, so each benchmark key is serialized once.
 
 **Byte budget: 2 MB serialized**, well under the 6 MB buffered limit. Worst cases follow from the §3 limits, with JSON escaping at most doubling a key, name, or unit (no control characters): `benchmarks` ≤ 1,000 × 403 bytes ≈ 400 KB; `benchmark_stats` ≤ 1,000 × ≈ 110 bytes ≈ 110 KB; `groups` ≤ 16 × ≈ 830 bytes ≈ 13 KB; `series` ≤ 32 × ≈ 930 bytes ≈ 30 KB; `pairs` ≤ 16 groups × 1,024 × ≈ 12 bytes ≈ 200 KB; per-unit statistics ≤ 32 × ≈ 400 bytes ≈ 13 KB; totals and percentiles ≈ 1 KB. The exact part is therefore under 800 KB, leaving at least 1.2 MB for samples. The Function measures the complete response, including the envelope and the parameters of the sampled plots, which it reads in the same snapshot. If the response does not fit, it halves every sample limit and samples again. At limit 0 only the exact part remains, which fits by construction. If a response still exceeds 2 MB (the invariant is broken), the Function returns `500`, logs an error, and caches nothing. Sampling is deterministic and never changes the exact part.
 

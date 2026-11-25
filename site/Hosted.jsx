@@ -287,7 +287,7 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
   const [page, setPage] = useState(null);
   const [attempt, setAttempt] = useState(0);
   const request = useRequest();
-  const {start, cancel} = request;
+  const {start, cancel, pending} = request;
   const query = new URLSearchParams({
     rid: manifest.id,
     group,
@@ -297,7 +297,10 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
     limit: window.size,
   }).toString();
   const revision = manifest.state === 'running' ? manifest.revision : 'final';
-  useEffect(() => {
+  const wanted = useRef(revision);
+  wanted.current = revision;
+  const load = useCallback(() => {
+    const loading = wanted.current;
     start(
       async (signal) => {
         const plots = new Map();
@@ -316,11 +319,20 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
         } while (after);
         return [...plots.values()];
       },
-      (series) => setPage({query, series}),
+      (series) => setPage({query, revision: loading, series}),
     );
+  }, [runKey, query, start]);
+  // A new query (or Retry) replaces any load in flight.
+  useEffect(() => {
+    load();
     return cancel;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runKey, query, revision, attempt]);
+  }, [load, attempt, cancel]);
+  // A new revision never aborts a load of the same query: it finishes, and
+  // the page is then compared with the latest revision again.
+  useEffect(() => {
+    if (pending() || page?.query !== query || page.revision === revision) return;
+    load();
+  }, [revision, page, query, load, pending]);
   useEffect(() => {
     if (request.error instanceof ReplacedRun) onReplaced();
   }, [request.error, onReplaced]);

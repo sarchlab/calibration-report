@@ -16,6 +16,7 @@ Command line:  python3 calibration_report_writer.py import data.json --run KEY [
 """
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -143,14 +144,15 @@ class Writer:
     def add(self, point):
         with self._lock:
             self._check()
-            self._buffer.append(point)
+            # A snapshot: producers may reuse and mutate the dict.
+            self._buffer.append(copy.deepcopy(point))
             if len(self._buffer) >= self._batch_points:
                 self.flush()
 
     def set_progress(self, progress):
         """Sent with the next batch; only the run's progress writer calls this."""
         with self._lock:
-            self._progress = progress
+            self._progress = copy.deepcopy(progress)
 
     def flush(self):
         with self._lock:
@@ -178,7 +180,7 @@ class Writer:
             idle = self._clock() - self._last_write
             if (self._buffer or self._progress is not None) and idle >= self._flush_seconds:
                 self.flush()
-            elif not self._buffer and idle >= self._heartbeat_seconds:
+            elif not self._buffer and self._progress is None and idle >= self._heartbeat_seconds:
                 self._connection.call("SELECT cr.heartbeat(%s)", (self.run_key,))
                 self._last_write = self._clock()
 

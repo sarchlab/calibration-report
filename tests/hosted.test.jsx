@@ -131,14 +131,14 @@ function stubApi(state) {
     const query = new URLSearchParams(path.split('?')[1]);
     let body;
     if (path === 'api/v1/runs') body = [{key: 'demo', title: 'Hosted fixture', state: 'running', updated_at: new Date().toISOString()}];
-    else if (path === 'api/v1/runs/demo')
+    else if (path === 'api/v1/runs/demo') {
       body = manifest(state.revision, state.state, state.completed, state.updatedAt);
       if (state.manifestFft) {
         body.benchmarks = {...body.benchmarks, fft: fftMeta};
         body.benchmark_keys = [...body.benchmark_keys, 'fft'];
         body.param_keys = [...body.param_keys, ['n']];
       }
-    else if (path.includes('/summary')) {
+    } else if (path.includes('/summary')) {
       body = summary(
         query.get('scope'),
         state.summaryRevision ?? state.revision,
@@ -496,4 +496,48 @@ test('a failed run offers Refresh and resumes polling when it runs again', async
   await waitFor(() => expect(screen.queryByRole('button', {name: 'Refresh'})).toBeNull());
   await advance(11);
   expect(polls()).toBe(3);
+});
+
+test('a plot load in flight finishes before the next revision is fetched', async () => {
+  vi.useFakeTimers({shouldAdvanceTime: true});
+  const state = {revision: 1, computedAt: new Date().toISOString(), holds: []};
+  const calls = stubApi(state);
+  mount(<HostedReport runKey="demo" />);
+  await screen.findByText('Overview · Accuracy summary');
+  const gate = deferred();
+  state.holds.push({match: 'api/v1/runs/demo/plots', promise: gate.promise});
+  fireEvent.click(screen.getByRole('tab', {name: 'Device A'}));
+  const plots = () => calls.filter((c) => c.includes('/plots')).length;
+  await waitFor(() => expect(plots()).toBe(1));
+  Object.assign(state, {revision: 2, bump: 50});
+  await advance(11); // the poll sees revision 2 while the load is pending
+  expect(plots()).toBe(1);
+  gate.resolve();
+  await waitFor(() => expect(plots()).toBe(2));
+  await waitFor(() => expect(document.querySelectorAll('.series')).toHaveLength(2));
+  await advance(11);
+  expect(plots()).toBe(2);
+});
+
+test('refreshed rows clear a pinned point; a failed refresh keeps it', async () => {
+  vi.useFakeTimers({shouldAdvanceTime: true});
+  const state = {revision: 1, computedAt: new Date().toISOString(), failures: []};
+  stubApi(state);
+  mount(<HostedReport runKey="demo" />);
+  await screen.findByText('Overview · Accuracy summary');
+  fireEvent.click(screen.getByRole('tab', {name: 'Device A'}));
+  await waitFor(() => expect(document.querySelectorAll('.series')).toHaveLength(2));
+  const canvas = document.querySelector('.series canvas');
+  canvas.focus();
+  fireEvent.keyDown(canvas, {key: 'Home'});
+  const details = () => screen.queryByRole('group', {name: 'Point details'});
+  expect(details()).toBeTruthy();
+  Object.assign(state, {revision: 2, bump: 50});
+  state.failures.push({match: '/plots'});
+  await advance(11);
+  const alert = await screen.findByText(/Could not refresh gemm/);
+  expect(details()).toBeTruthy(); // the old page, and its selection, stay
+  fireEvent.click(within(alert).getByRole('button', {name: 'Retry'}));
+  await waitFor(() => expect(screen.queryByText(/Could not refresh/)).toBeNull());
+  expect(details()).toBeNull();
 });
