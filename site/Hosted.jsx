@@ -79,11 +79,18 @@ export function RunList() {
   );
 }
 
+const isLive = (manifest) =>
+  manifest?.state === 'running' &&
+  !isStale(manifest) &&
+  document.visibilityState === 'visible';
+
 // Polls the manifest while the run is live, not stale, and the tab visible.
+// A failed poll keeps polling while the last known manifest is live.
 function useManifest(runKey) {
   const [manifest, setManifest] = useState(null);
   const [error, setError] = useState(null);
   const [generation, setGeneration] = useState(0);
+  const last = useRef(null);
   const refresh = useCallback(() => setGeneration((g) => g + 1), []);
   useEffect(() => {
     let timer;
@@ -91,17 +98,14 @@ function useManifest(runKey) {
     async function poll() {
       try {
         const next = await fetchJson(runPath(runKey), controller.signal);
+        last.current = next;
         setManifest(next);
         setError(null);
-        if (
-          next.state === 'running' &&
-          !isStale(next) &&
-          document.visibilityState === 'visible'
-        )
-          timer = setTimeout(poll, POLL_MS);
       } catch (e) {
-        if (e.name !== 'AbortError') setError(e.message);
+        if (controller.signal.aborted) return;
+        setError(e.message);
       }
+      if (isLive(last.current)) timer = setTimeout(poll, POLL_MS);
     }
     poll();
     const resume = () => {
@@ -120,50 +124,89 @@ function useManifest(runKey) {
   return {manifest, error, refresh};
 }
 
+// One request at a time: a new or cancelled request supersedes the previous
+// one, whose completion is ignored. Request state is cleared on success and
+// on failure.
+function useRequest() {
+  const current = useRef(null);
+  const [error, setError] = useState(null);
+  const start = useCallback((run, onDone) => {
+    current.current?.abort();
+    const controller = new AbortController();
+    current.current = controller;
+    setError(null);
+    run(controller.signal).then(
+      (value) => {
+        if (current.current !== controller) return;
+        current.current = null;
+        onDone(value);
+      },
+      (e) => {
+        if (current.current !== controller) return;
+        current.current = null;
+        setError(e);
+      },
+    );
+  }, []);
+  const cancel = useCallback(() => {
+    current.current?.abort();
+    current.current = null;
+  }, []);
+  const pending = useCallback(() => current.current !== null, []);
+  return {start, cancel, error, pending};
+}
+
 // The summary of the active scope. After every manifest poll it is
 // re-requested if the manifest shows newer data and the server's interval has
 // passed; on completion it is re-requested once for the final summary.
 function useSummary(runKey, manifest, scope, onReplaced) {
   const [summary, setSummary] = useState(null);
-  const loading = useRef(null);
+  const request = useRequest();
+  const {start, cancel, pending} = request;
   const rid = manifest?.id;
   const load = useCallback(() => {
-    loading.current?.abort();
-    const controller = new AbortController();
-    loading.current = controller;
-    fetchJson(
-      `${runPath(runKey)}/summary?rid=${rid}&scope=${encodeURIComponent(scope)}`,
-      controller.signal,
-    ).then(
-      (body) => {
-        loading.current = null;
-        setSummary({...body, requested: scope});
-      },
-      (e) => {
-        if (e instanceof ReplacedRun) onReplaced();
-      },
+    start(
+      (signal) =>
+        fetchJson(
+          `${runPath(runKey)}/summary?rid=${rid}&scope=${encodeURIComponent(scope)}`,
+          signal,
+        ),
+      (body) => setSummary({...body, requested: scope}),
     );
-  }, [runKey, rid, scope, onReplaced]);
+  }, [runKey, rid, scope, start]);
   useEffect(() => {
     if (rid === undefined) return;
     load();
-    return () => loading.current?.abort();
-  }, [rid, load]);
+    return cancel;
+  }, [rid, load, cancel]);
+  useEffect(() => {
+    if (request.error instanceof ReplacedRun) onReplaced();
+  }, [request.error, onReplaced]);
   const current = summary?.requested === scope && summary.rid === rid ? summary : null;
   useEffect(() => {
-    if (!current || loading.current || manifest.revision <= current.revision)
+    if (!current || pending() || manifest.revision <= current.revision)
       return;
     const final = manifest.state === 'completed' && current.state !== 'completed';
     const eligible =
       Date.now() >= Date.parse(current.computed_at) + current.min_interval * 1000;
     if (final || eligible) load();
-  }, [manifest, current, load]);
-  return current;
+  }, [manifest, current, load, pending]);
+  return {summary: current, error: request.error, retry: load};
+}
+
+// Non-scaling parameters in declaration order, as the file viewer shows them.
+function declaredOrder(params, declared) {
+  const ordered = {};
+  for (const key of declared) if (key in params) ordered[key] = params[key];
+  return ordered;
 }
 
 // One page of series of a benchmark, following continuation cursors.
 function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
   const [page, setPage] = useState(null);
+  const [attempt, setAttempt] = useState(0);
+  const request = useRequest();
+  const {start, cancel} = request;
   const query = new URLSearchParams({
     rid: manifest.id,
     group,
@@ -172,40 +215,75 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
     limit: window.end - window.start,
   }).toString();
   const revision = manifest.state === 'running' ? manifest.revision : 'final';
+  const declared = Object.keys(manifest.benchmarks[benchmark].params);
   useEffect(() => {
-    const controller = new AbortController();
-    (async () => {
-      const plots = new Map();
-      let after = null;
-      do {
-        const body = await fetchJson(
-          `${runPath(runKey)}/plots?${query}${after ? '&after=' + encodeURIComponent(after) : ''}`,
-          controller.signal,
-        );
-        for (const plot of body.plots) {
-          if (!plots.has(plot.id))
-            plots.set(plot.id, {parameters: String(plot.id), rows: []});
-          plots.get(plot.id).rows.push(...plot.rows);
-        }
-        after = body.next;
-      } while (after);
-      setPage({query, series: [...plots.values()]});
-    })().catch((e) => {
-      if (e instanceof ReplacedRun) onReplaced();
-    });
-    return () => controller.abort();
+    start(
+      async (signal) => {
+        const plots = new Map();
+        let after = null;
+        do {
+          const body = await fetchJson(
+            `${runPath(runKey)}/plots?${query}${after ? '&after=' + encodeURIComponent(after) : ''}`,
+            signal,
+          );
+          for (const plot of body.plots) {
+            if (!plots.has(plot.id))
+              plots.set(plot.id, {parameters: String(plot.id), rows: []});
+            const params = declaredOrder(plot.non_scaling_params, declared);
+            plots
+              .get(plot.id)
+              .rows.push(
+                ...plot.rows.map((row) => ({...row, non_scaling_params: params})),
+              );
+          }
+          after = body.next;
+        } while (after);
+        return [...plots.values()];
+      },
+      (series) => setPage({query, series}),
+    );
+    return cancel;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runKey, query, revision]);
-  return page?.query === query ? page.series : null;
+  }, [runKey, query, revision, attempt]);
+  useEffect(() => {
+    if (request.error instanceof ReplacedRun) onReplaced();
+  }, [request.error, onReplaced]);
+  return {
+    series: page?.query === query ? page.series : null,
+    error: request.error,
+    retry: () => setAttempt((n) => n + 1),
+  };
+}
+
+function RequestError({what, error, retry}) {
+  return (
+    <p role="alert" className="request-error">
+      Could not load {what}: {error.message}{' '}
+      <Button size="compact-xs" variant="default" onClick={retry}>
+        Retry
+      </Button>
+    </p>
+  );
 }
 
 function HostedBenchmark({runKey, manifest, group, benchmark, count, wide, onReplaced, ...props}) {
   const window = pageWindow(count, props.pagination, 6);
-  const series = usePlotPage(runKey, manifest, group, benchmark, window, onReplaced);
+  const {series, error, retry} = usePlotPage(
+    runKey,
+    manifest,
+    group,
+    benchmark,
+    window,
+    onReplaced,
+  );
   if (!series)
     return (
       <Paper component="article" className="chart card" withBorder radius="md" p="md">
-        <p role="status">Loading {benchmark}</p>
+        {error ? (
+          <RequestError what={benchmark} error={error} retry={retry} />
+        ) : (
+          <p role="status">Loading {benchmark}</p>
+        )}
       </Paper>
     );
   return (
@@ -242,7 +320,11 @@ export function HostedReport({runKey}) {
       ? 'overview'
       : 'group:' + manifest.group_ids[group ?? groupKeys[0]];
   const group = manifest && (chosen === null || manifest.group_order.includes(chosen)) ? chosen : null;
-  const summary = useSummary(runKey, manifest, manifest ? scopeOf(group) : null, refresh);
+  const {
+    summary,
+    error: summaryError,
+    retry: retrySummary,
+  } = useSummary(runKey, manifest, manifest ? scopeOf(group) : null, refresh);
   const benchmarkStats = useMemo(
     () =>
       new Map(
@@ -261,7 +343,12 @@ export function HostedReport({runKey}) {
       <main>
         <h1>Calibration report</h1>
         <p role={error ? 'alert' : 'status'}>
-          {error ?? 'Waiting for report data'}
+          {error ?? 'Waiting for report data'}{' '}
+          {error && (
+            <Button size="compact-xs" variant="default" onClick={refresh}>
+              Retry
+            </Button>
+          )}
         </p>
       </main>
     );
@@ -289,14 +376,16 @@ export function HostedReport({runKey}) {
         <ReportHeader
           report={report}
           status={
-            stale
-              ? 'No updates for 30 minutes'
-              : 'Updated ' + new Date(manifest.updated_at).toLocaleTimeString()
+            error
+              ? 'Update failed: ' + error
+              : stale
+                ? 'No updates for 30 minutes'
+                : 'Updated ' + new Date(manifest.updated_at).toLocaleTimeString()
           }
         >
-          {stale && (
+          {(stale || error) && (
             <Button size="compact-xs" variant="default" onClick={refresh}>
-              Refresh
+              {error ? 'Retry' : 'Refresh'}
             </Button>
           )}
           {manifest.state === 'failed' && (
@@ -325,6 +414,13 @@ export function HostedReport({runKey}) {
               <p className="summary-note">
                 Summary as of {new Date(summary.computed_at).toLocaleTimeString()}
               </p>
+            )}
+            {summaryError && !(summaryError instanceof ReplacedRun) && (
+              <RequestError
+                what="the summary"
+                error={summaryError}
+                retry={retrySummary}
+              />
             )}
             {summary && (
               <Summary

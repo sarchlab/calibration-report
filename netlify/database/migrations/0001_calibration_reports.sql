@@ -290,6 +290,9 @@ BEGIN
   PERFORM cr.check_report(report);
   PERFORM cr.check_progress(progress);
   PERFORM cr.check_object(benchmarks, NULL, NULL, 'benchmarks');
+  IF NOT EXISTS (SELECT FROM json_each(benchmarks)) THEN
+    PERFORM cr.fail('benchmarks must not be empty');
+  END IF;
   FOR b_key, b IN SELECT * FROM json_each(benchmarks) LOOP
     PERFORM cr.check_benchmark(b_key, b);
   END LOOP;
@@ -333,10 +336,16 @@ BEGIN
       IF stored_scaling <> b ->> 'scaling_param' THEN
         PERFORM cr.fail('benchmarks.' || b_key || '.scaling_param differs from the stored value');
       END IF;
-      -- The parameter set (names, units, order) is frozen at declaration.
-      IF (SELECT array_agg(key || '=' || unit ORDER BY ordinal) FROM cr.params WHERE benchmark_id = b_id)
-         IS DISTINCT FROM
-         (SELECT array_agg(key || '=' || (value ->> 'unit')) FROM json_each(b -> 'params')) THEN
+      -- The parameter set (names, units, order) is frozen at declaration:
+      -- every (ordinal, key, unit) must match on both sides.
+      IF EXISTS (
+        SELECT FROM (SELECT ordinal, key, unit FROM cr.params WHERE benchmark_id = b_id) stored
+        FULL JOIN (
+          SELECT (n - 1)::integer AS ordinal, d.key, d.value ->> 'unit' AS unit
+          FROM json_each(b -> 'params') WITH ORDINALITY AS d(key, value, n)
+        ) declared USING (ordinal, key, unit)
+        WHERE stored.ordinal IS NULL OR declared.ordinal IS NULL
+      ) THEN
         PERFORM cr.fail('benchmarks.' || b_key || '.params differ from the stored parameters');
       END IF;
     ELSE

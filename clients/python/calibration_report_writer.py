@@ -48,13 +48,26 @@ class _Connection:
                     self._conn = self._connect(self._dsn, autocommit=True)
                 self._conn.execute(sql, args)
                 return
-            except psycopg.OperationalError:
-                # Connection lost, possibly during commit: every call is safe
-                # to replay (docs/backend-design.md §4, retries).
+            except psycopg.Error as error:
+                # Only a lost connection leaves the outcome unknown; validation
+                # and state errors (22023, 55000, ...) are final.
+                if not self._outcome_unknown(error):
+                    raise
+                # The call may have committed: every call is safe to replay
+                # (docs/backend-design.md §4, retries).
                 self.close()
                 if attempt == self._retries:
                     raise
                 self._sleep(min(60, 2**attempt))
+
+    def _outcome_unknown(self, error):
+        state = getattr(error, "sqlstate", None)
+        if state:
+            # connection_exception (08) and operator intervention such as
+            # admin_shutdown (57P).
+            return state.startswith(("08", "57P"))
+        conn = self._conn
+        return conn is None or conn.closed or bool(getattr(conn, "broken", False))
 
     def close(self):
         if self._conn is not None:

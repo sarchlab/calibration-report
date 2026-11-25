@@ -1,15 +1,14 @@
 // Read API of hosted reports (docs/backend-design.md §5). Platform-free: the
 // Netlify Function passes a pg-compatible pool and a Netlify Blobs store, and
 // tests pass their own.
-import {
-  API_VERSION,
-  buildSummary,
-  summaryLimits,
-  summaryMaxBytes,
-} from '../../site/model.js';
+import {API_VERSION, buildSummary, summaryLimits} from '../../site/model.js';
 
 const PAGE_BYTES = 4 * 1024 * 1024;
 const PAGE_ROWS = 20000;
+// Rows read per query of a plot chunk, so a chunk never buffers more than
+// this many points beyond its budget.
+const PAGE_BATCH = 256;
+const SUMMARY_MAX_BYTES = 2 * 1024 * 1024;
 const encoder = new TextEncoder();
 const MAX_PLOTS_PER_PAGE = 48;
 const drawnStates = [
@@ -128,14 +127,17 @@ async function manifest(pool, key) {
          GROUP BY group_id, benchmark_id ORDER BY first`,
         [run.id],
       );
+      // Keys are producer-chosen (`constructor`, `__proto__`, "10"): build
+      // objects without a prototype and carry order in arrays.
+      const record = () => Object.create(null);
       const benchmarkById = new Map();
-      const benchmarkMeta = {};
+      const benchmarkMeta = record();
       benchmarks.forEach((benchmark, index) => {
         benchmarkById.set(String(benchmark.id), {key: benchmark.key, index});
         benchmarkMeta[benchmark.key] = {
           scaling_param: benchmark.scaling_param,
-          params: {},
-          values: {},
+          params: record(),
+          values: record(),
         };
       });
       for (const param of params)
@@ -146,13 +148,24 @@ async function manifest(pool, key) {
         benchmarkMeta[benchmarkById.get(String(benchmark_id)).key].values[key] =
           role ? {name, unit, role} : {name, unit};
       const groupKey = new Map(groups.map((g) => [String(g.id), g.key]));
-      const plots = {};
+      const plots = record();
+      const groupOrder = [];
       for (const count of counts) {
         const group = groupKey.get(String(count.group_id));
-        (plots[group] ??= []).push([
+        if (!plots[group]) {
+          plots[group] = [];
+          groupOrder.push(group);
+        }
+        plots[group].push([
           benchmarkById.get(String(count.benchmark_id)).index,
           count.plots,
         ]);
+      }
+      const reportGroups = record();
+      const groupIds = record();
+      for (const g of groups) {
+        reportGroups[g.key] = {name: g.name};
+        groupIds[g.key] = Number(g.id);
       }
       return json({
         id: Number(run.id),
@@ -163,12 +176,10 @@ async function manifest(pool, key) {
           title: run.title,
           description: run.description,
           live: run.state === 'running',
-          groups: Object.fromEntries(
-            groups.map((g) => [g.key, {name: g.name}]),
-          ),
+          groups: reportGroups,
         },
-        group_ids: Object.fromEntries(groups.map((g) => [g.key, Number(g.id)])),
-        group_order: Object.keys(plots),
+        group_ids: groupIds,
+        group_order: groupOrder,
         benchmark_keys: benchmarks.map((b) => b.key),
         progress: run.progress,
         benchmarks: benchmarkMeta,
@@ -256,38 +267,48 @@ async function plotPage(pool, key, query) {
          ORDER BY id OFFSET $3 LIMIT $4`,
         [ids.group_id, ids.benchmark_id, offset, limit],
       );
-      const points = await rows(
-        client,
-        `SELECT ${pointColumns} ${pointJoins}
-         WHERE p.plot_id = ANY ($1::bigint[])
-           AND ($2::bigint IS NULL OR (p.plot_id, p.x) > ($2::bigint, $3::float8))
-         GROUP BY p.id
-         HAVING bool_or(o.value IS NOT NULL OR o.state = ANY ($4::text[]))
-         ORDER BY p.plot_id, p.x
-         LIMIT ${PAGE_ROWS + 1}`,
-        [plots.map((p) => p.id), cursor?.plot ?? null, cursor?.x ?? 0, drawnStates],
-      );
       const params = new Map(plots.map((p) => [String(p.id), p.params]));
       const byPlot = new Map();
       let bytes = 0,
+        emitted = 0,
         next = null,
-        last = null;
-      for (const [i, row] of points.entries()) {
-        const point = toPoint(
-          row,
-          groupKey,
-          benchmarkKey,
-          params.get(String(row.plot_id)),
+        position = cursor,
+        done = plots.length === 0;
+      // Bounded batches inside this snapshot, stopping at the first row that
+      // does not fit; `next` names the last emitted row.
+      while (!done) {
+        const batch = await rows(
+          client,
+          `SELECT ${pointColumns} ${pointJoins}
+           WHERE p.plot_id = ANY ($1::bigint[])
+             AND ($2::bigint IS NULL OR (p.plot_id, p.x) > ($2::bigint, $3::float8))
+           GROUP BY p.id
+           HAVING bool_or(o.value IS NOT NULL OR o.state = ANY ($4::text[]))
+           ORDER BY p.plot_id, p.x
+           LIMIT ${PAGE_BATCH}`,
+          [plots.map((p) => p.id), position?.plot ?? null, position?.x ?? 0, drawnStates],
         );
-        bytes += encoder.encode(JSON.stringify(point)).length;
-        if (i === PAGE_ROWS || (last && bytes > PAGE_BYTES)) {
-          next = last.plot_id + ':' + last.x;
-          break;
+        for (const row of batch) {
+          const point = toPoint(
+            row,
+            groupKey,
+            benchmarkKey,
+            params.get(String(row.plot_id)),
+          );
+          const size = encoder.encode(JSON.stringify(point)).length;
+          if (emitted === PAGE_ROWS || (emitted > 0 && bytes + size > PAGE_BYTES)) {
+            next = position.plot + ':' + position.x;
+            done = true;
+            break;
+          }
+          const id = String(row.plot_id);
+          if (!byPlot.has(id)) byPlot.set(id, []);
+          byPlot.get(id).push(point);
+          bytes += size;
+          emitted++;
+          position = {plot: id, x: row.x};
         }
-        const id = String(row.plot_id);
-        if (!byPlot.has(id)) byPlot.set(id, []);
-        byPlot.get(id).push(point);
-        last = row;
+        if (batch.length < PAGE_BATCH) done = true;
       }
       return json(
         {
@@ -338,8 +359,14 @@ async function singlePoint(pool, key, query, plot, x) {
   );
 }
 
-// Everything a summary needs, from one snapshot.
-async function readSummaryInput(pool, key, rid, scope) {
+const halve = (limits) =>
+  Object.fromEntries(Object.entries(limits).map(([k, v]) => [k, v >> 1]));
+
+// The response body of one canonical scope, read and sized in one snapshot.
+// The sample is halved until the complete body (envelope and sampled plot
+// parameters included) fits the budget; the exact part never changes, and at
+// limit 0 only the exact part remains.
+async function computeSummary(pool, key, rid, scope, envelope) {
   return read(
     pool,
     async (client) => {
@@ -351,9 +378,6 @@ async function readSummaryInput(pool, key, rid, scope) {
           [run.id],
         )
       ).map((g) => [Number(g.id), g.key, g.name]);
-      // A one-group run's Overview is its group (§5).
-      if (scope === 'overview' && groups.length === 1)
-        scope = 'group:' + groups[0][0];
       if (scope !== 'overview') {
         groups = groups.filter(([id]) => 'group:' + id === scope);
         if (!groups.length) throw new HttpError(404, 'Unknown scope');
@@ -365,13 +389,12 @@ async function readSummaryInput(pool, key, rid, scope) {
          WHERE b.run_id = $1 ORDER BY s.id`,
         [run.id],
       );
-      const benchmarks = {};
+      const benchmarks = Object.create(null);
       const benchmarkKey = new Map();
       for (const {benchmark_id, benchmark, key, name, unit, role} of series) {
         benchmarkKey.set(String(benchmark_id), benchmark);
-        (benchmarks[benchmark] ??= {values: {}}).values[key] = role
-          ? {name, unit, role}
-          : {name, unit};
+        benchmarks[benchmark] ??= {values: Object.create(null)};
+        benchmarks[benchmark].values[key] = role ? {name, unit, role} : {name, unit};
       }
       const groupKey = new Map(groups.map(([id, key]) => [String(id), key]));
       // One row per point: the values of its role-tagged series.
@@ -387,28 +410,39 @@ async function readSummaryInput(pool, key, rid, scope) {
          GROUP BY p.id ORDER BY p.id`,
         [groups.map(([id]) => id)],
       );
-      const summaryRows = points.map((point) => ({
-        group: groupKey.get(String(point.group_id)),
-        benchmark: benchmarkKey.get(String(point.benchmark_id)),
-        plot: Number(point.plot_id),
-        x: point.x,
-        values: Object.fromEntries(point.keys.map((k, i) => [k, point.vals[i]])),
-      }));
-      const summary = buildSummary({
-        rows: summaryRows,
+      const sample = buildSummary({
+        rows: points.map((point) => ({
+          group: groupKey.get(String(point.group_id)),
+          benchmark: benchmarkKey.get(String(point.benchmark_id)),
+          plot: Number(point.plot_id),
+          x: point.x,
+          values: Object.fromEntries(point.keys.map((k, i) => [k, point.vals[i]])),
+        })),
         benchmarks,
         groups,
         overview: scope === 'overview',
-        limits: summaryLimits,
       });
-      const plotIds = Object.keys(summary.plots);
-      for (const {id, params} of await rows(
-        client,
-        'SELECT id, params FROM cr.plots WHERE id = ANY ($1::bigint[])',
-        [plotIds],
-      ))
-        summary.plots[id][2] = params;
-      return {run, scope, summary};
+      const plotParams = new Map();
+      for (let limits = {...summaryLimits}; ; limits = halve(limits)) {
+        const summary = sample(limits);
+        const missing = Object.keys(summary.plots).filter((id) => !plotParams.has(id));
+        for (const {id, params} of await rows(
+          client,
+          'SELECT id, params FROM cr.plots WHERE id = ANY ($1::bigint[])',
+          [missing],
+        ))
+          plotParams.set(String(id), params);
+        for (const id of Object.keys(summary.plots))
+          summary.plots[id][2] = plotParams.get(id);
+        const body = envelope(run, summary);
+        const exactOnly = !Object.values(limits).some(Boolean);
+        if (encoder.encode(JSON.stringify(body)).length <= SUMMARY_MAX_BYTES)
+          return body;
+        if (exactOnly) {
+          console.error('Summary over budget', key, scope);
+          throw new HttpError(500, 'Summary over budget');
+        }
+      }
     },
     'REPEATABLE READ',
   );
@@ -416,7 +450,8 @@ async function readSummaryInput(pool, key, rid, scope) {
 
 // §5 summary cache: compute only on request; recompute only when the run's
 // revision changed and the cached result is older than the interval; a
-// completed run's summary is final. No locks.
+// completed run's summary is final. No locks. Entries are stored under the
+// canonical scope only: a one-group run's Overview is its group.
 async function summaryResponse(pool, store, key, query, env, now) {
   const rid = query.get('rid');
   const requested = query.get('scope') ?? 'overview';
@@ -425,17 +460,39 @@ async function summaryResponse(pool, store, key, query, env, now) {
   if (rid === null || !/^\d+$/.test(rid)) throw new HttpError(409, 'rid required');
   const interval = Number(env.SUMMARY_MIN_INTERVAL ?? 60);
   const blobKey = (scope) => `${API_VERSION}/${rid}/${scope}`;
-  const cached = await store.getWithMetadata(blobKey(requested), {type: 'json'});
   const respond = (body) => json(body, {immutable: body.state === 'completed'});
-  if (cached?.metadata.state === 'completed' && cached.metadata.key === key)
-    return respond(cached.data);
+  const lookup = (scope) => store.getWithMetadata(blobKey(scope), {type: 'json'});
+  const final = (entry) =>
+    entry?.metadata.state === 'completed' && entry.metadata.key === key;
+
+  // A requested scope that has an entry is canonical: a completed one is
+  // served without the database.
+  let cached = await lookup(requested);
+  if (final(cached)) return respond(cached.data);
 
   const [run] = await read(pool, (client) =>
-    rows(client, 'SELECT id, state, revision FROM cr.runs WHERE key = $1', [key]),
+    rows(
+      client,
+      `SELECT r.id, r.state, r.revision,
+              (SELECT count(*) FROM cr.groups g WHERE g.run_id = r.id)::int AS groups,
+              (SELECT min(g.id) FROM cr.groups g WHERE g.run_id = r.id) AS first_group
+       FROM cr.runs r WHERE r.key = $1`,
+      [key],
+    ),
   );
   if (!run) throw new HttpError(404, 'Unknown run');
   if (String(run.id) !== rid)
     throw new HttpError(409, 'The run was replaced; reload its manifest');
+  const scope =
+    requested === 'overview' && run.groups === 1
+      ? 'group:' + run.first_group
+      : requested;
+  if (scope !== requested) {
+    cached = await lookup(scope);
+    if (final(cached)) return respond(cached.data);
+  }
+  // `cached` was read before the snapshot below, so the conditional write
+  // can only replace the entry this computation saw.
   if (cached && cached.metadata.key === key) {
     if (Number(cached.metadata.revision) === Number(run.revision))
       return respond(cached.data);
@@ -443,43 +500,32 @@ async function summaryResponse(pool, store, key, query, env, now) {
     if (run.state !== 'completed' && age < interval) return respond(cached.data);
   }
 
-  const input = await readSummaryInput(pool, key, rid, requested);
-  const body = {
-    rid: input.run.id,
+  const computedAt = new Date(now()).toISOString();
+  const body = await computeSummary(pool, key, rid, scope, (current, summary) => ({
+    rid: current.id,
     key,
-    scope: input.scope,
-    revision: input.run.revision,
-    state: input.run.state,
-    computed_at: new Date(now()).toISOString(),
+    scope,
+    revision: current.revision,
+    state: current.state,
+    computed_at: computedAt,
     min_interval: interval,
-    ...input.summary,
-  };
-  if (encoder.encode(JSON.stringify(body)).length > summaryMaxBytes) {
-    console.error('Summary over budget', key, input.scope);
-    throw new HttpError(500, 'Summary over budget');
-  }
+    ...summary,
+  }));
   const metadata = {
     key,
     revision: body.revision,
     state: body.state,
     computed_at: body.computed_at,
   };
-  const target = blobKey(input.scope);
-  const previous =
-    target === blobKey(requested)
-      ? cached
-      : await store.getWithMetadata(target, {type: 'json'});
+  const target = blobKey(scope);
   const write = await store.setJSON(target, body, {
     metadata,
-    ...(previous ? {onlyIfMatch: previous.etag} : {onlyIfNew: true}),
+    ...(cached ? {onlyIfMatch: cached.etag} : {onlyIfNew: true}),
   });
   if (!write.modified && body.state === 'completed') {
     // Another request wrote first: keep a final result, never an older one.
     const stored = await store.getWithMetadata(target, {type: 'json'});
-    if (
-      stored?.metadata.state === 'completed' &&
-      Number(stored.metadata.revision) === body.revision
-    )
+    if (final(stored) && Number(stored.metadata.revision) === body.revision)
       return respond(stored.data);
     if (stored && Number(stored.metadata.revision) < body.revision)
       await store.setJSON(target, body, {metadata, onlyIfMatch: stored.etag});

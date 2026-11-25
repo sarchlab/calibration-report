@@ -74,6 +74,13 @@ export function nearestPoint(event, canvas, points, pointerType) {
   });
   return best;
 }
+// A summary chart whose sample is empty (the byte budget left none) is
+// replaced by a note.
+function SummaryCanvas({spec, theme}) {
+  if (!spec.pairs.length)
+    return <p className="summary-note empty-sample">No sample available</p>;
+  return <PlotCanvas spec={spec} theme={theme} summary />;
+}
 export function PlotCanvas({spec, theme, summary = false}) {
   const interaction = usePoints();
   const {
@@ -516,7 +523,7 @@ function Scatter({
           X/Y log
         </Button>
       </div>
-      <PlotCanvas spec={spec} theme={theme} summary />
+      <SummaryCanvas spec={spec} theme={theme} />
       <SampleNote shown={pairs.length} count={count} />
       <PlotDetails entries={stats} count={count}>
         <p>Dashed line indicates equal values.</p>
@@ -611,7 +618,7 @@ export function Summary({
           p="md"
         >
           <figcaption>S-curve</figcaption>
-          <PlotCanvas spec={ranked} theme={theme} summary />
+          <SummaryCanvas spec={ranked} theme={theme} />
           <SampleNote shown={ranked.pairs.length} count={count} />
           <PlotDetails entries={stats} count={count}>
             <p>
@@ -628,7 +635,7 @@ export function Summary({
           p="md"
         >
           <figcaption>Absolute error distribution (CDF)</figcaption>
-          <PlotCanvas spec={cdf} theme={theme} summary />
+          <SummaryCanvas spec={cdf} theme={theme} />
           <SampleNote shown={cdf.pairs.length} count={count} />
           <PlotDetails entries={percentiles} count={count}>
             <p>|simulated − measured| / min(simulated, measured)</p>

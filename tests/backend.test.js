@@ -173,7 +173,6 @@ describe.skipIf(!dsn)('hosted backend', () => {
   beforeAll(async () => {
     pool = new pg.Pool({connectionString: dsn});
     await sql('DROP SCHEMA IF EXISTS cr CASCADE');
-    await sql('DROP ROLE IF EXISTS cr_ingest');
     await sql(migration);
   });
   afterAll(() => pool?.end());
@@ -235,6 +234,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
         [report, benchmarks, {...progress, total: -1}],
         [report, benchmarks, {total: 1, completed: 0}],
         [report, benchmarks, {...progress, extra: 1}],
+        [report, {}, progress],
         [
           report,
           {
@@ -273,7 +273,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
       const renamed = await runOf('meta');
       expect([renamed.title, Number(renamed.revision)]).toEqual(['Renamed', 2]);
       // Stored entities may be omitted; new ones are appended.
-      await open('meta', {...report, groups: {other: {name: 'Other'}}}, {});
+      await open('meta', {...report, groups: {other: {name: 'Other'}}}, benchmarks);
       expect((await sql("SELECT count(*)::int AS n FROM cr.groups g JOIN cr.runs r ON r.id = g.run_id WHERE r.key = 'meta'")).rows[0].n).toBe(2);
       const rejected = [
         [{...report, groups: {mi300x: {name: 'Changed'}}}, benchmarks],
@@ -290,6 +290,22 @@ describe.skipIf(!dsn)('hosted backend', () => {
       await expect(
         open('meta', report, {u: {...bench, values: {plain: {name: 'B', unit: ''}}}}),
       ).rejects.toThrow(/differs/);
+    });
+
+    it('compares parameter declarations exactly, in order', async () => {
+      const {report, progress} = example;
+      const bench = example.benchmarks.polybench_fdtd2d;
+      const declared = {...bench, params: {size: {unit: 'cells'}, 'a=b': {unit: ''}}};
+      await open('params', report, {p: declared}, progress);
+      const before = Number((await runOf('params')).revision);
+      for (const params of [
+        {size: {unit: 'cells'}, a: {unit: 'b='}},
+        {'a=b': {unit: ''}, size: {unit: 'cells'}},
+      ])
+        await expect(open('params', report, {p: {...declared, params}}, progress)).rejects.toThrow(
+          /params differ/,
+        );
+      expect(Number((await runOf('params')).revision)).toBe(before);
     });
 
     it('finishes idempotently and reopens failed runs', async () => {
@@ -497,4 +513,151 @@ describe.skipIf(!dsn)('hosted backend', () => {
       expect(final.revision).toBe(refreshed.revision + 1);
     });
   });
+
+  describe('budgets and producer-chosen keys', () => {
+    const api = async (path, {store = memoryStore(), pool: p = pool} = {}) => {
+      const response = await handleApi(
+        new Request('http://localhost/api/v1/runs' + path),
+        {pool: p, store},
+      );
+      const text = await response.text();
+      return {status: response.status, bytes: Buffer.byteLength(text), body: JSON.parse(text)};
+    };
+    const seed = async (key, report, finish = true) => {
+      await open(key, report.report, report.benchmarks, report.progress);
+      for (let i = 0; i < report.data.length; i += 250)
+        await put(key, report.data.slice(i, i + 250));
+      if (finish) await call('finish_run', key, 'completed', null);
+      return (await api('/' + key)).body;
+    };
+    const timing = {
+      hw: {name: 'GPU time', unit: 'ns', role: 'hardware_measurement'},
+      sim: {name: 'Simulated time', unit: 'ns', role: 'simulator_output'},
+    };
+    const runReport = (groups, benchmarks, data) => ({
+      report: {title: 'Budget', description: '', live: false, groups},
+      progress: {total: data.length, completed: data.length, running: 0},
+      benchmarks,
+      data,
+    });
+
+    it('shrinks the summary sample until the whole response fits', async () => {
+      const data = Array.from({length: 3000}, (_, i) => ({
+        group: 'g',
+        benchmark: 'b',
+        x: 1,
+        non_scaling_params: {tag: i + '-' + 'x'.repeat(1900)},
+        values: {hw: 1000 + i, sim: 1000 + i * 1.5},
+      }));
+      const report = runReport(
+        {g: {name: 'G'}},
+        {b: {scaling_param: 'x', params: {x: {unit: ''}, tag: {unit: ''}}, values: timing}},
+        data,
+      );
+      const manifest = await seed('wide-params', report);
+      const {status, bytes, body} = await api(
+        `/wide-params/summary?rid=${manifest.id}&scope=overview`,
+      );
+      expect(status).toBe(200);
+      expect(bytes).toBeLessThanOrEqual(2 * 1024 * 1024);
+      const pairs = comparisonPairs(data, report.benchmarks);
+      expect(body.count).toBe(3000);
+      expect(body.stats).toEqual(errorStats(pairs));
+      expect(body.scatter.ns.count).toBe(3000);
+      expect(body.scurve.sample.length).toBeGreaterThan(0);
+      expect(body.scurve.sample.length).toBeLessThan(1500);
+      const sampled = Object.values(body.plots);
+      expect(sampled.length).toBe(new Set(body.samples.plot).size);
+      expect(sampled.every(([, , params]) => params.tag.length > 1900)).toBe(true);
+    });
+
+    it('returns every visible wide point once across continuations', async () => {
+      const values = Object.fromEntries(
+        Array.from({length: 64}, (_, i) => ['s' + i, {name: 'Series ' + i, unit: 'ns'}]),
+      );
+      const data = Array.from({length: 130}, (_, i) => ({
+        group: 'g',
+        benchmark: 'b',
+        x: i + 0.5,
+        non_scaling_params: {},
+        values: {s0: i},
+        statuses: Object.fromEntries(
+          Array.from({length: 63}, (_, k) => [
+            's' + (k + 1),
+            {state: 'failed', reason: String(i).padEnd(1000, 'r')},
+          ]),
+        ),
+      }));
+      const report = runReport(
+        {g: {name: 'G'}},
+        {b: {scaling_param: 'x', params: {x: {unit: ''}}, values}},
+        data,
+      );
+      const manifest = await seed('wide-points', report);
+      const seen = [];
+      let after = null,
+        chunks = 0;
+      do {
+        const {body, bytes} = await api(
+          `/wide-points/plots?rid=${manifest.id}&group=g&benchmark=b` +
+            (after ? '&after=' + after : ''),
+        );
+        expect(bytes).toBeLessThan(4.2 * 1024 * 1024);
+        chunks++;
+        for (const plot of body.plots) seen.push(...plot.rows);
+        after = body.next;
+      } while (after);
+      expect(chunks).toBeGreaterThanOrEqual(3);
+      expect(seen.map((point) => point.x)).toEqual(data.map((point) => point.x));
+      expect(seen[70].statuses.s5.reason).toBe(data[70].statuses.s5.reason);
+    });
+
+    it('caches a one-group Overview under its group scope', async () => {
+      const data = [1, 2, 4].map((x) => ({
+        group: 'only', benchmark: 'b', x, non_scaling_params: {}, values: {hw: x, sim: x * 1.1},
+      }));
+      const report = runReport(
+        {only: {name: 'Only'}},
+        {b: {scaling_param: 'x', params: {x: {unit: ''}}, values: timing}},
+        data,
+      );
+      const manifest = await seed('one-group', report, false);
+      const store = memoryStore();
+      let connects = 0;
+      const counting = {connect: () => (connects++, pool.connect())};
+      const path = `/one-group/summary?rid=${manifest.id}&scope=overview`;
+      const first = await api(path, {store, pool: counting});
+      expect(first.body.scope).toBe('group:' + manifest.group_ids.only);
+      expect(connects).toBe(2);
+      const second = await api(path, {store, pool: counting});
+      expect(connects).toBe(3); // the state query only
+      expect(second.body.computed_at).toBe(first.body.computed_at);
+      expect([...store.entries.keys()]).toEqual([`v1/${manifest.id}/${first.body.scope}`]);
+    });
+
+    it('keeps producer-chosen keys and first-appearance order', async () => {
+      const point = (group, x) => ({
+        group, benchmark: 'constructor', x, non_scaling_params: {}, values: {hw: x, sim: x * 2},
+      });
+      const data = [point('10', 1), point('2', 1), point('constructor', 1), point('10', 2)];
+      const report = runReport(
+        {constructor: {name: 'Builder'}, 2: {name: 'Two'}, 10: {name: 'Ten'}},
+        {constructor: {scaling_param: 'x', params: {x: {unit: ''}}, values: timing}},
+        data,
+      );
+      const manifest = await seed('keys', report);
+      expect(manifest.group_order).toEqual(['10', '2', 'constructor']);
+      expect(manifest.report.groups.constructor).toEqual({name: 'Builder'});
+      expect(manifest.plots.constructor).toEqual([[0, 1]]);
+      expect(Object.keys(manifest.benchmarks.constructor.values)).toEqual(['hw', 'sim']);
+      const summary = await api(`/keys/summary?rid=${manifest.id}&scope=overview`);
+      expect(summary.status).toBe(200);
+      expect(summary.body.count).toBe(4);
+      const group = await api(
+        `/keys/summary?rid=${manifest.id}&scope=group:${manifest.group_ids.constructor}`,
+      );
+      expect(group.body.benchmark_stats[0][1]).toBe(1);
+    });
+  });
 });
+

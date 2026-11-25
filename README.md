@@ -88,7 +88,7 @@ A hosted backend is described in [docs/backend-design.md](docs/backend-design.md
   ```
 
   Without `--live`, the importer finishes the run as completed.
-- **Read API:** Netlify Functions under `/api/v1/runs` serve the run list, manifests, plot pages, single points and cached summaries.
+- **Read API:** Netlify Functions under `/api/v1/runs` serve the run list, manifests, plot pages, single points and cached summaries. The Functions use the same statistics helpers in `site/model.js` as the browser; the hosted viewer decodes the server's sampled summary format rather than computing it.
 - **Hosted viewer:** `netlify.toml` builds with `VITE_HOSTED=1`, which shows a run list at `/`. `?run=KEY` opens one run from the API. The default build still reads `./data.json` only.
 
 Database tests need a throwaway PostgreSQL 17 and are skipped without one:

@@ -248,11 +248,7 @@ export function pairDescription(pair, extra = {}) {
 // Build once per data revision. Off-page series keep only row/pair references;
 // their sorting, plot specifications and canvases are created when visited.
 export function indexReport(data, benchmarks) {
-  const rows = data.filter(
-    (point) =>
-      Object.values(point.values).some(Number.isFinite) ||
-      Object.keys(point.statuses ?? {}).some((id) => isMarked(point, id)),
-  );
+  const rows = data.filter(isVisibleRow);
   const pairs = comparisonPairs(rows, benchmarks);
   const groups = new Map();
   const parameterKey = (point) =>
@@ -335,7 +331,6 @@ export function errorPercentiles(pairs) {
 }
 
 export const summaryLimits = {scurve: 1500, cdf: 1500, scatter: 3000};
-export const summaryMaxBytes = 2 * 1024 * 1024;
 
 // Indices 0 and n - 1 plus evenly spaced ones, at most `limit` in total.
 function spaced(n, limit) {
@@ -356,7 +351,7 @@ function sampleSummary(pairs, units, limits) {
   };
   const byError = [...pairs].sort((a, b) => a.signedError - b.signedError);
   const scurve = {sample: [], rank: []};
-  for (const i of spaced(byError.length, limits?.scurve ?? byError.length)) {
+  for (const i of spaced(byError.length, limits.scurve)) {
     scurve.sample.push(add(byError[i]));
     scurve.rank.push(i + 1);
   }
@@ -364,13 +359,13 @@ function sampleSummary(pairs, units, limits) {
     (a, b) => Math.abs(a.signedError) - Math.abs(b.signedError),
   );
   const cdf = {sample: [], rank: []};
-  for (const i of spaced(byAbsolute.length, limits?.cdf ?? byAbsolute.length)) {
+  for (const i of spaced(byAbsolute.length, limits.cdf)) {
     cdf.sample.push(add(byAbsolute[i]));
     cdf.rank.push(i + 1);
   }
   const scatter = {};
   for (const [unit, unitPairs] of units) {
-    const limit = limits?.scatter ?? unitPairs.length;
+    const limit = limits.scatter;
     const chosen = new Set();
     if (limit < unitPairs.length) {
       const largest = [...unitPairs]
@@ -395,13 +390,14 @@ function sampleSummary(pairs, units, limits) {
   return {samples: [...samples.keys()], scurve, cdf, scatter};
 }
 
-// The summary of one scope: exact statistics over every comparison, charts
-// from a deterministic sample. `rows` are data.json points of the scope, each
-// with a `plot` id; `groups` is [[id, key, name]] of the scope's groups. Without
-// `limits` every comparison is a sample. With limits the serialized result
-// stays under summaryMaxBytes by halving the limits; at limit 0 only the exact
-// part remains.
-export function buildSummary({rows, benchmarks, groups, overview, limits}) {
+// The summary of one scope in the hosted format: exact statistics over every
+// comparison, charts from a deterministic sample. `rows` are data.json points
+// of the scope, each with a `plot` id; `groups` is [[id, key, name]] of the
+// scope's groups. Returns `sample(limits)`, which assembles the summary with at
+// most `limits` sampled comparisons per chart; the exact part is computed once
+// and is the same for every limit. `plots[id][2]` holds the row's
+// non_scaling_params, or null when the rows carry none (the API fills them in).
+export function buildSummary({rows, benchmarks, groups, overview}) {
   const groupIndex = new Map(groups.map(([, key], i) => [key, i]));
   const base = comparisonPairs(rows, benchmarks);
   const pairs = relabelPairs(
@@ -512,19 +508,7 @@ export function buildSummary({rows, benchmarks, groups, overview, limits}) {
       benchmark_stats: benchmarkStats,
     };
   };
-  if (!limits) return assemble(null);
-  const encoder = new TextEncoder();
-  for (let current = {...limits}; ; ) {
-    const summary = assemble(current);
-    if (
-      encoder.encode(JSON.stringify(summary)).length <= summaryMaxBytes ||
-      !Object.values(current).some(Boolean)
-    )
-      return summary;
-    current = Object.fromEntries(
-      Object.entries(current).map(([key, value]) => [key, value >> 1]),
-    );
-  }
+  return assemble;
 }
 
 // Inverse of buildSummary for drawing: pair-like objects that the summary
@@ -585,11 +569,5 @@ export function summaryCharts(summary) {
       stats: chart.stats,
       pairs: chart.sample.map((sample) => pairs[sample]),
     })),
-    benchmarkStats: new Map(
-      summary.benchmark_stats.map(([benchmark, count, stats]) => [
-        benchmarks[benchmark],
-        {count, stats},
-      ]),
-    ),
   };
 }

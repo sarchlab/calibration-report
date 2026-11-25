@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -19,9 +20,10 @@ DSN = os.environ.get("CR_TEST_DSN")
 class FakeConnection:
     """Stands in for psycopg.connect(); fails the first `failures` executes."""
 
-    def __init__(self, log, failures=0):
+    def __init__(self, log, failures=0, error=None):
         self.log = log
         self.failures = failures
+        self.error = error
         self.closed = False
 
     def __call__(self, dsn, autocommit):
@@ -29,6 +31,8 @@ class FakeConnection:
         return self
 
     def execute(self, sql, args):
+        if self.error is not None:
+            raise self.error
         if self.failures:
             self.failures -= 1
             self.closed = True
@@ -75,6 +79,14 @@ class WriterTest(unittest.TestCase):
         self.assertEqual(log[-1], ("cr.put_points", ["run", [{"x": 1}], None]))
         self.assertEqual(len(log), 2)
 
+    def test_state_errors_are_not_retried(self):
+        sleeps = []
+        fake = FakeConnection([], error=psycopg.errors.ObjectNotInPrerequisiteState("run is completed"))
+        connection = writer_module._Connection("dsn", connect=fake, sleep=sleeps.append)
+        with self.assertRaises(psycopg.errors.ObjectNotInPrerequisiteState):
+            connection.call("SELECT cr.heartbeat(%s)", ["run"])
+        self.assertEqual(sleeps, [])
+
     def test_progress_goes_with_the_next_batch(self):
         log = []
         w = self.writer(log)
@@ -118,6 +130,18 @@ class ImportTest(unittest.TestCase):
                 (key,),
             ).fetchone()
         self.assertEqual((state, points), ("completed", 2))
+
+    def test_import_into_a_completed_run_fails_fast(self):
+        key = "python-completed-test"
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute("DELETE FROM cr.runs WHERE key = %s", (key,))
+        args = ["import", str(ROOT / "examples" / "data.json"), "--run", key, "--dsn", DSN]
+        writer_module.main(args)
+        started = time.monotonic()
+        with self.assertRaises(SystemExit) as stop:
+            writer_module.main(args)
+        self.assertEqual(stop.exception.code, 1)
+        self.assertLess(time.monotonic() - started, 0.9)  # the first backoff is 1 s
 
     def test_validation_errors_are_readable(self):
         bad = ROOT / "tests" / "bad-report.tmp.json"

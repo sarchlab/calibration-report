@@ -7,7 +7,7 @@ import {buildSummary, isVisibleRow, summaryLimits} from '../site/model.js';
 const benchmarks = {
   gemm: {
     scaling_param: 'size',
-    params: {size: {unit: ''}, launch: {unit: ''}},
+    params: {size: {unit: ''}, launch: {unit: ''}, mode: {unit: ''}},
     values: {
       hw: {name: 'Measured', unit: 'ns', role: 'hardware_measurement'},
       sim: {name: 'Simulated', unit: 'ns', role: 'simulator_output'},
@@ -29,25 +29,25 @@ const rows = groups.flatMap(([, group], g) =>
       benchmark: 'gemm',
       x,
       plot: 10 + 2 * g + launch,
-      non_scaling_params: {launch},
+      non_scaling_params: {launch, mode: 'fast'},
       values: {hw: 100 * x, sim: 100 * x + 10 * (launch + 1)},
     })),
   ),
 );
-const manifest = (revision) => ({
+const manifest = (revision, state = 'running', completed = 12) => ({
   id: 7,
   revision,
-  state: 'running',
+  state,
   updated_at: new Date().toISOString(),
   report,
   group_ids: {a: 3, b: 4},
   group_order: ['a', 'b'],
   benchmark_keys: ['gemm'],
-  progress: {total: 12, completed: 12, running: 0},
+  progress: {total: 24, completed, running: 0},
   benchmarks,
   plots: {a: [[0, 2]], b: [[0, 2]]},
 });
-function summary(scope, revision, computedAt) {
+function summary(scope, revision, computedAt, limits = summaryLimits) {
   const scoped = scope === 'overview' ? groups : groups.filter(([id]) => scope === 'group:' + id);
   const keys = scoped.map(([, key]) => key);
   return {
@@ -63,8 +63,7 @@ function summary(scope, revision, computedAt) {
       benchmarks,
       groups: scoped,
       overview: scope === 'overview',
-      limits: summaryLimits,
-    }),
+    })(limits),
   };
 }
 function plotPage(group) {
@@ -73,7 +72,13 @@ function plotPage(group) {
       .filter((row) => row.group === group && row.non_scaling_params.launch === launch)
       .filter(isVisibleRow)
       .map(({plot, ...point}) => point);
-    return {id: 100 + launch, non_scaling_params: {launch}, rows: plotRows};
+    // The API's jsonb key order differs from declaration order.
+    const params = {mode: 'fast', launch};
+    return {
+      id: 100 + launch,
+      non_scaling_params: params,
+      rows: plotRows.map((row) => ({...row, non_scaling_params: params})),
+    };
   });
   return {revision: 1, total: 2, plots, next: null};
 }
@@ -83,11 +88,21 @@ function stubApi(state) {
   vi.stubGlobal('fetch', async (url) => {
     const path = String(url);
     calls.push(path);
+    const failure = state.failures?.find((f) => path.includes(f.match));
+    if (failure) {
+      state.failures.splice(state.failures.indexOf(failure), 1);
+      if (failure.reject) throw new TypeError('Network down');
+      return {ok: false, status: 500, json: async () => ({error: 'Server busy'})};
+    }
     const query = new URLSearchParams(path.split('?')[1]);
     let body;
     if (path === 'api/v1/runs') body = [{key: 'demo', title: 'Hosted fixture', state: 'running', updated_at: new Date().toISOString()}];
-    else if (path === 'api/v1/runs/demo') body = manifest(state.revision);
-    else if (path.includes('/summary')) body = summary(query.get('scope'), state.revision, state.computedAt);
+    else if (path === 'api/v1/runs/demo')
+      body = manifest(state.revision, state.state, state.completed);
+    else if (path.includes('/summary')) {
+      body = summary(query.get('scope'), state.revision, state.computedAt, state.limits);
+      if (state.state) body.state = state.state;
+    }
     else if (path.includes('/plots')) body = plotPage(query.get('group'));
     return {ok: true, status: 200, json: async () => body};
   });
@@ -114,6 +129,9 @@ test('a hosted run shows the server summary and server-paged series', async () =
   const card = await screen.findByRole('article');
   expect(within(card).getByText('Benchmark-wide error')).toBeTruthy();
   expect(card.querySelectorAll('.series')).toHaveLength(2);
+  // Parameters follow declaration order, not the API's key order.
+  for (const heading of card.querySelectorAll('.series h3'))
+    expect(heading.textContent).toMatch(/^launch=\d · mode=fast$/);
   expect(calls).toContain('api/v1/runs/demo/summary?rid=7&scope=group%3A3');
   expect(calls.some((c) => c.includes('/plots?rid=7&group=a&benchmark=gemm&offset=0&limit=2'))).toBe(true);
 });
@@ -139,4 +157,54 @@ test('a live summary is re-requested only after new data and the interval', asyn
   expect(summaries()).toBe(2);
   expect(screen.queryByText(/Summary as of/)).toBeNull();
   vi.useRealTimers();
+});
+
+test('a failed manifest poll is shown and polling continues', async () => {
+  vi.useFakeTimers({shouldAdvanceTime: true});
+  const state = {revision: 1, completed: 12, computedAt: new Date().toISOString(), failures: []};
+  stubApi(state);
+  mount(<HostedReport runKey="demo" />);
+  await screen.findByText('Overview · Accuracy summary');
+  state.failures.push({match: 'api/v1/runs/demo', reject: true});
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(await screen.findByText('Update failed: Network down')).toBeTruthy();
+  expect(screen.getByRole('button', {name: 'Retry'})).toBeTruthy();
+  state.revision = 2;
+  state.completed = 18;
+  await vi.advanceTimersByTimeAsync(10_000);
+  await waitFor(() => expect(screen.queryByText(/Update failed/)).toBeNull());
+  expect(screen.getAllByText((_, el) => el?.textContent === '18').length).toBeGreaterThan(0);
+  vi.useRealTimers();
+});
+
+test('failed summary and plot requests of a completed run can be retried', async () => {
+  const state = {
+    revision: 3,
+    state: 'completed',
+    computedAt: new Date().toISOString(),
+    failures: [{match: '/summary'}],
+  };
+  const calls = stubApi(state);
+  mount(<HostedReport runKey="demo" />);
+  const summaryError = await screen.findByRole('alert');
+  expect(summaryError.textContent).toContain('Could not load the summary: Server busy');
+  fireEvent.click(within(summaryError).getByRole('button', {name: 'Retry'}));
+  expect(await screen.findByText('Overview · Accuracy summary')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+
+  state.failures.push({match: '/plots'});
+  fireEvent.click(screen.getByRole('tab', {name: 'Device B'}));
+  const plotError = await screen.findByText(/Could not load gemm: Server busy/);
+  fireEvent.click(within(plotError).getByRole('button', {name: 'Retry'}));
+  await waitFor(() =>
+    expect(screen.getByRole('article').querySelectorAll('.series')).toHaveLength(2),
+  );
+  expect(calls.filter((c) => c.includes('/plots')).length).toBe(2);
+});
+
+test('a summary whose sample is empty shows exact statistics and no charts', async () => {
+  stubApi({revision: 1, computedAt: new Date().toISOString(), limits: {scurve: 0, cdf: 0, scatter: 0}});
+  mount(<HostedReport runKey="demo" />);
+  expect(await screen.findByText('12 paired measurements')).toBeTruthy();
+  expect(screen.getAllByText('No sample available')).toHaveLength(3);
 });
