@@ -10,7 +10,7 @@
     "test": "vitest run && python3 -m unittest discover -s tests -p 'test_*.py'"
   },
   "engines": {
-    "node": "^22.12.0 || >=24.0.0"
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
   "dependencies": {
     "@mantine/core": "9.8.2",

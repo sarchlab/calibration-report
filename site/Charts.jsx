@@ -1,4 +1,4 @@
-import {Button, Paper} from '@mantine/core';
+import {Button, Paper, VisuallyHidden} from '@mantine/core';
 import {useId, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {drawChart} from './drawing.js';
 import {
@@ -150,11 +150,16 @@ export function PlotCanvas({spec, theme, summary = false}) {
           ref={canvas}
           tabIndex={points.length ? 0 : undefined}
           aria-describedby={
-            active
-              ? pinned
-                ? 'pinned-point-description'
-                : id + '-preview'
-              : undefined
+            [
+              points.length ? id + '-hint' : null,
+              active
+                ? pinned
+                  ? 'pinned-point-description'
+                  : id + '-preview'
+                : null,
+            ]
+              .filter(Boolean)
+              .join(' ') || undefined
           }
           onPointerMove={(event) => {
             if (event.pointerType !== 'mouse' || pinned || selection) return;
@@ -252,7 +257,10 @@ export function PlotCanvas({spec, theme, summary = false}) {
         </Paper>
       )}
       {points.length > 0 && (
-        <p className="point-hint">Hover or tap a point · Arrow keys browse</p>
+        <p className="point-hint" id={id + '-hint'}>
+          Hover or tap a point · Arrow keys browse
+          <VisuallyHidden>. Escape closes details.</VisuallyHidden>
+        </p>
       )}
     </div>
   );

@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 
 spec = importlib.util.spec_from_file_location("serve", Path(__file__).resolve().parents[1] / "serve.py")
@@ -56,6 +57,19 @@ class StaticServerTest(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(body, b'')
             self.assertGreater(int(headers['Content-Length']), 0)
+
+    def test_module_mime_type_does_not_depend_on_host_database(self):
+        with patch.object(serve.mimetypes, 'guess_type', return_value=('text/plain', None)):
+            for path, expected in [
+                ('/', 'text/html; charset=utf-8'),
+                ('/assets/viewer-123.js', 'text/javascript; charset=utf-8'),
+                ('/assets/viewer-123.css', 'text/css; charset=utf-8'),
+                ('/data.json', 'application/json; charset=utf-8'),
+            ]:
+                with self.subTest(path=path):
+                    status, headers, body = self.request(path)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(headers['Content-Type'], expected)
 
     def test_external_data_is_read_fresh(self):
         self.assertEqual(self.request('/data.json')[2], b'{"revision": 1}')

@@ -71,7 +71,7 @@
   --chart-series-4: #ed939a;
   --chart-series-5: #a1c87e;
 }
-body { margin: 0; --point-panel-width: 360px; }
+body { margin: 0; --point-panel-width: 360px; background: var(--background); color: var(--text); line-height: normal; }
 body.point-details-open { padding-right: calc(var(--point-panel-width) + 32px); }
 main { max-width: 1180px; margin: auto; padding: 38px 24px 65px; }
 .report-header { margin-bottom: 16px; }

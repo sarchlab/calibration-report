@@ -393,3 +393,58 @@ test('comparison pairing and tied rankings retain report semantics', () => {
     rho: -1,
   });
 });
+
+test('status details on a benchmark without pairs survive progress-only live updates', () => {
+  const data = rows(1).map((point) => ({
+    ...point,
+    values: {...point.values, sim: null},
+    statuses: {
+      sim: {state: 'unsupported', reason: 'Unavailable configuration'},
+    },
+  }));
+  const snapshot = {
+    report: {groups, live: true},
+    benchmarks,
+    data,
+    progress: {total: 2, completed: 1, running: 1},
+  };
+  const view = render(
+    <MantineProvider>
+      <Report snapshot={snapshot} revision={1} />
+    </MantineProvider>,
+  );
+  fireEvent.click(
+    screen.getByRole('button', {name: /Unavailable configuration/}),
+  );
+  const message = screen.getByText(/Unavailable configuration/, {
+    selector: 'p',
+  });
+  view.rerender(
+    <MantineProvider>
+      <Report
+        snapshot={{
+          ...snapshot,
+          progress: {...snapshot.progress, completed: 2, running: 0},
+        }}
+        revision={1}
+      />
+    </MantineProvider>,
+  );
+  expect(screen.getByText(/Unavailable configuration/, {selector: 'p'})).toBe(
+    message,
+  );
+});
+
+test('interactive charts describe keyboard usage before and after pinning details', () => {
+  const [canvas] = fixture();
+  const hintId = canvas.getAttribute('aria-describedby');
+  expect(document.getElementById(hintId).textContent).toMatch(
+    /Arrow keys browse.*Escape closes details/,
+  );
+  home(canvas);
+  expect(canvas.getAttribute('aria-describedby').split(' ')).toEqual([
+    hintId,
+    'pinned-point-description',
+  ]);
+  expect(document.getElementById('pinned-point-description')).toBeTruthy();
+});

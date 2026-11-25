@@ -47,14 +47,14 @@ Run `npm test` for the React interaction and statistics checks plus the Python s
 
 ## Build and hosting
 
-The viewer uses React and Mantine for UI and state, with the existing Canvas plots and statistical calculations kept in separate modules. Node.js 22.12+ on the 22.x line, or Node.js 24+, and Python 3.9+ for the optional live server are supported.
+The viewer uses React and Mantine for UI and state, with the existing Canvas plots and statistical calculations kept in separate modules. Node.js 22.22.2+ on the 22.x line, 24.15.0+ on the 24.x line, or Node.js 26+, and Python 3.9+ for the optional live server are supported.
 
 ```sh
 npm ci
 npm run build
 ```
 
-`npm run build` generates the standalone static website in `dist/`. It bundles the UI dependencies locally; no Node.js server or CDN is needed to view it. The build does not read or bundle report data. The viewer fetches `./data.json` at runtime.
+`npm run build` generates the standalone static website in `dist/`. It bundles the UI dependencies locally; no Node.js server or CDN is needed to view it. The build does not read or bundle report data. The viewer fetches `./data.json` at runtime. Rebuilding empties `dist/`, including any copied `data.json`: keep the original export outside `dist/` and re-copy it after each build when using static hosting or `npm run preview`.
 
 - **GitHub Pages or any static host:** publish the contents of `dist/` together with your exported `data.json` at the same level as `index.html`. Asset URLs are relative, so a project subpath works as well as a domain root. Build once and reuse the same viewer for different reports.
 - **Live hosting with external data:** after building, run `python3 serve.py --data-dir /path/to/export --port 8000`. The server serves `dist/` and reads the external `data.json` on every request, so an exporter can continue updating that file. Add `--bind 0.0.0.0` or a specific interface address when access from another device is needed. Rebuild after UI edits; the server reads the current build on each request.

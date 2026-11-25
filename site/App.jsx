@@ -22,6 +22,7 @@ import {Benchmark, Summary} from './Charts.jsx';
 import {PointProvider} from './PointDetails.jsx';
 import {comparisonPairs, isMarked} from './model.js';
 
+const noPairs = [];
 const storageKey = 'calibration-report-theme';
 const colorManager = localStorageColorSchemeManager({key: storageKey});
 const mantineTheme = createTheme({
@@ -362,7 +363,7 @@ export function Report({snapshot, revision = 0, waiting = false}) {
                     id={id}
                     rows={rows}
                     meta={benchmarks[id]}
-                    pairs={pairsByBenchmark.get(id) ?? []}
+                    pairs={pairsByBenchmark.get(id) ?? noPairs}
                     theme={theme}
                     preferences={preferences}
                     setPreference={setPreference}

@@ -7,6 +7,12 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 SITE = Path(__file__).resolve().parent / "dist"
+ASSET_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+}
 
 
 def handler_for(data_dir, site_dir=SITE):
@@ -26,7 +32,7 @@ def handler_for(data_dir, site_dir=SITE):
                 self.send_error(404)
                 return
             if name == "/data.json":
-                path, content_type = data_dir / "data.json", "application/json"
+                path, content_type = data_dir / "data.json", ASSET_TYPES[".json"]
             else:
                 relative = "index.html" if name == "/" else name.lstrip("/")
                 path = (site_dir / relative).resolve()
@@ -34,7 +40,7 @@ def handler_for(data_dir, site_dir=SITE):
                 if not path.is_relative_to(site_dir) or not path.is_file():
                     self.send_error(404)
                     return
-                content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+                content_type = ASSET_TYPES.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             try:
                 data = path.read_bytes()
             except (OSError, ValueError):
