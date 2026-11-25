@@ -216,7 +216,7 @@ Retries are safe under these rules:
 
 Lifecycle:
 
-1. Every job calls `open_run` with the same metadata. Repeated calls change nothing.
+1. Every job calls `open_run` with the run's `report` and at least its own benchmarks; where declarations overlap they must agree. Repeated calls change nothing.
 2. Each job sends its own points with `put_points`. A job calls `heartbeat` when it has written nothing for 5 minutes, so a long benchmark does not look stale.
 3. Exactly **one finalizer job** calls `finish_run` after all workers have ended, for example a workflow job that `needs:` the matrix and runs `if: always()`. It sends `completed` or `failed`.
 
@@ -301,7 +301,7 @@ The summary Function computes what the summary section and benchmark-wide error 
 2. **One row per point** of the scope's groups: group, benchmark, plot, `x`, and the values of the benchmark's role-tagged series aggregated in SQL into one array in series-id order. The scan uses the §3 `points (group_id)` index and observations by primary key. At about 50 bytes per row, a 450,000-point run is **about 20–25 MB on the wire** (unaggregated, one row per observation, it would be about 50 MB).
 3. `non_scaling_params` of the sampled plots only.
 
-For a run with exactly one group, the viewer requests `scope=group:<id>` for Overview too, so there is one cache entry with the full group payload and warm hits avoid the database. Defensively, the Function also canonicalizes `overview` to that group after its database read.
+For a run with exactly one declared group (`report.groups`, in both the viewer and the Function), the viewer requests `scope=group:<id>` for Overview too, so there is one cache entry with the full group payload and warm hits avoid the database. Defensively, the Function also canonicalizes `overview` to that group after its database read.
 
 **Exact over all comparisons**, never reduced: comparison count; average and maximum error; P50/P90/P95/P98; per unit, Kendall's τ-b, pairwise ordering accuracy, Spearman's ρ, and error statistics; per benchmark (group scopes), comparison count and error statistics; and every chart's default axis scale (`preferLogScale` over all data).
 
@@ -330,7 +330,7 @@ Sampled charts say so ("3,000 of 212,000 comparisons shown").
   "scurve": {"sample": [0], "rank": [118000]},
   "cdf": {"log": true, "sample": [0], "rank": [160500]},
   "scatter": {"ns": {"log": true, "count": 212000, "sample": [0], "stats": [["Kendall’s τ-b", "0.912"], ...]}},
-  "benchmark_stats": [[0, 5320, [["Average error", "12.0%"], ["Max error", "88.1%"]]]]
+  "benchmark_stats": [[0, 212000, [["Average error", "18.2%"], ["Max error", "412%"]]]]
 }
 ```
 
@@ -351,11 +351,11 @@ On each request the Function:
 3. Otherwise, if the record is younger than `SUMMARY_MIN_INTERVAL` and the run is `running` or `failed`, returns it; the body states its `revision` and `computed_at`, and the viewer shows "summary as of …".
 4. Otherwise computes, writes, and returns. Requests after a run becomes `completed` bypass the interval until the final summary is stored, so it is exact; overlapping requests may each compute it, as the no-lock policy accepts.
 
-The write uses `onlyIfMatch` with the ETag read in step 1 (or `onlyIfNew`), so an older computation never overwrites a newer record. If a completed run's write loses, the Function rereads the record: it returns a stored completed result for the same revision, or conditionally publishes its own if the stored revision is older. There is no claim or lease: requests that arrive while a computation runs (about 10 s) may each compute. **Normally there is at most one computation per interval per scope; concurrent requests may duplicate it**, bounded by the number of concurrent viewers, which is small. A `failed` run is not terminal (`open_run` can reopen it), so its summary costs one small query per request and follows the interval like a live run.
+The write uses `onlyIfMatch` with the ETag read in step 1 (or `onlyIfNew`), so an older computation never overwrites a newer record. If a completed run's write loses, the Function rereads the record: it returns a stored completed result for the same revision, or conditionally publishes its own if the stored revision is older. A lost write for a `running` or `failed` run is dropped; the record catches up after the next interval. There is no claim or lease: requests that arrive while a computation runs (about 10 s) may each compute. **Normally there is at most one computation per interval per scope; concurrent requests may duplicate it**, bounded by the number of concurrent viewers, which is small. A `failed` run is not terminal (`open_run` can reopen it), so its summary costs one small query per request and follows the interval like a live run.
 
 ### Retention and deletion
 
-Runs are kept until someone deletes them. At about 100 MB per run, the 5 GB storage cap of the Free tier (§8) holds about 40 runs, so on that tier old runs must be deleted. The team owner deletes a run by hand: `DELETE FROM cr.runs WHERE key = '...'` (everything cascades), then deletes every Blob key under `v*/<run id>/`. Immutable responses already in the CDN expire on their own.
+Runs are kept until someone deletes them. At about 100 MB per run, the 5 GB storage cap of the Free tier (§8) holds about 50 runs, so on that tier old runs must be deleted. The team owner deletes a run by hand: `DELETE FROM cr.runs WHERE key = '...'` (everything cascades), then deletes every Blob key under `v*/<run id>/`. Immutable responses already in the CDN expire on their own.
 
 ## 6. Viewer changes and `data.json` compatibility
 
@@ -368,7 +368,7 @@ A build setting, `VITE_HOSTED=1`, is set only in the Netlify build (`netlify.tom
 
 `Report` consumes the interface:
 
-- Tabs follow `group_order` (groups with a non-zero visible plot count). With more than one group, Overview is selectable without waiting for a count, and shows an empty state if its summary has zero comparisons; with one group it uses the group's scope (§5). The file source keeps deriving tabs from `indexReport` (`site/App.jsx:244,285-286`).
+- Tabs follow `group_order` (groups with a non-zero visible plot count). With more than one group, Overview is selectable without waiting for a count, and shows an empty state if its summary has zero comparisons; with one declared group it uses the group's scope (§5). The file source keeps deriving tabs from `indexReport` (`site/App.jsx:244,285-286`).
 - `Summary` and the summary drawings in `site/drawing.js` consume the summary object (exact statistics, sampled series) instead of the full pair list.
 - Benchmark cards take counts from the manifest, rows from `plots` pages, and benchmark-wide error from `benchmark_stats`.
 - A sampled point's details show the sample's own values and derived metrics (error, rank, percentile). The panel also fetches `/points/{plot}/{x}` and merges the raw point only if its `revision` equals the summary's; otherwise it shows it separately, labeled as newer. A response for a selection that has since changed is dropped.
@@ -378,7 +378,7 @@ Polling, API source only:
 - Poll the manifest every 10 s while the run is `running`, not stale, and the tab is visible; every 60 s after 5 minutes without a new revision.
 - Stop once the run is stale (`updated_at` more than 30 minutes old; writers heartbeat every 5 minutes) and offer a manual refresh.
 - On a new revision, refetch the visible `plots` pages.
-- After every manifest poll, including a `304`, re-request the active summary only if the manifest's revision is greater than the summary's **and** `computed_at + min_interval` has passed, so a run that only heartbeats still catches up. On observing `completed`, fetch the final summary once. On observing `failed` (at load or on a transition) with a manifest revision newer than the summary's, schedule one summary request at `computed_at + min_interval` (or immediately if that has passed), and stop once the revisions match; the manual refresh lets an open viewer discover a reopened run.
+- After every manifest poll, including a `304`, re-request the active summary only if the manifest's revision is greater than the summary's **and** `computed_at + min_interval` has passed, so a run that only heartbeats still catches up. On observing `completed`, fetch the final summary once. On observing `failed` (at load or on a transition) with a manifest revision newer than the summary's, keep that revision as the target and arm one timer for the scope at `computed_at + min_interval` (at least 5 s away); while a response, including a `304`, is still behind the target, re-arm it at the next eligible time, and cancel it when the target is reached or the viewer leaves the run or scope. The manual refresh lets an open viewer discover a reopened run.
 
 Import and export mapping:
 
