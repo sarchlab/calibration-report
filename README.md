@@ -74,3 +74,5 @@ The viewer reads only `data.json`. With `report.live: true`, it shows a live ind
 ## Repository scope
 
 Simulator repositories own benchmark collection, simulation orchestration, and adapters that export this format. This repository owns the format, viewer, and live HTTP server.
+
+A proposed hosted backend (Netlify Database, live ingestion from runners, server-computed summaries, paged reads) is described in [docs/backend-design.md](docs/backend-design.md).
