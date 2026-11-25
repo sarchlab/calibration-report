@@ -6,8 +6,8 @@ Status: proposal for review. Nothing in this document is implemented yet.
 
 Today a report is one `data.json` file. The viewer downloads all of it (`useReport` in `site/App.jsx` fetches `./data.json`) and builds every view in the browser (`indexReport` in `site/model.js`). Two problems follow:
 
-1. **Size.** A release-scale MGPUSim report has about 450,000 points and its `data.json` exceeds 100 MB. Every viewer downloads and parses the whole file, and every live refresh downloads it again.
-2. **Latency.** Simulators run in GitHub Actions jobs that last hours and publish `data.json` as a workflow artifact when the job ends. Nobody can see partial results while a run is in progress. The live mode of `serve.py` only helps when the producer and the viewer share a machine.
+1. **Size.** A release-scale MGPUSim report has about 450,000 points and exceeds 100 MB. Every viewer, and every live refresh, downloads and parses all of it.
+2. **Latency.** Simulators run for hours in GitHub Actions and publish `data.json` as an artifact when the job ends, so nobody sees partial results. `serve.py`'s live mode only helps on the producer's machine.
 
 Goals:
 
@@ -28,7 +28,7 @@ Non-goals for this iteration:
 ```
 GitHub Actions job (simulator repo)                              browser
   │  Python writer client                                          │  viewer (static build of site/)
-  │  calls cr.open_run / put_points / heartbeat / finish_run       │  GET /api/...
+  │  calls cr.open_run / put_points / heartbeat / finish_run       │  GET /api/v1/...
   ▼  over Postgres, role cr_ingest                                 ▼
 ┌───────────────────────────── Netlify team (Open Source plan) ─────────────────────────────┐
 │  Netlify Database (Postgres, schema cr) ◄── read-only transactions ── Netlify Functions     │
@@ -47,7 +47,7 @@ GitHub Actions job (simulator repo)                              browser
 
 ## 3. Database schema
 
-The schema uses one row per declared entity and surrogate keys, which keeps the large tables narrow. Composite foreign keys turn every cross-reference rule in the README into a database constraint; the exceptions are the rules listed after the DDL. A `plot` is one chart: one group, one benchmark, and one combination of non-scaling parameter values. It is the "series" level the viewer pages through. Plots are always ordered by `id`.
+One row per declared entity with surrogate keys keeps the large tables narrow. Composite foreign keys make every README cross-reference rule a constraint, except the rules listed after the DDL. A `plot` is one chart (one group, benchmark, and non-scaling parameter combination), the "series" level the viewer pages through, ordered by `id`.
 
 ```sql
 CREATE SCHEMA cr;
@@ -115,7 +115,7 @@ CREATE TABLE cr.plots (
   benchmark_id bigint NOT NULL,
   params       jsonb NOT NULL,  -- data.json "non_scaling_params"
   visible      boolean NOT NULL DEFAULT false,  -- maintained by cr.put_points (see below)
-  CHECK (jsonb_typeof(params) = 'object' AND octet_length(params::text) <= 4096),
+  CHECK (jsonb_typeof(params) = 'object' AND octet_length(params::text) <= 2000)  -- real values are tens of bytes; keeps the UNIQUE btree entry small,
   CHECK (NOT jsonb_path_exists(params, 'strict $.* ? (@.type() != "number" && @.type() != "string" && @.type() != "boolean")')),
   -- Rule: a point names a declared group and benchmark of the same run.
   FOREIGN KEY (group_id, run_id) REFERENCES cr.groups (id, run_id) ON DELETE CASCADE,
@@ -168,12 +168,12 @@ Some rules compare a row with a set of rows, so they cannot be constraints. The 
 
 - `non_scaling_params` has exactly the declared parameters other than the scaling parameter.
 - `values` has at least one key (`minProperties: 1`).
-- A benchmark has at most 32 parameters and 64 series. With the length limits above, this bounds one serialized point to well under 100 KB.
+- A benchmark has at most 32 parameters and 64 series, which bounds one serialized point to well under 100 KB. A run has at most 16 groups, 1,000 benchmarks, and 32 distinct role-tagged series keys, which bounds the exact part of a summary (§5).
 - Metadata is append-only. `cr.open_run` may add groups, benchmarks, and series. It rejects a changed scaling parameter, series unit or role, or group name. It also rejects **any change to an existing benchmark's parameter set**, because stored points were validated against that set.
 
-`plots.visible` is true when the plot has a point with a finite value or with a status the viewer draws: `failed`, `verification_failed`, `timeout`, `memory_limit`, `unsupported`, or `running`. This mirrors `isMarked` and `visibleStates` in `site/model.js`, which the static viewer uses to drop rows in `indexReport`. `cr.put_points` recomputes it for the plots it touches, so it can also turn false. The duplicated rule needs one shared fixture test once it is implemented.
+`plots.visible` is true when the plot has a point with a finite value or a drawn status (`failed`, `verification_failed`, `timeout`, `memory_limit`, `unsupported`, `running`), mirroring `isMarked` and `visibleStates` in `site/model.js`, which `indexReport` uses to drop rows. `cr.put_points` recomputes it for touched plots, so it can turn false.
 
-Storage estimate: 450,000 points with two to three series each is about 1 million observation rows. With indexes that is roughly 100 MB per run, or about 3 GB for 30 runs. To be measured (§8).
+Storage estimate: 450,000 points with two to three series is about 1 million observation rows, roughly 100 MB per run with indexes (§8).
 
 ## 4. Write protocol
 
@@ -184,20 +184,20 @@ Storage estimate: 450,000 points with two to three series each is about 1 millio
 | owner (Netlify-provisioned) | Netlify | everything; used by migrations and, inside read-only transactions, by Functions |
 | `cr_ingest` (login) | a migration creates it `NOLOGIN`; the team owner runs `ALTER ROLE cr_ingest LOGIN PASSWORD ...` once by hand | `USAGE` on schema `cr`; `EXECUTE` on `cr.open_run`, `cr.put_points`, `cr.heartbeat`, `cr.finish_run` only |
 
-The four functions are `SECURITY DEFINER` with `SET search_path = cr, pg_temp`, and `EXECUTE` is revoked from `PUBLIC`. `cr_ingest` has no table privileges. A leaked ingest credential can therefore add or overwrite results, but it cannot read data, delete runs, or change the schema. Passwords never enter the repository. The connection string is stored once as a **GitHub organization secret** (for example `CALIBRATION_REPORT_DSN`) and granted to the simulator repositories that report.
+The four functions are `SECURITY DEFINER` with `SET search_path = cr, pg_temp`; `EXECUTE` is revoked from `PUBLIC`, and `cr_ingest` has no table privileges. A leaked ingest credential can add or overwrite results but cannot read, delete, or change the schema. The connection string lives only in a **GitHub organization secret** (for example `CALIBRATION_REPORT_DSN`) granted to the reporting repositories.
 
 No row-level security (RLS): all data is public, Functions read as the owner (which bypasses RLS), and writes go only through the `SECURITY DEFINER` functions, so RLS would protect nothing. Write isolation between simulators, if needed later, means per-simulator ingest roles plus a run-key prefix check in the functions; private runs would mean RLS or authentication at that point.
 
 ### Functions
 
-Each function locks the run row (`SELECT ... FOR UPDATE`) before it checks the run's state, then validates its whole argument against the matching `data.schema.json` rules before writing anything. For example, it checks for required `progress` fields and non-negative counts, at least one group, benchmark, parameter, and series, required point fields, no unknown keys, and the status enum. `data.schema.json` stays the source of truth: the implementation tests the SQL validation against the same fixtures that a JSON Schema validator accepts or rejects.
+Each function locks the run row (`SELECT ... FOR UPDATE`; `open_run` first runs `INSERT ... ON CONFLICT (key) DO NOTHING` so concurrent first calls cannot race) before it checks the run's state, then validates its whole argument against the matching `data.schema.json` rules before writing anything. (required fields, non-negative counts, non-empty declarations, no unknown keys, the status enum). `data.schema.json` stays the source of truth: the SQL validation is tested against the fixtures a JSON Schema validator accepts or rejects.
 
 | Call | Arguments | Effect |
 |---|---|---|
-| `cr.open_run(run_key, report, benchmarks, progress)` | `report`, `benchmarks`, and `progress` objects from `data.json` (`report.live` is ignored) | Creates the run in state `running`, or appends metadata to an existing `running` run, or **reopens a `failed` run** (state back to `running`). Rejects a `completed` run, which is terminal. |
+| `cr.open_run(run_key, report, benchmarks, progress)` | `report`, `benchmarks`, and `progress` objects from `data.json` (`report.live` is ignored) | Creates the run in state `running` with the given `progress`, appends metadata to a `running` run, or **reopens a `failed` run**. Each of these increments `revision` and sets `updated_at`; a call that changes nothing writes nothing. Never touches the progress of an existing run. Rejects a `completed` run, which is terminal. |
 | `cr.put_points(run_key, points, progress)` | array of `data.json` points (may be empty); optional `progress` | Requires `running`. Upserts plots, points, and observations; recomputes `visible` for touched plots; replaces `progress` when given; sets `updated_at`; increments `revision`. |
 | `cr.heartbeat(run_key)` | | Requires `running`. Sets `updated_at` only. It does **not** increment `revision`, so it never invalidates a cached summary (§5). |
-| `cr.finish_run(run_key, state, progress)` | `state` is `completed` or `failed` | Requires `running`. Sets the final state and progress, and increments `revision`. |
+| `cr.finish_run(run_key, state, progress)` | `state` is `completed` or `failed` | From `running`, sets the final state and progress and increments `revision`. Succeeds without writing if the run is already in the requested state; rejects the other terminal state. |
 
 The run lock serializes all writes to one run, so no write can cross the transition to a final state. A revision therefore names exactly one state of the run's data.
 
@@ -208,16 +208,16 @@ A point is identified by `(group, benchmark, non_scaling_params, x)`. In a batch
 Retries are safe under these rules:
 
 - **One owner per observation.** Each (point, series) belongs to exactly one writer. Matrix jobs of one run must own disjoint benchmarks or configurations. Overlapping writers are unsupported, and their results are undefined.
-- **One batch in flight per writer.** A writer sends its batches in order and waits for each to finish. If the outcome of a batch is unknown (for example, the connection dropped during commit), the writer replays that same batch before sending the next one. Replaying writes the same observations again, so the stored data matches a single successful write. The only side effect is one extra revision, which costs at most one extra summary computation. No batch IDs are needed.
-- **One progress writer.** Only the finalizer job (or the run's only job) sends `progress`.
+- **One batch in flight per writer.** A writer sends batches in order and waits for each. If a batch's outcome is unknown (the connection dropped during commit), it replays that batch before the next. Replaying rewrites the same observations, so the only side effect is one extra revision; no batch IDs are needed.
+- **One progress writer.** Initial progress comes from the `open_run` call that creates the run. After that, only one designated job (the run's only job, or one named matrix job) sends `progress`, including after a reopen; the finalizer sends the final value with `finish_run`.
 
 Lifecycle:
 
-1. Every job calls `open_run` with the same metadata. The call is idempotent.
-2. Each job sends its own points with `put_points`. A job calls `heartbeat` when it has written nothing for 5 minutes, so a long benchmark does not look stale. The progress owner sends progress with `put_points` (points may be empty).
+1. Every job calls `open_run` with the same metadata. Repeated calls change nothing.
+2. Each job sends its own points with `put_points`. A job calls `heartbeat` when it has written nothing for 5 minutes, so a long benchmark does not look stale.
 3. Exactly **one finalizer job** calls `finish_run` after all workers have ended, for example a workflow job that `needs:` the matrix and runs `if: always()`. It sends `completed` or `failed`.
 
-A run whose jobs died stays `running`. The viewer treats it as stale once `updated_at` is 30 minutes old (§6). Nothing changes state automatically. Rerunning the workflow reopens a `failed` run, or continues a stale `running` run.
+A run whose jobs died stays `running` and looks stale after 30 minutes (§6); nothing changes state automatically. Rerunning the workflow reopens a `failed` run or continues a stale one.
 
 ### Python writer client (to be written)
 
@@ -235,7 +235,7 @@ with Writer(os.environ["CALIBRATION_REPORT_DSN"], run_key="mgpusim.mi300x.2026-1
 finish_run(dsn, "mgpusim.mi300x.2026-11-25-434ad66", "completed", progress)
 ```
 
-The client retries a failed flush with backoff, replaying the same batch. The first connection after the database has slept can take a few seconds. The same module provides `import data.json --run KEY`, which makes the same calls, and `export --run KEY > data.json`, which reads through the public API (§6). No database credential is needed to export.
+The client retries a failed flush with backoff, replaying the same batch. The same module provides `import data.json --run KEY` and `export --run KEY > data.json`; export reads the public API (§6) and needs no credential.
 
 ### Cost of writing directly to the database
 
@@ -250,32 +250,26 @@ Because the functions accept only `data.json` shapes and the role has only `EXEC
 
 ## 5. Read API
 
-Every endpoint is a Netlify Function at `/api/...` that returns JSON. Data requests carry `rid=<run id>` from the manifest, and the Function returns `409` if `rid` no longer matches the key, which happens when a run was deleted and imported again.
+Every endpoint is a Netlify Function under `/api/v1/` that returns JSON. `v1` is the format version: a constant in `site/model.js` shared by the Functions and the viewer, bumped whenever `buildSummary` or any response shape changes. Data requests carry `rid=<run id>` from the manifest. When a request reaches the database, the Function returns `409` if `rid` is not the current id of `key` (the run was deleted and imported again).
 
-| Endpoint | Returns | Used for |
+| Endpoint (under `/api/v1/runs`) | Returns | Used for |
 |---|---|---|
-| `GET /api/runs` | `[{key, title, state, progress, updated_at}]`, newest first | run list on the site root |
-| `GET /api/runs/{key}` | manifest (below) | header, progress, tabs, benchmark-level pagination, live polling |
-| `GET /api/runs/{key}/summary?rid=[&group=]` | summary of one scope (below); no `group` means Overview | summary section, benchmark-wide error |
-| `GET /api/runs/{key}/plots?rid=&rev=&group=&benchmark=&offset=&limit=[&after=PLOT:X][&all=1]` | `{total, plots: [{id, non_scaling_params, rows: [point]}], next}` | series pages inside one benchmark card; export |
-| `GET /api/runs/{key}/points/{plot}/{x}?rid=` | one full `data.json` point | point details opened from a summary chart |
+| `/` | `[{key, title, state, progress, updated_at}]`, newest first | run list on the site root |
+| `/{key}` | manifest (below) | header, progress, tabs, benchmark pagination, live polling |
+| `/{key}/summary?rid=&scope=` | summary of one scope: a group id, or `overview` (below) | summary section, benchmark-wide error |
+| `/{key}/plots?rid=&rev=&group=&benchmark=&offset=&limit=[&after=PLOT:X][&all=1]` | `{total, plots: [{id, non_scaling_params, rows: [point]}], next}` | series pages inside one benchmark card; export |
+| `/{key}/points/{plot}/{x}?rid=` | one full `data.json` point | point details opened from a summary chart |
 
-HTTP caching:
-
-- `/api/runs` is `Cache-Control: no-cache` without a validator. It is one small query.
-- The manifest carries `ETag: "<run id>-<revision>-<updated_at>"` and answers a matching `If-None-Match` with `304`. Every data write increments `revision`, and a heartbeat changes only `updated_at`, so the ETag covers every manifest field. The viewer derives staleness from `updated_at` (§6).
-- `plots` and `points` of a `completed` run are `Cache-Control: public, max-age=31536000, immutable` (their URLs carry `rid`, and `plots` also `rev`). While the run is `running` they are `no-cache`.
-- `summary` follows the rules in "Summary cache" below.
+HTTP caching: a response is `Cache-Control: public, max-age=31536000, immutable` **only when the run is `completed`**; responses about `running` and `failed` runs are `no-cache`. A completed URL names a historical run (by `rid`), so it stays valid even after the key is reused. `/runs` has no validator. The manifest carries `ETag: "<run id>-<revision>-<updated_at>"` and answers `If-None-Match` with `304`: data writes increment `revision`, and a heartbeat changes only `updated_at`, so the ETag covers every manifest field. The viewer derives staleness from `updated_at` (§6).
 
 ### Manifest
-
-This benchmark is a valid `data.json` benchmark:
 
 ```json
 {
   "id": 7, "revision": 418, "state": "running", "updated_at": "2026-11-25T16:20:00Z",
   "report": {"title": "MGPUSim calibration", "description": "", "live": true,
              "groups": {"mi300x": {"name": "AMD MI300X"}}},
+  "group_ids": {"mi300x": 3},
   "progress": {"total": 450000, "completed": 212000, "running": 32},
   "benchmarks": {"polybench_fdtd2d": {
     "scaling_param": "size",
@@ -286,29 +280,29 @@ This benchmark is a valid `data.json` benchmark:
 }
 ```
 
-`report`, `progress`, and `benchmarks` have exactly the `data.json` shapes, with `report.live` derived as `state = 'running'`. `plots[group][benchmark]` counts visible plots, so page counts match what `indexReport` produces from the same data. The manifest grows with groups × benchmarks, not with points.
+`report`, `progress`, and `benchmarks` have exactly the `data.json` shapes (the benchmark above is valid `data.json`), with `report.live` derived as `state = 'running'`. Groups, benchmarks, parameters, and series appear in declaration (id) order: the Function builds them with `json_object_agg ... ORDER BY id`, not `jsonb`, which would reorder keys. `plots[group][benchmark]` counts visible plots. The manifest grows with groups × benchmarks, not with points.
 
 ### Plot pages
 
-Netlify buffers a Function response up to 6 MB ([Functions defaults](https://docs.netlify.com/build/functions/configuration/#default-values)). `plots` returns the plots of one page (`offset`, `limit`) ordered by plot id, with rows ordered by `x`, and stops adding rows when the body reaches **4 MB** or 20,000 rows. It then returns `next = "PLOT:X"`, and the client fetches the rest of that plot before rendering the page. Ingest bounds the size of one point (§3), so one row always fits in the remaining budget. `all=1` includes invisible plots, which only export needs.
+Netlify buffers a Function response up to 6 MB ([Functions defaults](https://docs.netlify.com/build/functions/configuration/#default-values)). `plots` returns one page (`offset`, `limit`) of visible plots ordered by id, each with its visible rows (the `indexReport` row filter) ordered by `x`. It stops at **4 MB** or 20,000 rows and returns `next = "PLOT:X"`; the client fetches the rest of that plot before rendering. One point is bounded (§3), so one row always fits. `all=1` returns every plot and row, for export.
 
-Plot pages of a running run show the database at request time and are not pinned to the summary's revision, which may lag by up to 60 s. Pinning would require keeping old point versions; the summary states its revision, and both converge on the next refresh.
+Plot pages of a running run are not pinned to the summary's revision, which may lag by up to a minute; pinning would require old point versions, and both converge on the next refresh.
 
 ### Summary
 
-The summary Function computes what the summary section and the benchmark cards' benchmark-wide error show today. It imports the pure functions of `site/model.js`, which has no imports and no DOM use (`site/model.js:1`; verified to load in plain Node): `comparisonPairs` (line 1), `errorStats` (56), `rankStatistics` and `rankingStats` (88, 161), `preferLogScale` (186). Logic that now sits in components moves there too: the Overview relabeling and percentiles (`site/Charts.jsx:503-545`), the scatter statistics and default scale (`site/Charts.jsx:468,477`), and the CDF default scale (`site/drawing.js:350`). A new `buildSummary(rows, benchmarks, groups, scope, limits)` wraps them with the sampling rules below. The file source calls it without limits, so the offline viewer keeps full-resolution charts.
+The summary Function computes what the summary section and benchmark-wide error show today. It imports the pure functions of `site/model.js`, which has no imports and no DOM use (`site/model.js:1`; verified to load in plain Node): `comparisonPairs` (line 1), `errorStats` (56), `rankStatistics` and `rankingStats` (88, 161), `preferLogScale` (186). Logic that now sits in components moves there too: the Overview relabeling and percentiles (`site/Charts.jsx:503-545`), the scatter statistics and default scale (`site/Charts.jsx:468,477`), and the CDF default scale (`site/drawing.js:350`). A new `buildSummary(rows, benchmarks, groups, scope, limits)` wraps them with the sampling rules below. The file source calls it without limits, so the offline viewer keeps full-resolution charts.
 
-**Read.** The Function reads the run in one `REPEATABLE READ READ ONLY` transaction, so the revision it reports matches the rows it read:
+**Read**, in one `REPEATABLE READ READ ONLY` transaction, so revision, series metadata, and values come from one snapshot:
 
-1. `SELECT id, state, revision FROM cr.runs WHERE key = $1` (unique index).
-2. Every finite value of a series with a role, for the scope's groups: `cr.points` by `group_id` (index-only scan on the §3 index), joined to `cr.observations` by primary key and to `cr.series`. Each row carries only `(benchmark, plot, x, series, value)`. These become rows `{group, benchmark, x, plot, values}`, all that `comparisonPairs` reads.
-3. `non_scaling_params` for the plots of the sampled comparisons only (`WHERE id = ANY($1)`).
+1. The run's `id`, `state`, and `revision` by key, and its groups, benchmarks, and series (the pairing rules read roles and units).
+2. **One row per point** of the scope's groups: group, benchmark, plot, `x`, and the values of the benchmark's role-tagged series aggregated in SQL into one array in series-id order. The scan uses the §3 `points (group_id)` index and observations by primary key. At about 50 bytes per row, a 450,000-point run is **about 20–25 MB on the wire** (unaggregated, one row per observation, it would be about 50 MB).
+3. `non_scaling_params` of the sampled plots only.
 
-When a run has a single group, Overview and that group are the same scope and share one cache entry.
+A single-group run's Overview is the same request as its group scope: the Function canonicalizes `overview` to the group id, so there is one cache entry with the full group payload.
 
-**Exact over all comparisons:** comparison count; average and maximum error; P50/P90/P95/P98; and per unit, Kendall's τ-b, pairwise ordering accuracy, Spearman's ρ, and error statistics; per benchmark (group scopes only), the benchmark-wide error statistics; and every chart's default axis scale (`preferLogScale` over the full data).
+**Exact over all comparisons**, never reduced: comparison count; average and maximum error; P50/P90/P95/P98; per unit, Kendall's τ-b, pairwise ordering accuracy, Spearman's ρ, and error statistics; per benchmark (group scopes), comparison count and error statistics; and every chart's default axis scale (`preferLogScale` over all data).
 
-**Sampled, deterministically (no random numbers), with the limits per scope:**
+**Sampled deterministically**, per scope:
 
 | Chart | Limit | Rule |
 |---|---|---|
@@ -316,67 +310,68 @@ When a run has a single group, Overview and that group are the same scope and sh
 | Error CDF (absolute error) | 1,500 points | smallest and largest, plus evenly spaced ranks |
 | Scatter, per unit | 3,000 points | the 1,000 largest absolute errors, the minimum and maximum of actual and prediction, then evenly spaced comparisons ordered by actual |
 
-Sampled charts say so ("3,000 of 212,000 comparisons shown"). The log/linear toggle redraws the sample.
-
-Response, abbreviated:
+Sampled charts say so ("3,000 of 212,000 comparisons shown").
 
 ```json
 {
-  "rid": 7, "scope": "mi300x", "revision": 418, "state": "running",
-  "computed_at": "2026-11-25T16:20:05Z",
-  "count": 212000,
+  "rid": 7, "key": "mgpusim.mi300x.2026-11-25-434ad66", "scope": 3, "revision": 418,
+  "state": "running", "computed_at": "2026-11-25T16:20:05Z", "count": 212000,
   "stats": [["Average error", "18.2%"], ["Max error", "412%"]],
   "percentiles": [["P50", "9.81%"], ["P90", "41.0%"], ...],
-  "pairs": [{"id": "[\"mi300x\",\"mgpusim\"]", "name": "MGPUSim kernel time vs. MI300X kernel time", "unit": "ns"}],
+  "series": [["mi300x", "MI300X kernel time", "ns"], ["mgpusim", "MGPUSim kernel time", "ns"]],
+  "pairs": [[0, 1]],
   "benchmarks": ["polybench_fdtd2d"],
-  "plots": {"17": [0, {"tmax": 10}]},
+  "plots": {"17": [0, 0, {"tmax": 10}]},
   "samples": {"plot": [17], "x": [64], "pair": [0], "actual": [57889], "prediction": [79339]},
   "scurve": {"sample": [0], "rank": [118000]},
   "cdf": {"log": true, "sample": [0], "rank": [160500]},
-  "scatter": {"ns": {"log": true, "count": 212000, "sample": [0],
-                     "stats": [["Kendall’s τ-b", "0.912"], ...]}},
-  "benchmark_stats": {"polybench_fdtd2d": [["Average error", "12.0%"], ["Max error", "88.1%"]]}
+  "scatter": {"ns": {"log": true, "count": 212000, "sample": [0], "stats": [["Kendall’s τ-b", "0.912"], ...]}},
+  "benchmark_stats": {"polybench_fdtd2d": {"count": 1184, "stats": [["Average error", "12.0%"], ["Max error", "88.1%"]]}}
 }
 ```
 
-`samples` holds the union of the three samples in columns, and the charts index into it. Each sample carries what click-through needs (`plot`, `x`, `pair`) and, through `plots` and `benchmarks`, what hover needs (`PointDescription` reads `point.non_scaling_params.launch`, `site/PointDetails.jsx:41`). Size bound: ≤ 6,000 samples for a single-unit scope, about 600 KB of JSON or 150 KB compressed; each further unit adds ≤ 3,000. It does not grow with the number of points.
+`samples` holds the union of the three samples in columns, and the charts index into it. A sample carries what click-through needs (`plot`, `x`, `pair`) and, through `plots` (`[group index, benchmark index, non_scaling_params]`), what hover needs (`PointDescription` reads `point.non_scaling_params.launch`, `site/PointDetails.jsx:41`). The full point is loaded on selection. In a multi-group Overview, pairs are relabeled per group as today, and the group index identifies the sample's group.
+
+**Byte budget: 2 MB serialized**, well under the 6 MB buffered limit. The exact part is bounded by the run limits in §3: at most 1,000 benchmark entries of ≤ 450 bytes, 32 series, 32 × 32 pairs per group across 16 groups, and 32 units, which is under 1 MB. If the samples do not fit in the rest, `buildSummary` halves every sample limit and samples again until they fit. The result is deterministic and the exact part is unchanged.
 
 ### Summary cache
 
-Rule, enforced by the server: compute only on request, cache, and recompute only when new data has arrived, at most once per 60 s per scope. Nothing is computed on write; there are no background jobs.
+Rule: compute only on request, and recompute only when new data has arrived and the cached result is at least 60 s old. Nothing is computed on write; there are no background jobs and no locks.
 
-Each (run id, scope) has one record in the site-wide Netlify Blobs store `getStore({name: "summaries", consistency: "strong"})`, key `<run id>/<scope>`, which Functions can use without configuration ([Netlify Blobs](https://docs.netlify.com/build/data-and-storage/netlify-blobs/); keys ≤ 600 bytes not starting with `/`, metadata ≤ 2 KB, objects ≤ 5 GB). The value is the response body; the metadata is `{revision, state, computed_at}`.
+Each scope has one record in the site-wide Netlify Blobs store `getStore({name: "summaries", consistency: "strong"})` under `v1/<run id>/<scope id>` ([Netlify Blobs](https://docs.netlify.com/build/data-and-storage/netlify-blobs/); Functions use it without configuration; keys ≤ 600 bytes, metadata ≤ 2 KB). The value is the response body; the metadata is `{key, revision, state, computed_at}`.
 
 On each request the Function:
 
-1. Reads the record. If its `state` is `completed`, returns it **without touching the database**. A completed run is terminal, so viewing a finished run's summary never wakes the database.
-2. Otherwise reads the run's `state` and `revision` (query 1 above). If the record's revision equals the run's, returns it: there is no new data.
-3. Otherwise, if `now − computed_at < 60 s` and the run is still `running`, returns the record as it is. The body states its `revision` and `computed_at`, and the viewer shows "summary as of …".
-4. Otherwise computes, writes the record, and returns it. A run that has just become `completed` skips the 60 s window, so its final summary is exact.
+1. Reads the record. If it is `completed` and its `key` matches the request, returns it without touching the database. Only such a **warm** hit avoids the database; a completed run with no record computes once.
+2. Otherwise reads the run's state and revision. If the record's revision is current, returns it.
+3. Otherwise, if the record is less than 60 s old and the run is still `running`, returns it; the body states its `revision` and `computed_at`, and the viewer shows "summary as of …".
+4. Otherwise computes, writes, and returns. A run that has just become `completed` skips the 60 s window, so its final summary is exact.
 
-The write uses `onlyIfMatch` with the ETag read in step 1 (or `onlyIfNew`), so a slow, older computation cannot overwrite a newer record. There is no lease: requests that miss at the same time may each compute, which is accepted. A `failed` run is not terminal (`open_run` can reopen it), so its summary costs one small query per request.
+The write uses `onlyIfMatch` with the ETag read in step 1 (or `onlyIfNew`), so an older computation never overwrites a newer record. There is no claim or lease: requests that arrive while a computation runs (about 10 s) may each compute. **Normally there is at most one computation per minute per scope; concurrent requests may duplicate it**, bounded by the number of concurrent viewers, which is small. A `failed` run is not terminal (`open_run` can reopen it), so its summary costs one small query per request.
 
-HTTP: a `completed` summary is `Cache-Control: public, max-age=31536000, immutable`, and the URL carries `rid`. Any other summary is `no-cache` with `ETag: "<run id>-<summary revision>"`, and a matching `If-None-Match` gets `304`.
+### Retention and deletion
+
+Runs are kept until someone deletes them. At about 100 MB per run, the 5 GB storage cap of the Free tier (§8) holds about 40 runs, so on that tier old runs must be deleted. The team owner deletes a run by hand: `DELETE FROM cr.runs WHERE key = '...'` (everything cascades), then deletes every Blob key under `v*/<run id>/`. Immutable responses already in the CDN expire on their own.
 
 ## 6. Viewer changes and `data.json` compatibility
 
 The viewer gains a data source interface with two implementations:
 
-- **API source.** Used when the URL has `?run=KEY`. A query string keeps the existing relative-asset build working without rewrites. The site root without `run` lists runs.
-- **File source.** Used when there is no `run` parameter and `./data.json` exists. This is today's behavior, implemented in memory with `indexReport` and `buildSummary`, so `npm run dev`, `serve.py`, and static hosting keep working unchanged.
+- **API source**, when the URL has `?run=KEY`. A query string keeps the relative-asset build working without rewrites. The site root without `run` lists runs.
+- **File source**, otherwise: today's behavior, in memory with `indexReport` and `buildSummary`, so `npm run dev`, `serve.py`, and static hosting keep working.
 
-`Report` then consumes the interface:
+`Report` consumes the interface:
 
+- Tabs are the groups with a non-zero visible plot count, in declaration order; Overview exists when the Overview summary's `count` is non-zero. The file source derives the same from `indexReport` (`site/App.jsx:285-286`).
 - `Summary` and the summary drawings in `site/drawing.js` consume the summary object (exact statistics, sampled series) instead of the full pair list.
-- Benchmark cards take counts from the manifest, rows from `plots` pages, and benchmark-wide error from `benchmark_stats`. `pageWindow` clamping uses the manifest counts.
-- Opening a sampled point fetches `/points/{plot}/{x}`. `PointDetails` shows the result only if the selection is still that point and the summary revision is unchanged, so a late response cannot replace a newer selection. Benchmark-card points are already complete.
+- Benchmark cards take counts from the manifest, rows from `plots` pages, and benchmark-wide error from `benchmark_stats`.
+- Opening a sampled point fetches `/points/{plot}/{x}`. `PointDetails` shows the result only if the selection is still that point and the summary revision is unchanged, so a late response cannot replace a newer selection.
 
-Polling policy for the API source:
+Polling, API source only:
 
-- Poll the manifest every 10 s only while all of these hold: `state` is `running`, the run is not stale, and the tab is visible (`document.visibilityState`).
-- After 5 minutes without a new revision, poll every 60 s.
-- Stop polling once the run is stale, meaning `updated_at` is more than 30 minutes old (writers heartbeat every 5 minutes). Show the run as stale with a manual refresh button.
-- On a new manifest revision, refetch the visible `plots` pages. Request the summary whenever its revision is older than the manifest's. The server decides whether to recompute, so the viewer needs no throttle of its own.
+- Poll the manifest every 10 s while the run is `running`, not stale, and the tab is visible; every 60 s after 5 minutes without a new revision.
+- Stop once the run is stale (`updated_at` more than 30 minutes old; writers heartbeat every 5 minutes) and offer a manual refresh.
+- On a new revision, refetch the visible `plots` pages. Request the summary whenever its revision is older than the manifest's; the server decides whether to recompute.
 
 Import and export mapping:
 
@@ -394,55 +389,35 @@ Import and export mapping:
 | `data[i].values.{s} = v` (number or null) | `observations(series s, in_values = true, value = v)` |
 | `data[i].statuses.{s}` `{state, reason, symbol}` | same observation row's `state`, `reason`, `symbol`; `in_values = false` when `s` is not in `values` |
 
-Export reads the manifest, then pages through `plots?all=1` for every group and benchmark.
-
-Round trip is semantic, not byte-for-byte: `export(import(f))` is equivalent to `f` after these normalizations.
-
-- Object key order and the order of `data` are ignored.
-- Numbers are compared as IEEE-754 doubles. `x`, values, and parameter numbers are stored as `double precision` or JSON numbers, so `1.0` comes back as `1`.
-- `report.live` is derived from `state`.
-- An empty `statuses` object is omitted.
-
-The exported file validates against `data.schema.json` unchanged.
+Export is defined for **completed runs only**, which cannot change while it pages. It reads the manifest, then every `plots?all=1` page, so it includes invisible plots and rows. Round trip is semantic: `export(import(f))` equals `f` up to key order and `data` order, numbers compared as doubles (`1.0` becomes `1`), `report.live` derived from `state`, and empty `statuses` omitted. The result validates against `data.schema.json` unchanged.
 
 ## 7. Cost
 
-Rates in Netlify credits ([how credits work](https://docs.netlify.com/manage/accounts-and-billing/billing/billing-for-credit-based-plans/how-credits-work/), [database billing](https://docs.netlify.com/build/data-and-storage/netlify-database/billing-and-usage/)):
+Rates in Netlify credits ([how credits work](https://docs.netlify.com/manage/accounts-and-billing/billing/billing-for-credit-based-plans/how-credits-work/), [database billing](https://docs.netlify.com/build/data-and-storage/netlify-database/billing-and-usage/)): database compute 10 per compute-unit hour (the database sleeps after 5 idle minutes); database bandwidth, web bandwidth 20 per GB; function compute 10 per GB-hour (1 GB default memory); requests 2 per 10,000; database storage currently free; Netlify Blobs not listed (unverified, §8). The Open Source plan grants 10,000 credits per month.
 
-| Resource | Rate |
+Assumptions: three runs per month, each about 6 hours, single group, watched live; all figures unmeasured. Which database tier applies to the Open Source plan is unknown (§8), so the summary line depends on it:
+
+| Item | Credits / month |
 |---|---|
-| Database compute | 10 credits per compute-unit hour; the database sleeps after 5 idle minutes |
-| Database bandwidth | 20 credits per GB |
-| Function compute | 10 credits per GB-hour (default 1 GB memory) |
-| Web bandwidth | 20 credits per GB |
-| Web requests | 2 credits per 10,000 |
-| Database storage | currently free |
-| Netlify Blobs | not listed on the credits page; unverified (§8) |
+| Database awake while runs write (1 CU × 6 h × 3 = 18 CU-h) | 180 |
+| Database woken by finished-run views (manifest and plot-page CDN misses; warm summaries come from Blobs; ≤ 8 CU-h) | ≤ 80 |
+| Summary reads, 60 s window: ≤ 360 per watched run × ≈ 22 MB × 3 = ≈ 24 GB | ≈ 480 |
+| Function compute (≈ 10 s at 1 GB per computation, ≈ 3 GB-h) | ≈ 30 |
+| Web bandwidth and requests | ≤ 60 |
+| **Total** | **≈ 650–850** |
 
-The team's Open Source plan grants 10,000 credits per month at no charge.
+Duplicated computations (§5) add to the summary line in proportion to concurrent viewers. An unwatched run costs no summary reads, and a finished run's summary is computed once. **On the Free tier this does not fit**: one watched run reads about 8 GB, over the 5 GB monthly database egress limit. There the window must be about 10 minutes (≤ 36 reads, ≈ 0.8 GB per run, ≈ 2.4 GB per month), which brings the total to about 400 credits.
 
-The estimate assumes three runs per month (tens per year), each about 6 hours long, single group, and watched live. All figures are estimates to be measured.
-
-| Item | Estimate | Credits / month |
-|---|---|---|
-| Database awake while runs write (1 CU × 6 h × 3) | 18 CU-h | 180 |
-| Database woken by finished-run views (manifest and plot-page CDN misses, ≈5 min each, 100 visits); summaries come from Blobs | ≤ 8 CU-h | ≤ 80 |
-| Summary reads leaving the database (≤ 1 per minute per scope while watched: ≤ 360 per run × ≈20 MB × 3 runs) | ≤ 22 GB | ≤ 430 |
-| Function compute (≈10 s at 1 GB per summary computation, unmeasured; small requests negligible) | ≤ 3 GB-h | ≤ 30 |
-| Web bandwidth (≈150 KB per summary, plot pages, 200 page loads, live refreshes) | ≤ 1 GB | ≤ 20 |
-| Requests (manifest and summary polls of visible live tabs, plus page loads) | < 200,000 | < 40 |
-| **Total** | | **≈ 600–800** |
-
-Summary computations are bounded per scope, not per viewer: ten viewers of a running run cost the same as one, an unwatched run costs none, and a finished run's summary is computed once. A longer window than 60 s cuts the summary line proportionally.
-
-The polling policy bounds a forgotten tab: it stops when the run finishes or 30 minutes after the last write, and hidden tabs do not poll. Without it, a tab polling every 10 s would keep the database awake around the clock, about 7,200 credits per month.
+The polling policy (§6) bounds a forgotten tab; without it, a tab polling every 10 s would keep the database awake around the clock, about 7,200 credits per month.
 
 ## 8. Risks to verify before implementation
 
 1. **External connections.** Confirm that a GitHub-hosted runner can connect with the copied connection string (only Team Owners can copy a read-write one, [access control](https://docs.netlify.com/build/data-and-storage/netlify-database/access-control/)), that the owner can create the `cr_ingest` login, and whether a pooled endpoint exists. Measure first-connect latency after the database has slept.
-2. **Plan limits.** The database limits table lists Free, Personal, Pro, and Enterprise, but not Open Source ([limits](https://docs.netlify.com/build/data-and-storage/netlify-database/billing-and-usage/#limits)). If Open Source maps to Free, the 5 GB storage cap and the **48 compute-unit hours per month** cap would bind. Three 6-hour runs already use 18 CU-h. Ask Netlify support which column applies before building.
-3. **Storage billing.** Database storage is free "for now", and Netlify will announce rates in advance. Blobs usage rates are not on the credits page either; the summary store holds well under 1 MB per scope, but confirm it is billed sanely. If storage becomes expensive, revive the deferred R2 archive.
-4. **Direct-write coupling.** See §4. Revisit if more than a handful of repositories report. A thin write Function could front the same SQL functions without a schema change.
-5. **Summary computation time.** A synchronous Function may run for at most 60 s ([Functions defaults](https://docs.netlify.com/build/functions/configuration/#default-values)), and a summary reads and pairs about 1 million observation rows. Measure it (risk 6). If it nears the limit, narrow the read first (one row per point with its role-tagged values aggregated in SQL, streamed). A background Function (≤ 15 minutes) writing the Blob would fit but reintroduces background work, so it needs a decision.
-6. **Query plans and sizes.** Load a synthetic 450,000-point run into a Netlify Database branch. Check `EXPLAIN (ANALYZE, BUFFERS)` of the summary read, plot pages, and manifest counts against the §3 indexes, and measure response sizes (§5), bytes per summary read (20 MB, §7), and storage (100 MB per run).
-7. **Deploy previews copy production data.** Each deploy preview gets a database branch with a copy of production data ([branching](https://docs.netlify.com/build/data-and-storage/netlify-database/#database-branching)). Confirm that copying several GB per preview is cheap (copy-on-write), or disable database access for previews. Previews share run ids with production but may diverge, so they must cache summaries in a deploy-scoped store (`getDeployStore`), never in the site-wide `summaries` store.
+2. **Plan tier (gate).** The [database limits](https://docs.netlify.com/build/data-and-storage/netlify-database/billing-and-usage/#limits) list Free, Personal, Pro, and Enterprise, but not Open Source. Per billing period, Free allows 48 compute-unit hours, 5 GB written, and **5 GB of database egress**, with 5 GB of storage; Pro has no compute-unit cap and 100 GB for each. On Free, writes (18 CU-h, ≈ 0.3 GB written) fit, but storage needs retention (§5) and summaries need the 10-minute window (§7). Ask Netlify support which column applies before building.
+3. **Storage billing.** Database storage is free "for now"; Blobs rates are not published on the credits page. The summary store holds about 1 MB per run. If storage becomes expensive, revive the deferred R2 archive.
+4. **Direct-write coupling.** See §4. Revisit if more than a handful of repositories report; a thin write Function could front the same SQL functions without a schema change.
+5. **Summary computation time.** A synchronous Function may run for 60 s ([Functions defaults](https://docs.netlify.com/build/functions/configuration/#default-values)). The aggregated read and pairing of 450,000 points is estimated at about 10 s, unmeasured. If it nears the limit, stream the read; a background Function (≤ 15 minutes) would fit but needs a decision. Longer computations also widen the window in which concurrent requests duplicate work.
+6. **Measurements on a synthetic 450,000-point run** in a database branch: `EXPLAIN (ANALYZE, BUFFERS)` of the summary read, plot pages, and manifest counts against the §3 indexes; bytes per summary read (≈ 22 MB); summary and page sizes against their budgets; storage per run (≈ 100 MB).
+7. **Deploy previews copy production data** ([branching](https://docs.netlify.com/build/data-and-storage/netlify-database/#database-branching)). Confirm the copy is cheap or disable database access for previews. Previews share run ids with production but may diverge, so they cache summaries in a deploy-scoped store (`getDeployStore`), never in `summaries`.
+
+Implementation checklist, before the first real run: a constraint smoke test against the migrated DDL (accepted and rejected `data.json` fixtures; oversize and non-scalar `params`; concurrent first `open_run` calls for one key; `finish_run` repeated and conflicting); a shared fixture test of `plots.visible` against `isMarked`; and the measurements in risk 6.
