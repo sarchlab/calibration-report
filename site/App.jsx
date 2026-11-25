@@ -217,7 +217,9 @@ export function Report({snapshot, revision = 0, waiting = false}) {
     [],
   );
   const {colorScheme, setColorScheme} = useMantineColorScheme();
-  const scheme = useComputedColorScheme('light');
+  const scheme = useComputedColorScheme('light', {
+    getInitialValueInEffect: false,
+  });
   const theme = useMemo(() => {
     const colors = chartColors[scheme];
     return {
@@ -265,9 +267,6 @@ export function Report({snapshot, revision = 0, waiting = false}) {
   }, [group, overview, pairs, measured]);
   const views = groupIds.map((id) => ({id, name: report.groups[id].name}));
   if (pairs.length) views.unshift({id: null, name: 'Overview'});
-  useLayoutEffect(() => {
-    document.documentElement.dataset.theme = scheme;
-  }, [scheme]);
   useEffect(() => {
     document.title = report.title || 'Calibration report';
   }, [report.title]);
@@ -377,6 +376,12 @@ export function Report({snapshot, revision = 0, waiting = false}) {
   );
 }
 function LoadedReport() {
+  const scheme = useComputedColorScheme('light', {
+    getInitialValueInEffect: false,
+  });
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = scheme;
+  }, [scheme]);
   const {snapshot, revision, waiting} = useReport();
   return snapshot ? (
     <Report snapshot={snapshot} revision={revision} waiting={waiting} />

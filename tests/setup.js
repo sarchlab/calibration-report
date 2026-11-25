@@ -3,13 +3,19 @@ import {cleanup} from '@testing-library/react';
 
 const listeners = new Set();
 let viewport = 'desktop';
+let systemDark = false;
+export function setSystemDark(value) {
+  systemDark = value;
+  for (const {query, listener} of listeners)
+    listener({matches: matches(query)});
+}
 export function setViewport(value) {
   viewport = value;
   for (const {query, listener} of listeners)
     listener({matches: matches(query)});
 }
 function matches(query) {
-  if (query.includes('prefers-color-scheme')) return false;
+  if (query.includes('prefers-color-scheme')) return systemDark;
   if (query.includes('orientation: landscape')) return viewport === 'landscape';
   if (query.includes('min-width: 821px')) return viewport === 'desktop';
   return false;
@@ -70,6 +76,10 @@ HTMLCanvasElement.prototype.getContext = () =>
 afterEach(() => {
   cleanup();
   setViewport('desktop');
+  setSystemDark(false);
+  localStorage.clear();
+  delete document.documentElement.dataset.theme;
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.useRealTimers();
 });

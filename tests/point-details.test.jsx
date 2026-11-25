@@ -3,9 +3,9 @@ import {act, fireEvent, render, screen, within} from '@testing-library/react';
 import {expect, test, vi} from 'vitest';
 import {PointDescription, PointProvider} from '../site/PointDetails.jsx';
 import {PlotCanvas, nearestPoint} from '../site/Charts.jsx';
-import {Report, useReport} from '../site/App.jsx';
+import App, {Report, useReport} from '../site/App.jsx';
 import {comparisonPairs, rankStatistics} from '../site/model.js';
-import {setViewport} from './setup.js';
+import {setSystemDark, setViewport} from './setup.js';
 import fs from 'node:fs';
 
 const benchmarks = {
@@ -447,4 +447,38 @@ test('interactive charts describe keyboard usage before and after pinning detail
     'pinned-point-description',
   ]);
   expect(document.getElementById('pinned-point-description')).toBeTruthy();
+});
+
+test.each(['pending', 'failed'])(
+  'stored dark theme applies while report fetch is %s',
+  async (state) => {
+    localStorage.setItem('calibration-report-theme', 'dark');
+    const fetcher =
+      state === 'pending'
+        ? vi.fn(() => new Promise(() => {}))
+        : vi.fn().mockRejectedValue(new Error('Data unavailable'));
+    vi.stubGlobal('fetch', fetcher);
+    render(<App />);
+    await act(async () => {});
+    expect(screen.getByRole('status').textContent).toBe(
+      'Waiting for report data',
+    );
+    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(document.documentElement.dataset.mantineColorScheme).toBe('dark');
+  },
+);
+
+test('waiting page follows system color scheme before data arrives', () => {
+  setSystemDark(true);
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => new Promise(() => {})),
+  );
+  render(<App />);
+  expect(document.documentElement.dataset.theme).toBe('dark');
+  act(() => setSystemDark(false));
+  expect(document.documentElement.dataset.theme).toBe('light');
+  expect(screen.getByRole('status').textContent).toBe(
+    'Waiting for report data',
+  );
 });
