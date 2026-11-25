@@ -51,7 +51,27 @@ Keyboard users can Tab to a chart and use arrow keys, Home, or End to inspect po
 
 ## Validation
 
-Run `npm test` for the React interaction and statistics checks plus the Python static-server checks. The statistics tests compare tied and randomized inputs to the quadratic definition and check exact counts at 455,291 pairs. Pagination tests cover both levels, unchanged summary populations, device switching, point-detail cleanup and live-update clamping. The UI tests render real React and Mantine components in jsdom with a mocked canvas drawing context; verify actual hover, mobile tapping, layout, scrolling, and pinch zoom in a browser as well. `npm run build` verifies the production bundle.
+Run `npm test` for the React interaction and statistics checks plus the Python static-server checks. The statistics tests compare tied and randomized inputs to the quadratic definition and check exact counts at 455,291 pairs. Pagination tests cover both levels, unchanged summary populations, device switching, point-detail cleanup and live-update clamping. The UI tests render real React and Mantine components in jsdom with a mocked canvas drawing context; verify actual hover, mobile tapping, layout, scrolling, and pinch zoom in a browser as well. `npm run build` verifies the production bundle. The npm integration tests also pack the actual package, install it offline without lifecycle scripts or runtime dependencies, and exercise the installed executable and its output protection.
+
+## Generate a report with npm
+
+The npm package includes the prebuilt viewer and a small command-line tool. Generate a static report without cloning this repository or installing frontend build dependencies:
+
+```sh
+npx calibration-report@0.3.0 --data ./data.json --out ./report
+```
+
+The output contains `index.html`, bundled `assets/`, and a byte-for-byte copy of the supplied `data.json`. Publish this directory on a static host, or preview it over HTTP:
+
+```sh
+python3 -m http.server 8000 --directory ./report
+```
+
+Open `http://localhost:8000/`. Nested hosting paths work because asset and data URLs are relative. No Node.js runtime is required on the static host.
+
+Both `--data` and `--out` are required. Paths with spaces can be quoted. The destination must be new or an empty directory; the CLI refuses nonempty directories, files and destination symlinks. It checks JSON syntax before creating the output; producers remain responsible for the schema and cross-reference requirements above. The original input is preserved. The generated data is a snapshot: ongoing exporter changes must be copied to the generated `data.json`, or use the source checkout's live server below.
+
+Use `npx calibration-report@0.3.0 --help` for usage and `--version` for the installed version. For repeatable CI, pin the version as shown, or install it as an exact development dependency and invoke the local command with `npx calibration-report`.
 
 ## Build and hosting
 
@@ -70,6 +90,10 @@ npm run build
 - **UI development:** place or symlink your report at `site/data.json`, then run `npm run dev` for hot reload. This local data file is ignored by Git and is not copied into the production build.
 
 The viewer reads only `data.json`. With `report.live: true`, it shows a live indicator and fetches the file every ten seconds without navigating. Static snapshots load once. Plots display numeric measurements and omit points and series that have no measurements.
+
+## Package publishing
+
+`npm pack` runs the production build through `prepack`. The publish allowlist includes only the CLI, built HTML/JavaScript/CSS, JSON Schema, README and package metadata. It excludes exported report data, source maps, source files, tests and development dependencies. Consumers do not run a build during installation. Inspect the tarball and run `npm test` before publishing; version changes should update both `package.json` and `package-lock.json`.
 
 ## Repository scope
 

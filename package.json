@@ -1,28 +1,48 @@
 {
   "name": "calibration-report",
-  "private": true,
-  "version": "0.1.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run && python3 -m unittest discover -s tests -p 'test_*.py'"
+    "test": "vitest run && python3 -m unittest discover -s tests -p 'test_*.py' && node --test tests/npm-package.test.mjs",
+    "prepack": "npm run build"
   },
   "engines": {
     "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
-  "dependencies": {
+  "devDependencies": {
     "@mantine/core": "9.8.2",
     "@mantine/hooks": "9.8.2",
-    "react": "19.3.1",
-    "react-dom": "19.3.1"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-react": "6.3.0",
     "@testing-library/react": "16.3.3",
+    "@vitejs/plugin-react": "6.3.0",
     "jsdom": "31.0.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "vite": "8.3.8",
     "vitest": "5.1.1"
+  },
+  "description": "Generate a static calibration report from one data.json file.",
+  "bin": {
+    "calibration-report": "bin/calibration-report.js"
+  },
+  "files": [
+    "bin/calibration-report.js",
+    "dist/index.html",
+    "dist/assets/*.js",
+    "dist/assets/*.css",
+    "data.schema.json"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sarchlab/calibration-report.git"
+  },
+  "homepage": "https://github.com/sarchlab/calibration-report#readme",
+  "bugs": {
+    "url": "https://github.com/sarchlab/calibration-report/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
