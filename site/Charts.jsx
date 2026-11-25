@@ -351,27 +351,33 @@ function CurvePlot({
     </div>
   );
 }
-// `series` is every series of the benchmark (file source). With `wide`
+// `series` is every series of the benchmark (file source). With `paged`
 // (API source), `series` is only the current page of `count` series, `wide`
-// is the benchmark-wide {count, stats}, and series pairs come from their rows.
+// is the server's benchmark-wide {count, stats} (absent until it loads),
+// series pairs come from their rows, and `parameterOrder` is the declaration
+// order of the parameters.
 export function Benchmark({
   id,
   series: sourceSeries,
   count = sourceSeries.length,
   meta,
   pairs,
+  paged = false,
   wide,
+  parameterOrder,
   theme,
   preferences,
   setPreference,
   pagination,
   setPagination,
 }) {
-  const paged = wide !== undefined;
   const window = pageWindow(count, pagination, 6);
   const benchmarkWide = useMemo(
-    () => wide ?? {count: pairs.length, stats: errorStats(pairs)},
-    [wide, pairs],
+    () =>
+      paged
+        ? (wide ?? {count: 0, stats: []})
+        : {count: pairs.length, stats: errorStats(pairs)},
+    [paged, wide, pairs],
   );
   const series = useMemo(() => {
     const curves = Object.entries(meta.values)
@@ -397,7 +403,11 @@ export function Benchmark({
         const group = [...rows].sort((a, b) => a.x - b.x);
         return {
           parameters,
-          label: parameterLabel(group[0].non_scaling_params, meta.params),
+          label: parameterLabel(
+            group[0].non_scaling_params,
+            meta.params,
+            parameterOrder,
+          ),
           plots: Array.from(units, ([unit, comparable]) => ({
             unit,
             comparable,
@@ -417,7 +427,7 @@ export function Benchmark({
         };
       },
     );
-  }, [sourceSeries, paged, window.start, window.end, meta, theme, id]);
+  }, [sourceSeries, paged, window.start, window.end, meta, theme, id, parameterOrder]);
   const axisUnit = meta.params[meta.scaling_param].unit;
   const xLabel =
     displayName(meta.scaling_param) + (axisUnit ? ' (' + axisUnit + ')' : '');

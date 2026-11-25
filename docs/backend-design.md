@@ -15,12 +15,15 @@ Deferred, not built yet:
 - merging point details across revisions (the viewer does not call the points endpoint yet, so details opened from a summary chart show the sampled values only);
 - a separate store for deploy previews;
 - the 60-second back-off after failed polls;
-- a measured 450K-point run (§8).
+- a measured 450K-point run (§8), including the cost of plot chunks: each batch of 256 rows re-runs the grouped observation query from its keyset position, and that per-batch aggregation is unmeasured;
+- one data-source interface for both viewers (below).
 
 Deviations from the text below:
 - The ingest functions take `json`, not `jsonb`, arguments. `json` keeps key order, which declaration order relies on.
 - `plots` takes `limit` up to 48 (default 6).
 - In a one-group run, the hosted Overview tab shows that group's summary (`scope=group:<id>`), as §5 already canonicalizes on the server.
+- The API source is a separate `HostedReport` component. It shares the layout (`site/Layout.jsx`), `Summary`, and `Benchmark` with the file viewer's `Report`. Putting both behind one data-source interface is deferred.
+- The manifest adds `param_keys`: each benchmark's parameter names in declaration order, by benchmark index. JSON objects reorder numeric-looking keys, so this order travels in an array.
 
 ## 1. Goals and non-goals
 

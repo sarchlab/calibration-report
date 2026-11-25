@@ -109,12 +109,22 @@ class Writer:
         self._opened = False
         self._stop = threading.Event()
         self._timer = None
+        self._error = None  # terminal error of timed work, for the producer
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None and self._error is not None:
+            # Already failing: do not resubmit the rejected batch.
+            self._stop_timer()
+            self._connection.close()
+            return
         self.close()
+
+    def _check(self):
+        if self._error is not None:
+            raise self._error
 
     def open(self, report, benchmarks, progress):
         with self._lock:
@@ -130,6 +140,7 @@ class Writer:
 
     def add(self, point):
         with self._lock:
+            self._check()
             self._buffer.append(point)
             if len(self._buffer) >= self._batch_points:
                 self.flush()
@@ -141,6 +152,7 @@ class Writer:
 
     def flush(self):
         with self._lock:
+            self._check()
             if not self._buffer and self._progress is None:
                 return
             batch, progress = self._buffer, self._progress
@@ -163,19 +175,32 @@ class Writer:
                 self._connection.call("SELECT cr.heartbeat(%s)", (self.run_key,))
                 self._last_write = self._clock()
 
-    def _background(self):
-        period = max(1, min(self._flush_seconds or 60, self._heartbeat_seconds or 60) / 4)
-        while not self._stop.wait(period):
+    def _timed(self):
+        """One step of timed work. A terminal error (the connection already
+        retried lost outcomes) is saved for the producer and stops timed work;
+        the rejected batch is not resubmitted."""
+        with self._lock:
             try:
                 self.tick()
-            except psycopg.Error as error:  # retried on the next flush or tick
-                print("calibration_report_writer:", error, file=sys.stderr)
+            except psycopg.Error as error:
+                self._error = error
+                self._stop.set()
+                return False
+        return True
+
+    def _background(self):
+        period = max(1, min(self._flush_seconds or 60, self._heartbeat_seconds or 60) / 4)
+        while not self._stop.wait(period) and self._timed():
+            pass
+
+    def _stop_timer(self):
+        self._stop.set()
+        if isinstance(self._timer, threading.Thread):
+            self._timer.join()
+        self._timer = None
 
     def close(self):
-        self._stop.set()
-        if self._timer is not None:
-            self._timer.join()
-            self._timer = None
+        self._stop_timer()
         try:
             self.flush()
         finally:

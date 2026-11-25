@@ -292,6 +292,28 @@ describe.skipIf(!dsn)('hosted backend', () => {
       ).rejects.toThrow(/differs/);
     });
 
+    it('caps the stored series of a benchmark after appends', async () => {
+      const {report, progress} = example;
+      const bench = example.benchmarks.polybench_fdtd2d;
+      const series = (from, to) =>
+        Object.fromEntries(
+          Array.from({length: to - from}, (_, i) => ['v' + (from + i), {name: 'V' + (from + i), unit: 'ns'}]),
+        );
+      await open('cap', report, {c: {...bench, values: series(0, 40)}}, progress);
+      await open('cap', report, {c: {...bench, values: series(40, 64)}}, progress);
+      // A full redeclaration at 64 is accepted and changes nothing.
+      await open('cap', report, {c: {...bench, values: series(0, 64)}}, progress);
+      const before = await runOf('cap');
+      await expect(
+        open('cap', report, {c: {...bench, values: series(64, 65)}}, progress),
+      ).rejects.toThrow(/more than 64 series/);
+      expect(Number((await runOf('cap')).revision)).toBe(Number(before.revision));
+      const count = await sql(
+        "SELECT count(*)::int AS n FROM cr.series s JOIN cr.benchmarks b ON b.id = s.benchmark_id JOIN cr.runs r ON r.id = b.run_id WHERE r.key = 'cap'",
+      );
+      expect(count.rows[0].n).toBe(64);
+    });
+
     it('compares parameter declarations exactly, in order', async () => {
       const {report, progress} = example;
       const bench = example.benchmarks.polybench_fdtd2d;
@@ -602,7 +624,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
           `/wide-points/plots?rid=${manifest.id}&group=g&benchmark=b` +
             (after ? '&after=' + after : ''),
         );
-        expect(bytes).toBeLessThan(4.2 * 1024 * 1024);
+        expect(bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
         chunks++;
         for (const plot of body.plots) seen.push(...plot.rows);
         after = body.next;
@@ -633,6 +655,36 @@ describe.skipIf(!dsn)('hosted backend', () => {
       expect(connects).toBe(3); // the state query only
       expect(second.body.computed_at).toBe(first.body.computed_at);
       expect([...store.entries.keys()]).toEqual([`v1/${manifest.id}/${first.body.scope}`]);
+    });
+
+    it('re-resolves a one-group Overview that gains a group before its snapshot', async () => {
+      const data = [1, 2].map((x) => ({
+        group: 'first', benchmark: 'b', x, non_scaling_params: {}, values: {hw: x, sim: x * 1.2},
+      }));
+      const report = runReport(
+        {first: {name: 'First'}},
+        {b: {scaling_param: 'x', params: {x: {unit: ''}}, values: timing}},
+        data,
+      );
+      const manifest = await seed('gains-group', report, false);
+      const store = memoryStore();
+      let connects = 0;
+      const racing = {
+        async connect() {
+          // Between the state query and the summary snapshot.
+          if (++connects === 2)
+            await open('gains-group', {...report.report, groups: {second: {name: 'Second'}}}, report.benchmarks, report.progress);
+          return pool.connect();
+        },
+      };
+      const {status, body} = await api(
+        `/gains-group/summary?rid=${manifest.id}&scope=overview`,
+        {store, pool: racing},
+      );
+      expect(status).toBe(200);
+      expect(body.scope).toBe('overview');
+      expect(body.groups.map(([, key]) => key)).toEqual(['first', 'second']);
+      expect([...store.entries.keys()]).toEqual([`v1/${manifest.id}/overview`]);
     });
 
     it('keeps producer-chosen keys and first-appearance order', async () => {

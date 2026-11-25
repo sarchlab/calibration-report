@@ -276,3 +276,6 @@ a { color: var(--link); text-underline-offset: 3px; }
 .page-jump .mantine-NumberInput-root { width: 62px; }
 .page-size .mantine-NativeSelect-root { width: 64px; }
 .page-controls button { touch-action: manipulation; }
+
+.request-error { font-size: 13px; margin: 6px 0; }
+.hosted-benchmark[data-stale] > .chart { opacity: .6; }

@@ -25,12 +25,14 @@ class FakeConnection:
         self.failures = failures
         self.error = error
         self.closed = False
+        self.attempts = 0
 
     def __call__(self, dsn, autocommit):
         self.closed = False
         return self
 
     def execute(self, sql, args):
+        self.attempts += 1
         if self.error is not None:
             raise self.error
         if self.failures:
@@ -86,6 +88,37 @@ class WriterTest(unittest.TestCase):
         with self.assertRaises(psycopg.errors.ObjectNotInPrerequisiteState):
             connection.call("SELECT cr.heartbeat(%s)", ["run"])
         self.assertEqual(sleeps, [])
+
+    def timed_failure(self, prepare):
+        log, clock = [], Clock()
+        w = self.writer(log, clock=clock, flush_seconds=30, heartbeat_seconds=300)
+        w._timer = object()  # no background thread in tests
+        w.open({}, {}, {})
+        fake = w._connection._connect
+        prepare(w, clock)
+        fake.error = psycopg.errors.ObjectNotInPrerequisiteState("run is completed")
+        before = fake.attempts
+        self.assertFalse(w._timed())
+        self.assertEqual(fake.attempts - before, 1)
+        with self.assertRaises(psycopg.errors.ObjectNotInPrerequisiteState):
+            w.add({"x": 2})
+        with self.assertRaises(psycopg.errors.ObjectNotInPrerequisiteState):
+            w.__exit__(None, None, None)
+        self.assertEqual(fake.attempts - before, 1)  # the batch is not resubmitted
+        self.assertTrue(w._stop.is_set())
+
+    def test_timed_flush_failure_reaches_the_producer(self):
+        def prepare(w, clock):
+            w.add({"x": 1})
+            clock.now = 31
+
+        self.timed_failure(prepare)
+
+    def test_heartbeat_failure_reaches_the_producer(self):
+        def prepare(w, clock):
+            clock.now = 301
+
+        self.timed_failure(prepare)
 
     def test_progress_goes_with_the_next_batch(self):
         log = []

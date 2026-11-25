@@ -391,6 +391,13 @@ BEGIN
     IF (SELECT count(*) FROM cr.benchmarks WHERE run_id = run.id) > 1000 THEN
       PERFORM cr.fail('a run has at most 1,000 benchmarks');
     END IF;
+    -- Appending series can exceed the per-benchmark cap that each call checks.
+    SELECT be.key INTO b_key FROM cr.benchmarks be JOIN cr.series se ON se.benchmark_id = be.id
+    WHERE be.run_id = run.id AND be.key IN (SELECT json_object_keys(benchmarks))
+    GROUP BY be.id, be.key HAVING count(*) > 64 LIMIT 1;
+    IF FOUND THEN
+      PERFORM cr.fail('benchmarks.' || b_key || ' has more than 64 series');
+    END IF;
     IF (SELECT count(DISTINCT se.key) FROM cr.series se JOIN cr.benchmarks be ON be.id = se.benchmark_id
         WHERE be.run_id = run.id AND se.role IS NOT NULL) > 32 THEN
       PERFORM cr.fail('a run has at most 32 role-tagged series keys');

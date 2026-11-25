@@ -140,10 +140,14 @@ async function manifest(pool, key) {
           values: record(),
         };
       });
-      for (const param of params)
-        benchmarkMeta[benchmarkById.get(String(param.benchmark_id)).key].params[
-          param.key
-        ] = {unit: param.unit};
+      // Declaration order of each benchmark's parameters, by benchmark index:
+      // JSON objects reorder numeric-looking keys.
+      const paramKeys = benchmarks.map(() => []);
+      for (const param of params) {
+        const benchmark = benchmarkById.get(String(param.benchmark_id));
+        benchmarkMeta[benchmark.key].params[param.key] = {unit: param.unit};
+        paramKeys[benchmark.index].push(param.key);
+      }
       for (const {benchmark_id, key, name, unit, role} of series)
         benchmarkMeta[benchmarkById.get(String(benchmark_id)).key].values[key] =
           role ? {name, unit, role} : {name, unit};
@@ -181,6 +185,7 @@ async function manifest(pool, key) {
         group_ids: groupIds,
         group_order: groupOrder,
         benchmark_keys: benchmarks.map((b) => b.key),
+        param_keys: paramKeys,
         progress: run.progress,
         benchmarks: benchmarkMeta,
         plots,
@@ -269,7 +274,17 @@ async function plotPage(pool, key, query) {
       );
       const params = new Map(plots.map((p) => [String(p.id), p.params]));
       const byPlot = new Map();
-      let bytes = 0,
+      // The envelope counts against the budget: every page plot with its
+      // parameters, and the longest cursor.
+      const envelope = encoder.encode(
+        JSON.stringify({
+          revision: run.revision,
+          total,
+          plots: plots.map((p) => ({id: p.id, non_scaling_params: p.params, rows: []})),
+          next: '9'.repeat(20) + ':' + '-1.0000000000000000e+308',
+        }),
+      ).length;
+      let bytes = envelope,
         emitted = 0,
         next = null,
         position = cursor,
@@ -295,7 +310,7 @@ async function plotPage(pool, key, query) {
             benchmarkKey,
             params.get(String(row.plot_id)),
           );
-          const size = encoder.encode(JSON.stringify(point)).length;
+          const size = encoder.encode(JSON.stringify(point)).length + 1; // comma
           if (emitted === PAGE_ROWS || (emitted > 0 && bytes + size > PAGE_BYTES)) {
             next = position.plot + ':' + position.x;
             done = true;
@@ -366,7 +381,12 @@ const halve = (limits) =>
 // The sample is halved until the complete body (envelope and sampled plot
 // parameters included) fits the budget; the exact part never changes, and at
 // limit 0 only the exact part remains.
-async function computeSummary(pool, key, rid, scope, envelope) {
+// A one-group run's Overview is its group (§5).
+const canonicalScope = (groups) =>
+  groups.length === 1 ? 'group:' + groups[0][0] : 'overview';
+
+// Returns null when `requested` no longer resolves to `scope`.
+async function computeSummary(pool, key, rid, requested, scope, envelope) {
   return read(
     pool,
     async (client) => {
@@ -378,6 +398,9 @@ async function computeSummary(pool, key, rid, scope, envelope) {
           [run.id],
         )
       ).map((g) => [Number(g.id), g.key, g.name]);
+      // The group count may have changed since the scope was resolved: a
+      // one-group Overview is no longer its group.
+      if (requested === 'overview' && canonicalScope(groups) !== scope) return null;
       if (scope !== 'overview') {
         groups = groups.filter(([id]) => 'group:' + id === scope);
         if (!groups.length) throw new HttpError(404, 'Unknown scope');
@@ -470,47 +493,52 @@ async function summaryResponse(pool, store, key, query, env, now) {
   let cached = await lookup(requested);
   if (final(cached)) return respond(cached.data);
 
-  const [run] = await read(pool, (client) =>
-    rows(
-      client,
-      `SELECT r.id, r.state, r.revision,
-              (SELECT count(*) FROM cr.groups g WHERE g.run_id = r.id)::int AS groups,
-              (SELECT min(g.id) FROM cr.groups g WHERE g.run_id = r.id) AS first_group
-       FROM cr.runs r WHERE r.key = $1`,
-      [key],
-    ),
-  );
-  if (!run) throw new HttpError(404, 'Unknown run');
-  if (String(run.id) !== rid)
-    throw new HttpError(409, 'The run was replaced; reload its manifest');
-  const scope =
-    requested === 'overview' && run.groups === 1
-      ? 'group:' + run.first_group
-      : requested;
-  if (scope !== requested) {
-    cached = await lookup(scope);
-    if (final(cached)) return respond(cached.data);
+  // Resolve the canonical scope and read its baseline entry before the
+  // computing snapshot; if the scope changes meanwhile, start over.
+  let scope, body;
+  for (let attempt = 0; !body; attempt++) {
+    if (attempt === 3) throw new HttpError(503, 'The run is changing; retry');
+    const [run] = await read(pool, (client) =>
+      rows(
+        client,
+        `SELECT r.id, r.state, r.revision,
+                (SELECT count(*) FROM cr.groups g WHERE g.run_id = r.id)::int AS groups,
+                (SELECT min(g.id) FROM cr.groups g WHERE g.run_id = r.id) AS first_group
+         FROM cr.runs r WHERE r.key = $1`,
+        [key],
+      ),
+    );
+    if (!run) throw new HttpError(404, 'Unknown run');
+    if (String(run.id) !== rid)
+      throw new HttpError(409, 'The run was replaced; reload its manifest');
+    scope =
+      requested === 'overview' && run.groups === 1
+        ? 'group:' + run.first_group
+        : requested;
+    if (scope !== requested || attempt > 0) {
+      cached = await lookup(scope);
+      if (final(cached)) return respond(cached.data);
+    }
+    // `cached` was read before the snapshot below, so the conditional write
+    // can only replace the entry this computation saw.
+    if (cached && cached.metadata.key === key) {
+      if (Number(cached.metadata.revision) === Number(run.revision))
+        return respond(cached.data);
+      const age = (now() - Date.parse(cached.metadata.computed_at)) / 1000;
+      if (run.state !== 'completed' && age < interval) return respond(cached.data);
+    }
+    const computedAt = new Date(now()).toISOString();
+    body = await computeSummary(pool, key, rid, requested, scope, (current, summary) => ({
+      rid: current.id,
+      key,
+      scope,
+      revision: current.revision,
+      state: current.state,
+      computed_at: computedAt,
+      min_interval: interval,
+      ...summary,
+    }));
   }
-  // `cached` was read before the snapshot below, so the conditional write
-  // can only replace the entry this computation saw.
-  if (cached && cached.metadata.key === key) {
-    if (Number(cached.metadata.revision) === Number(run.revision))
-      return respond(cached.data);
-    const age = (now() - Date.parse(cached.metadata.computed_at)) / 1000;
-    if (run.state !== 'completed' && age < interval) return respond(cached.data);
-  }
-
-  const computedAt = new Date(now()).toISOString();
-  const body = await computeSummary(pool, key, rid, scope, (current, summary) => ({
-    rid: current.id,
-    key,
-    scope,
-    revision: current.revision,
-    state: current.state,
-    computed_at: computedAt,
-    min_interval: interval,
-    ...summary,
-  }));
   const metadata = {
     key,
     revision: body.revision,

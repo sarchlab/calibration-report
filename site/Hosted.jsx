@@ -20,7 +20,15 @@ async function fetchJson(path, signal) {
     signal,
   });
   if (response.status === 409) throw new ReplacedRun();
-  if (!response.ok) throw new Error((await response.json()).error);
+  if (!response.ok) {
+    let message = null;
+    try {
+      message = (await response.json()).error;
+    } catch {
+      // Not a JSON error body (a proxy or platform error page).
+    }
+    throw new Error(message ?? 'HTTP ' + response.status);
+  }
   return response.json();
 }
 
@@ -84,8 +92,20 @@ const isLive = (manifest) =>
   !isStale(manifest) &&
   document.visibilityState === 'visible';
 
-// Polls the manifest while the run is live, not stale, and the tab visible.
-// A failed poll keeps polling while the last known manifest is live.
+// The next manifest to show: never an older revision of the same run, and
+// the previous objects when the data is unchanged, so charts do not redraw.
+function mergeManifest(previous, next) {
+  if (!previous || previous.id !== next.id) return next;
+  if (next.revision < previous.revision) return previous;
+  if (next.revision > previous.revision) return next;
+  return previous.updated_at === next.updated_at
+    ? previous
+    : {...previous, updated_at: next.updated_at};
+}
+
+// One poll chain: at most one manifest request in flight and one timer. It
+// polls while the run is live, not stale, and the tab visible, and keeps
+// polling after a failed request while the last known manifest is live.
 function useManifest(runKey) {
   const [manifest, setManifest] = useState(null);
   const [error, setError] = useState(null);
@@ -93,32 +113,51 @@ function useManifest(runKey) {
   const last = useRef(null);
   const refresh = useCallback(() => setGeneration((g) => g + 1), []);
   useEffect(() => {
-    let timer;
-    const controller = new AbortController();
+    let timer = null;
+    let inFlight = null;
+    const schedule = () => {
+      clearTimeout(timer);
+      timer = isLive(last.current) ? setTimeout(tick, POLL_MS) : null;
+    };
+    // A scheduled request rechecks visibility and staleness first.
+    function tick() {
+      timer = null;
+      if (isLive(last.current)) poll();
+    }
     async function poll() {
+      if (inFlight) return;
+      const controller = new AbortController();
+      inFlight = controller;
       try {
-        const next = await fetchJson(runPath(runKey), controller.signal);
+        const next = mergeManifest(
+          last.current,
+          await fetchJson(runPath(runKey), controller.signal),
+        );
+        if (inFlight !== controller) return;
         last.current = next;
         setManifest(next);
         setError(null);
       } catch (e) {
-        if (controller.signal.aborted) return;
+        if (inFlight !== controller) return;
         setError(e.message);
+      } finally {
+        if (inFlight === controller) inFlight = null;
       }
-      if (isLive(last.current)) timer = setTimeout(poll, POLL_MS);
+      if (!controller.signal.aborted) schedule();
     }
     poll();
-    const resume = () => {
-      if (document.visibilityState === 'visible') {
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') {
         clearTimeout(timer);
-        poll();
-      }
+        timer = null;
+      } else if (!inFlight && !timer && last.current?.state === 'running') poll();
     };
-    document.addEventListener('visibilitychange', resume);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      controller.abort();
+      inFlight?.abort();
+      inFlight = null;
       clearTimeout(timer);
-      document.removeEventListener('visibilitychange', resume);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [runKey, generation]);
   return {manifest, error, refresh};
@@ -156,9 +195,9 @@ function useRequest() {
   return {start, cancel, error, pending};
 }
 
-// The summary of the active scope. After every manifest poll it is
-// re-requested if the manifest shows newer data and the server's interval has
-// passed; on completion it is re-requested once for the final summary.
+// The summary of the active scope. Once per manifest poll it is re-requested
+// if the manifest shows newer data and the server's interval has passed; on
+// completion it is re-requested once for the final summary.
 function useSummary(runKey, manifest, scope, onReplaced) {
   const [summary, setSummary] = useState(null);
   const request = useRequest();
@@ -183,25 +222,22 @@ function useSummary(runKey, manifest, scope, onReplaced) {
     if (request.error instanceof ReplacedRun) onReplaced();
   }, [request.error, onReplaced]);
   const current = summary?.requested === scope && summary.rid === rid ? summary : null;
+  // Read through refs so that only a new manifest (one poll) re-evaluates.
+  const latest = useRef({current, load});
+  latest.current = {current, load};
   useEffect(() => {
-    if (!current || pending() || manifest.revision <= current.revision)
-      return;
+    const {current, load} = latest.current;
+    if (!current || pending() || manifest.revision <= current.revision) return;
     const final = manifest.state === 'completed' && current.state !== 'completed';
     const eligible =
       Date.now() >= Date.parse(current.computed_at) + current.min_interval * 1000;
     if (final || eligible) load();
-  }, [manifest, current, load, pending]);
+  }, [manifest, pending]);
   return {summary: current, error: request.error, retry: load};
 }
 
-// Non-scaling parameters in declaration order, as the file viewer shows them.
-function declaredOrder(params, declared) {
-  const ordered = {};
-  for (const key of declared) if (key in params) ordered[key] = params[key];
-  return ordered;
-}
-
-// One page of series of a benchmark, following continuation cursors.
+// One page of series of a benchmark, following continuation cursors. After a
+// failed refresh the previous page of the same query stays, marked stale.
 function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
   const [page, setPage] = useState(null);
   const [attempt, setAttempt] = useState(0);
@@ -215,7 +251,6 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
     limit: window.end - window.start,
   }).toString();
   const revision = manifest.state === 'running' ? manifest.revision : 'final';
-  const declared = Object.keys(manifest.benchmarks[benchmark].params);
   useEffect(() => {
     start(
       async (signal) => {
@@ -229,12 +264,7 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
           for (const plot of body.plots) {
             if (!plots.has(plot.id))
               plots.set(plot.id, {parameters: String(plot.id), rows: []});
-            const params = declaredOrder(plot.non_scaling_params, declared);
-            plots
-              .get(plot.id)
-              .rows.push(
-                ...plot.rows.map((row) => ({...row, non_scaling_params: params})),
-              );
+            plots.get(plot.id).rows.push(...plot.rows);
           }
           after = body.next;
         } while (after);
@@ -255,10 +285,12 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
   };
 }
 
-function RequestError({what, error, retry}) {
+function RequestError({what, error, retry, stale = false}) {
   return (
     <p role="alert" className="request-error">
-      Could not load {what}: {error.message}{' '}
+      {stale ? 'Could not refresh ' : 'Could not load '}
+      {what}: {error.message}
+      {stale && '. Showing older data.'}{' '}
       <Button size="compact-xs" variant="default" onClick={retry}>
         Retry
       </Button>
@@ -276,10 +308,11 @@ function HostedBenchmark({runKey, manifest, group, benchmark, count, wide, onRep
     window,
     onReplaced,
   );
+  const failed = error && !(error instanceof ReplacedRun);
   if (!series)
     return (
       <Paper component="article" className="chart card" withBorder radius="md" p="md">
-        {error ? (
+        {failed ? (
           <RequestError what={benchmark} error={error} retry={retry} />
         ) : (
           <p role="status">Loading {benchmark}</p>
@@ -287,14 +320,19 @@ function HostedBenchmark({runKey, manifest, group, benchmark, count, wide, onRep
       </Paper>
     );
   return (
-    <Benchmark
-      id={benchmark}
-      series={series}
-      count={count}
-      meta={manifest.benchmarks[benchmark]}
-      wide={wide ?? {count: 0, stats: []}}
-      {...props}
-    />
+    <div className="hosted-benchmark" data-stale={failed ? 'true' : undefined}>
+      {failed && <RequestError what={benchmark} error={error} retry={retry} stale />}
+      <Benchmark
+        id={benchmark}
+        series={series}
+        count={count}
+        meta={manifest.benchmarks[benchmark]}
+        paged
+        wide={wide}
+        parameterOrder={manifest.param_keys[manifest.benchmark_keys.indexOf(benchmark)]}
+        {...props}
+      />
+    </div>
   );
 }
 
@@ -421,6 +459,11 @@ export function HostedReport({runKey}) {
                 error={summaryError}
                 retry={retrySummary}
               />
+            )}
+            {!summary && !summaryError && (
+              <p role="status" className="summary-note">
+                Loading summary
+              </p>
             )}
             {summary && (
               <Summary

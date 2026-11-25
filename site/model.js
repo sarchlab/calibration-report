@@ -206,12 +206,15 @@ export function preferLogScale(values) {
   return log + 1e-12 < linear;
 }
 
-export function parameterLabel(params, metadata) {
+// `order` lists parameter names in display order; names the point lacks are
+// skipped.
+export function parameterLabel(params, metadata, order = Object.keys(params)) {
   return (
-    Object.entries(params)
-      .map(([id, value]) => {
+    order
+      .filter((id) => Object.hasOwn(params, id))
+      .map((id) => {
         const unit = metadata[id].unit;
-        return displayName(id) + '=' + value + (unit ? ' ' + unit : '');
+        return displayName(id) + '=' + params[id] + (unit ? ' ' + unit : '');
       })
       .join(' · ') || 'Default parameters'
   );
