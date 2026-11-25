@@ -11,7 +11,7 @@ Today a report is one `data.json` file. The viewer downloads all of it (`useRepo
 
 Goals:
 
-- Producers write results to a hosted database **while they run**, so partial results are visible within about a minute.
+- Producers write results to a hosted database **while they run**, so partial results are visible within one summary interval (§5).
 - The viewer fetches only what the current page needs. **Summary statistics are exact over all comparisons; summary charts are drawn from a bounded sample** that the page labels as such.
 - Several simulators (MGPUSim, Poros, ...) report to one site, and each run has a stable URL.
 - No machine of ours to maintain: hosting, database, and API live on the Netlify team that is already on the Open Source plan.
@@ -190,7 +190,7 @@ No row-level security (RLS): all data is public, Functions read as the owner (wh
 
 ### Functions
 
-Each function locks the run row (`SELECT ... FOR UPDATE`; `open_run` first runs `INSERT ... ON CONFLICT (key) DO NOTHING` so concurrent first calls cannot race) before it checks the run's state, then validates its whole argument against the matching `data.schema.json` rules before writing anything. (required fields, non-negative counts, non-empty declarations, no unknown keys, the status enum). `data.schema.json` stays the source of truth: the SQL validation is tested against the fixtures a JSON Schema validator accepts or rejects.
+Each function locks the run row (`SELECT ... FOR UPDATE`; `open_run` first runs `INSERT ... ON CONFLICT (key) DO NOTHING` so concurrent first calls cannot race) before it checks the run's state, then validates its whole argument against the matching `data.schema.json` rules before writing anything (required fields, non-negative counts, non-empty declarations, no unknown keys, the status enum). `data.schema.json` stays the source of truth: the SQL validation is tested against the fixtures a JSON Schema validator accepts or rejects.
 
 | Call | Arguments | Effect |
 |---|---|---|
@@ -280,13 +280,13 @@ HTTP caching: a response is `Cache-Control: public, max-age=31536000, immutable`
 }
 ```
 
-`report`, `progress`, and `benchmarks` have exactly the `data.json` shapes (the benchmark above is valid `data.json`), with `report.live` derived as `state = 'running'`. Groups, benchmarks, parameters, and series appear in declaration (id) order: the Function builds them with `json_object_agg ... ORDER BY id`, not `jsonb`, which would reorder keys. `plots[group][benchmark]` counts visible plots. The manifest grows with groups × benchmarks, not with points.
+`report`, `progress`, and `benchmarks` have exactly the `data.json` shapes (the benchmark above is valid `data.json`), with `report.live` derived as `state = 'running'`. Groups, and the benchmarks within each `plots[group]`, appear in order of first appearance, by their minimum visible plot id; parameters and series in declaration (id) order. The Function builds objects with `json_object_agg ... ORDER BY`, not `jsonb`, which would reorder keys. Plot ids follow `data` order (import and `put_points` insert new plots in array order, and live ingestion appends), and `plots` pages are ordered by id. `indexReport` (`site/model.js:251-275`) orders by first appearance among *visible rows*, which differs when a plot's first row is invisible and a later one visible. To keep both viewers identical, `indexReport` changes to order groups, benchmarks, and plots by the first row of each plot in unfiltered `data`, still listing only those with visible rows. `plots[group][benchmark]` counts visible plots. The manifest grows with groups × benchmarks, not with points.
 
 ### Plot pages
 
 Netlify buffers a Function response up to 6 MB ([Functions defaults](https://docs.netlify.com/build/functions/configuration/#default-values)). `plots` returns one page (`offset`, `limit`) of visible plots ordered by id, each with its visible rows (the `indexReport` row filter) ordered by `x`. It stops at **4 MB** or 20,000 rows and returns `next = "PLOT:X"`; the client fetches the rest of that plot before rendering. One point is bounded (§3), so one row always fits. `all=1` returns every plot and row, for export.
 
-Plot pages of a running run are not pinned to the summary's revision, which may lag by up to a minute; pinning would require old point versions, and both converge on the next refresh.
+Plot pages of a running run are not pinned to the summary's revision, which may lag by up to `SUMMARY_MIN_INTERVAL`; pinning would require old point versions, and both converge on the next refresh.
 
 ### Summary
 
@@ -336,7 +336,7 @@ Sampled charts say so ("3,000 of 212,000 comparisons shown").
 
 ### Summary cache
 
-Rule: compute only on request, and recompute only when new data has arrived and the cached result is at least 60 s old. Nothing is computed on write; there are no background jobs and no locks.
+Rule: compute only on request, and recompute only when new data has arrived and the cached result is at least `SUMMARY_MIN_INTERVAL` old. That is one Netlify environment variable (default 60 s) set from the plan-tier answer (§8): 60 s if the tier's database egress allows it, about 10 minutes on Free. The tier gate changes this value, not the design. Nothing is computed on write; there are no background jobs and no locks.
 
 Each scope has one record in the site-wide Netlify Blobs store `getStore({name: "summaries", consistency: "strong"})` under `v1/<run id>/<scope id>` ([Netlify Blobs](https://docs.netlify.com/build/data-and-storage/netlify-blobs/); Functions use it without configuration; keys ≤ 600 bytes, metadata ≤ 2 KB). The value is the response body; the metadata is `{key, revision, state, computed_at}`.
 
@@ -344,10 +344,10 @@ On each request the Function:
 
 1. Reads the record. If it is `completed` and its `key` matches the request, returns it without touching the database. Only such a **warm** hit avoids the database; a completed run with no record computes once.
 2. Otherwise reads the run's state and revision. If the record's revision is current, returns it.
-3. Otherwise, if the record is less than 60 s old and the run is still `running`, returns it; the body states its `revision` and `computed_at`, and the viewer shows "summary as of …".
-4. Otherwise computes, writes, and returns. A run that has just become `completed` skips the 60 s window, so its final summary is exact.
+3. Otherwise, if the record is younger than `SUMMARY_MIN_INTERVAL` and the run is still `running`, returns it; the body states its `revision` and `computed_at`, and the viewer shows "summary as of …".
+4. Otherwise computes, writes, and returns. A run that has just become `completed` skips the interval, so its final summary is exact.
 
-The write uses `onlyIfMatch` with the ETag read in step 1 (or `onlyIfNew`), so an older computation never overwrites a newer record. There is no claim or lease: requests that arrive while a computation runs (about 10 s) may each compute. **Normally there is at most one computation per minute per scope; concurrent requests may duplicate it**, bounded by the number of concurrent viewers, which is small. A `failed` run is not terminal (`open_run` can reopen it), so its summary costs one small query per request.
+The write uses `onlyIfMatch` with the ETag read in step 1 (or `onlyIfNew`), so an older computation never overwrites a newer record. There is no claim or lease: requests that arrive while a computation runs (about 10 s) may each compute. **Normally there is at most one computation per interval per scope; concurrent requests may duplicate it**, bounded by the number of concurrent viewers, which is small. A `failed` run is not terminal (`open_run` can reopen it), so its summary costs one small query per request.
 
 ### Retention and deletion
 
@@ -362,7 +362,7 @@ The viewer gains a data source interface with two implementations:
 
 `Report` consumes the interface:
 
-- Tabs are the groups with a non-zero visible plot count, in declaration order; Overview exists when the Overview summary's `count` is non-zero. The file source derives the same from `indexReport` (`site/App.jsx:285-286`).
+- Tabs are the groups with a non-zero visible plot count, in manifest order; Overview exists when the Overview summary's `count` is non-zero. The file source derives the same from `indexReport` (`site/App.jsx:244,285-286`).
 - `Summary` and the summary drawings in `site/drawing.js` consume the summary object (exact statistics, sampled series) instead of the full pair list.
 - Benchmark cards take counts from the manifest, rows from `plots` pages, and benchmark-wide error from `benchmark_stats`.
 - Opening a sampled point fetches `/points/{plot}/{x}`. `PointDetails` shows the result only if the selection is still that point and the summary revision is unchanged, so a late response cannot replace a newer selection.
@@ -401,19 +401,19 @@ Assumptions: three runs per month, each about 6 hours, single group, watched liv
 |---|---|
 | Database awake while runs write (1 CU × 6 h × 3 = 18 CU-h) | 180 |
 | Database woken by finished-run views (manifest and plot-page CDN misses; warm summaries come from Blobs; ≤ 8 CU-h) | ≤ 80 |
-| Summary reads, 60 s window: ≤ 360 per watched run × ≈ 22 MB × 3 = ≈ 24 GB | ≈ 480 |
+| Summary reads, `SUMMARY_MIN_INTERVAL` = 60 s: ≤ 360 per watched run × ≈ 22 MB × 3 = ≈ 24 GB | ≈ 480 |
 | Function compute (≈ 10 s at 1 GB per computation, ≈ 3 GB-h) | ≈ 30 |
 | Web bandwidth and requests | ≤ 60 |
 | **Total** | **≈ 650–850** |
 
-Duplicated computations (§5) add to the summary line in proportion to concurrent viewers. An unwatched run costs no summary reads, and a finished run's summary is computed once. **On the Free tier this does not fit**: one watched run reads about 8 GB, over the 5 GB monthly database egress limit. There the window must be about 10 minutes (≤ 36 reads, ≈ 0.8 GB per run, ≈ 2.4 GB per month), which brings the total to about 400 credits.
+Duplicated computations (§5) add to the summary line in proportion to concurrent viewers. An unwatched run costs no summary reads, and a finished run's summary is computed once. **On the Free tier this does not fit**: one watched run reads about 8 GB, over the 5 GB monthly database egress limit. There `SUMMARY_MIN_INTERVAL` must be about 10 minutes (≤ 36 reads, ≈ 0.8 GB per run, ≈ 2.4 GB per month), which brings the total to about 400 credits.
 
 The polling policy (§6) bounds a forgotten tab; without it, a tab polling every 10 s would keep the database awake around the clock, about 7,200 credits per month.
 
 ## 8. Risks to verify before implementation
 
 1. **External connections.** Confirm that a GitHub-hosted runner can connect with the copied connection string (only Team Owners can copy a read-write one, [access control](https://docs.netlify.com/build/data-and-storage/netlify-database/access-control/)), that the owner can create the `cr_ingest` login, and whether a pooled endpoint exists. Measure first-connect latency after the database has slept.
-2. **Plan tier (gate).** The [database limits](https://docs.netlify.com/build/data-and-storage/netlify-database/billing-and-usage/#limits) list Free, Personal, Pro, and Enterprise, but not Open Source. Per billing period, Free allows 48 compute-unit hours, 5 GB written, and **5 GB of database egress**, with 5 GB of storage; Pro has no compute-unit cap and 100 GB for each. On Free, writes (18 CU-h, ≈ 0.3 GB written) fit, but storage needs retention (§5) and summaries need the 10-minute window (§7). Ask Netlify support which column applies before building.
+2. **Plan tier (gate).** The [database limits](https://docs.netlify.com/build/data-and-storage/netlify-database/billing-and-usage/#limits) list Free, Personal, Pro, and Enterprise, but not Open Source. Per billing period, Free allows 48 compute-unit hours, 5 GB written, and **5 GB of database egress**, with 5 GB of storage; Pro has no compute-unit cap and 100 GB for each. On Free, writes (18 CU-h, ≈ 0.3 GB written) fit, but storage needs retention (§5) and `SUMMARY_MIN_INTERVAL` must be about 10 minutes (§7). Ask Netlify support which column applies before building.
 3. **Storage billing.** Database storage is free "for now"; Blobs rates are not published on the credits page. The summary store holds about 1 MB per run. If storage becomes expensive, revive the deferred R2 archive.
 4. **Direct-write coupling.** See §4. Revisit if more than a handful of repositories report; a thin write Function could front the same SQL functions without a schema change.
 5. **Summary computation time.** A synchronous Function may run for 60 s ([Functions defaults](https://docs.netlify.com/build/functions/configuration/#default-values)). The aggregated read and pairing of 450,000 points is estimated at about 10 s, unmeasured. If it nears the limit, stream the read; a background Function (≤ 15 minutes) would fit but needs a decision. Longer computations also widen the window in which concurrent requests duplicate work.
