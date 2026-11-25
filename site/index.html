@@ -5,36 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Calibration report</title>
-  <link rel="stylesheet" href="./report.css">
-  <script src="./summary.js" defer></script>
-  <script src="./report.js" defer></script>
 </head>
 <body>
-  <main>
-    <header class="report-header">
-      <h1 id="title">Calibration report</h1>
-      <p id="description" class="muted report-description" hidden></p>
-      <div class="report-meta">
-        <div class="report-status">
-          <span id="live-badge" class="live-badge" hidden><span class="live-dot" aria-hidden="true"></span>Live</span>
-          <span id="stamp" class="muted" aria-live="polite"></span>
-        </div>
-        <div class="report-actions">
-          <label class="theme-control">Theme
-            <select id="theme">
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-          </label>
-          <a class="report-data-link" href="./data.json">Results JSON</a>
-        </div>
-      </div>
-    </header>
-    <section id="progress" class="progress" aria-label="Run progress" hidden></section>
-    <nav id="groups" aria-label="Report views" hidden></nav>
-    <section id="summary" aria-label="Accuracy summary" hidden></section>
-    <section class="charts" id="charts" aria-label="Benchmark plots"></section>
-  </main>
+  <div id="root"></div>
+  <script type="module" src="./main.jsx"></script>
 </body>
 </html>

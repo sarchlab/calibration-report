@@ -1,22 +1,23 @@
-"""Host the shared report with data supplied by another checkout."""
+"""Host the built static report with data supplied by another checkout."""
 
 import argparse
+import mimetypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
-SITE = Path(__file__).resolve().parent / "site"
+SITE = Path(__file__).resolve().parent / "dist"
+ASSET_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+}
 
 
-def handler_for(data_dir):
-    assets = {
-        "/": (SITE / "index.html", "text/html; charset=utf-8"),
-        "/index.html": (SITE / "index.html", "text/html; charset=utf-8"),
-        "/report.css": (SITE / "report.css", "text/css; charset=utf-8"),
-        "/report.js": (SITE / "report.js", "text/javascript; charset=utf-8"),
-        "/summary.js": (SITE / "summary.js", "text/javascript; charset=utf-8"),
-        "/data.json": (data_dir / "data.json", "application/json"),
-    }
+def handler_for(data_dir, site_dir=SITE):
+    site_dir = site_dir.resolve()
+    data_dir = data_dir.resolve()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -26,14 +27,23 @@ def handler_for(data_dir):
             self.send_asset(include_body=False)
 
         def send_asset(self, include_body):
-            name = urlsplit(self.path).path
-            if name not in assets:
+            name = unquote(urlsplit(self.path).path)
+            if "\x00" in name:
                 self.send_error(404)
                 return
-            path, content_type = assets[name]
+            if name == "/data.json":
+                path, content_type = data_dir / "data.json", ASSET_TYPES[".json"]
+            else:
+                relative = "index.html" if name == "/" else name.lstrip("/")
+                path = (site_dir / relative).resolve()
+                # Never expose checkout files, parent directories or symlink targets.
+                if not path.is_relative_to(site_dir) or not path.is_file():
+                    self.send_error(404)
+                    return
+                content_type = ASSET_TYPES.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             try:
                 data = path.read_bytes()
-            except FileNotFoundError:
+            except (OSError, ValueError):
                 self.send_error(404)
                 return
             self.send_response(200)
@@ -53,6 +63,8 @@ def main():
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", default=8000, type=int)
     args = parser.parse_args()
+    if not (SITE / "index.html").is_file():
+        parser.error("Built website not found. Run npm ci && npm run build first.")
     with ThreadingHTTPServer((args.bind, args.port), handler_for(args.data_dir)) as server:
         server.serve_forever()
 

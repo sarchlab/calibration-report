@@ -71,7 +71,7 @@
   --chart-series-4: #ed939a;
   --chart-series-5: #a1c87e;
 }
-body { margin: 0; --point-panel-width: 360px; }
+body { margin: 0; --point-panel-width: 360px; background: var(--background); color: var(--text); line-height: normal; }
 body.point-details-open { padding-right: calc(var(--point-panel-width) + 32px); }
 main { max-width: 1180px; margin: auto; padding: 38px 24px 65px; }
 .report-header { margin-bottom: 16px; }
@@ -114,12 +114,9 @@ a { color: var(--link); text-underline-offset: 3px; }
 .progress-count strong { grid-column: 2; color: var(--text); font-size: 18px; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .progress-key { width: 7px; height: 7px; border-radius: 2px; }
 .progress-started { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
-#groups { display: flex; gap: 4px 12px; align-items: stretch; flex-wrap: wrap; margin: 0 0 16px; border-bottom: 1px solid var(--border-strong); }
-#groups[hidden] { display: none; }
-#groups button { min-height: 44px; color: var(--secondary); background: transparent; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 12px; font-size: 13px; font-weight: 650; }
-#groups button[aria-pressed="true"] { color: var(--active-tab); border-bottom-color: var(--accent); }
-button { font: inherit; border: 1px solid var(--control-border); border-radius: 6px; background: var(--surface); padding: 6px 12px; cursor: pointer; }
-button[aria-pressed="true"] { color: #fff; background: var(--accent); border-color: var(--accent); }
+.report-tabs [role="tablist"] { margin-bottom: 16px; }
+.report-tabs [role="tablist"] { flex-wrap: wrap; }
+.report-tabs [role="tab"] { min-height: 44px; font-size: 13px; font-weight: 650; }
 .charts { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); align-items: start; margin-top: 18px; }
 #charts { grid-template-columns: minmax(0, 1fr); }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 15px; min-width: 0; }
@@ -135,7 +132,7 @@ button[aria-pressed="true"] { color: #fff; background: var(--accent); border-col
 .series-plot .plot-details .stats { padding: 6px 7px; border: 0; border-radius: 4px; background: var(--stat-surface); }
 .plot { margin-top: 6px; }
 .scale-controls { display: flex; justify-content: flex-end; gap: 5px; }
-.scale-controls button { font-size: 11px; padding: 2px 6px; }
+.scale-controls button { font-size: 11px; }
 .scale-controls button:disabled { opacity: .48; cursor: default; }
 .curve { display: block; width: 100%; height: auto; }
 .legend { display: flex; flex-wrap: wrap; gap: 7px 12px; margin: 3px 0 7px; font-size: 11px; }
@@ -171,15 +168,15 @@ button[aria-pressed="true"] { color: #fff; background: var(--accent); border-col
 
 .plot-surface { position: relative; }
 .plot-status-track { position: absolute; left: 0; right: 0; }
-.plot-status-marker { position: absolute; top: 0; transform: translate(-50%, -50%); width: 21px; height: 24px; padding: 0; border: 0; background: transparent; color: var(--failed); font-size: 14px; font-weight: 400; line-height: 1; }
+.plot-status-marker { cursor: pointer; position: absolute; top: 0; transform: translate(-50%, -50%); width: 21px; height: 24px; padding: 0; border: 0; background: transparent; color: var(--failed); font-size: 14px; font-weight: 400; line-height: 1; }
 .plot-status-marker[data-emoji] { font-size: 9px; }
 .plot-status-marker[data-state="running"] { color: var(--running); }
 .plot-status-marker:hover, .plot-status-marker:focus-visible { z-index: 1; background: var(--stat-surface); }
 .plot-status-detail { margin: 4px 0 0; padding: 6px 8px; border-radius: 4px; background: var(--stat-surface); color: var(--text); font-size: 11px; white-space: pre-line; overflow-wrap: anywhere; }
 
 .interactive-plot, .point-surface { position: relative; }
-.interactive-plot:has(.point-detail:not([hidden])) { z-index: 2; }
-.interactive-plot.point-pinned { z-index: 10; }
+.interactive-plot:has(> .point-detail) { z-index: 2; }
+
 .point-highlight { position: absolute; width: 12px; height: 12px; box-sizing: border-box; transform: translate(-50%, -50%); border: 2px solid var(--text); border-radius: 50%; box-shadow: 0 0 0 2px var(--surface); pointer-events: none; }
 .point-detail { position: absolute; top: calc(100% - 18px); left: 0; right: 0; padding: 14px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--text); box-shadow: 0 8px 28px #0002, 0 2px 6px #0001; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 .point-header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 5px 8px; }
@@ -219,7 +216,7 @@ button[aria-pressed="true"] { color: #fff; background: var(--accent); border-col
 .point-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* Allow rapid taps without double-tap zoom; retain scrolling and pinch zoom. */
 .point-controls, .point-controls button, .interactive-plot .curve { touch-action: manipulation; }
-.point-controls span { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.point-controls > span { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .point-controls button:last-child { margin-left: auto; color: var(--muted); }
 .point-preview-hint { margin: 8px 0 0; color: var(--muted); font-size: 10px; }
 .point-detail:not(.point-detail-pinned) .point-configuration,
@@ -262,3 +259,6 @@ button[aria-pressed="true"] { color: #fff; background: var(--accent); border-col
   body.point-details-open:not(.overview-view) #summary,
   body.point-details-open.overview-view #progress { display: none; }
 }
+
+.mantine-Paper-root { background: var(--surface); color: var(--text); border-color: var(--border); }
+.point-controls .mantine-ActionIcon-icon { color: inherit; font-size: inherit; }
