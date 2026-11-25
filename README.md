@@ -43,12 +43,23 @@ Keyboard users can Tab to a chart and use arrow keys, Home, or End to inspect po
 
 ## Validation
 
-Run `node --test tests/point-details.test.cjs` for the dependency-free point-detail regression checks. These exercise rendering and interaction handlers with a small DOM fixture; verify actual hover, mobile tapping, layout, scrolling, and pinch zoom in a browser as well.
+Run `npm test` for the React interaction and statistics checks plus the Python static-server checks. The UI tests render real React and Mantine components in jsdom with a mocked canvas drawing context; verify actual hover, mobile tapping, layout, scrolling, and pinch zoom in a browser as well. `npm run build` verifies the production bundle.
 
-## Hosting
+## Build and hosting
 
-- **GitHub Pages:** Copy the contents of [`site/`](site/) and an exported `data.json` into the Pages publishing branch. The viewer loads its data using a relative URL.
-- **Live hosting:** Run `python3 serve.py --data-dir /path/to/export --port 8000`. The exporter can refresh that directory from a separate simulator checkout while the server serves the shared viewer.
+The viewer uses React and Mantine for UI and state, with the existing Canvas plots and statistical calculations kept in separate modules. Node.js 22.12+ on the 22.x line, or Node.js 24+, and Python 3.9+ for the optional live server are supported.
+
+```sh
+npm ci
+npm run build
+```
+
+`npm run build` generates the standalone static website in `dist/`. It bundles the UI dependencies locally; no Node.js server or CDN is needed to view it. The build does not read or bundle report data. The viewer fetches `./data.json` at runtime.
+
+- **GitHub Pages or any static host:** publish the contents of `dist/` together with your exported `data.json` at the same level as `index.html`. Asset URLs are relative, so a project subpath works as well as a domain root. Build once and reuse the same viewer for different reports.
+- **Live hosting with external data:** after building, run `python3 serve.py --data-dir /path/to/export --port 8000`. The server serves `dist/` and reads the external `data.json` on every request, so an exporter can continue updating that file. Add `--bind 0.0.0.0` or a specific interface address when access from another device is needed. Rebuild after UI edits; the server reads the current build on each request.
+- **Local production preview:** copy your report to `dist/data.json`, then run `npm run preview`.
+- **UI development:** place or symlink your report at `site/data.json`, then run `npm run dev` for hot reload. This local data file is ignored by Git and is not copied into the production build.
 
 The viewer reads only `data.json`. With `report.live: true`, it shows a live indicator and fetches the file every ten seconds without navigating. Static snapshots load once. Plots display numeric measurements and omit points and series that have no measurements.
 
