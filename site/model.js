@@ -297,3 +297,299 @@ export function valueBounds(values) {
   }
   return values.length ? {min, max} : null;
 }
+
+// Version of every hosted API response shape and of buildSummary's output;
+// part of the API path and of summary cache keys.
+export const API_VERSION = 'v1';
+
+// The row filter of indexReport: a finite value or a drawn status.
+export function isVisibleRow(point) {
+  return (
+    Object.values(point.values).some(Number.isFinite) ||
+    Object.keys(point.statuses ?? {}).some((id) => isMarked(point, id))
+  );
+}
+
+// In a multi-group Overview, the same comparison in different groups is a
+// different curve.
+export function relabelPairs(pairs, overview, groupName) {
+  if (!overview || new Set(pairs.map((pair) => pair.group)).size <= 1)
+    return pairs;
+  return pairs.map((pair) => ({
+    ...pair,
+    id: JSON.stringify([pair.group, pair.id]),
+    name: groupName(pair.group) + ' · ' + pair.name,
+  }));
+}
+
+export function errorPercentiles(pairs) {
+  const errors = pairs
+    .map((pair) => Math.abs(pair.signedError))
+    .sort((a, b) => a - b);
+  return errors.length
+    ? [50, 90, 95, 98].map((p) => [
+        'P' + p,
+        errors[Math.ceil((p / 100) * errors.length) - 1].toPrecision(3) + '%',
+      ])
+    : [];
+}
+
+export const summaryLimits = {scurve: 1500, cdf: 1500, scatter: 3000};
+export const summaryMaxBytes = 2 * 1024 * 1024;
+
+// Indices 0 and n - 1 plus evenly spaced ones, at most `limit` in total.
+function spaced(n, limit) {
+  if (limit >= n) return Array.from({length: n}, (_, i) => i);
+  if (limit <= 0) return [];
+  if (limit === 1) return [0];
+  const picked = new Set();
+  for (let k = 0; k < limit; k++)
+    picked.add(Math.round((k * (n - 1)) / (limit - 1)));
+  return [...picked];
+}
+
+function sampleSummary(pairs, units, limits) {
+  const samples = new Map();
+  const add = (pair) => {
+    if (!samples.has(pair)) samples.set(pair, samples.size);
+    return samples.get(pair);
+  };
+  const byError = [...pairs].sort((a, b) => a.signedError - b.signedError);
+  const scurve = {sample: [], rank: []};
+  for (const i of spaced(byError.length, limits?.scurve ?? byError.length)) {
+    scurve.sample.push(add(byError[i]));
+    scurve.rank.push(i + 1);
+  }
+  const byAbsolute = [...pairs].sort(
+    (a, b) => Math.abs(a.signedError) - Math.abs(b.signedError),
+  );
+  const cdf = {sample: [], rank: []};
+  for (const i of spaced(byAbsolute.length, limits?.cdf ?? byAbsolute.length)) {
+    cdf.sample.push(add(byAbsolute[i]));
+    cdf.rank.push(i + 1);
+  }
+  const scatter = {};
+  for (const [unit, unitPairs] of units) {
+    const limit = limits?.scatter ?? unitPairs.length;
+    const chosen = new Set();
+    if (limit < unitPairs.length) {
+      const largest = [...unitPairs]
+        .sort((a, b) => Math.abs(b.signedError) - Math.abs(a.signedError))
+        .slice(0, Math.floor(limit / 3));
+      for (const pair of largest) chosen.add(pair);
+      for (const key of ['actual', 'prediction']) {
+        let low = unitPairs[0],
+          high = unitPairs[0];
+        for (const pair of unitPairs) {
+          if (pair[key] < low[key]) low = pair;
+          if (pair[key] > high[key]) high = pair;
+        }
+        if (limit > 0) chosen.add(low).add(high);
+      }
+      const byActual = [...unitPairs].sort((a, b) => a.actual - b.actual);
+      for (const i of spaced(byActual.length, Math.max(0, limit - chosen.size)))
+        chosen.add(byActual[i]);
+    } else for (const pair of unitPairs) chosen.add(pair);
+    scatter[unit] = [...chosen].map(add);
+  }
+  return {samples: [...samples.keys()], scurve, cdf, scatter};
+}
+
+// The summary of one scope: exact statistics over every comparison, charts
+// from a deterministic sample. `rows` are data.json points of the scope, each
+// with a `plot` id; `groups` is [[id, key, name]] of the scope's groups. Without
+// `limits` every comparison is a sample. With limits the serialized result
+// stays under summaryMaxBytes by halving the limits; at limit 0 only the exact
+// part remains.
+export function buildSummary({rows, benchmarks, groups, overview, limits}) {
+  const groupIndex = new Map(groups.map(([, key], i) => [key, i]));
+  const base = comparisonPairs(rows, benchmarks);
+  const pairs = relabelPairs(
+    base,
+    overview,
+    (key) => groups[groupIndex.get(key)][2],
+  );
+  const relabeled = pairs !== base;
+  const position = new Map(pairs.map((pair, i) => [pair, i]));
+  const indexer = (make) => {
+    const keys = new Map();
+    const list = [];
+    return {
+      list,
+      of(key, ...args) {
+        if (!keys.has(key)) {
+          keys.set(key, list.length);
+          list.push(make(key, ...args));
+        }
+        return keys.get(key);
+      },
+    };
+  };
+  const benchmarkList = indexer((key) => key);
+  const seriesList = indexer((key, benchmark) => {
+    const {name, unit} = benchmarks[benchmark].values[key];
+    return [key, name, unit];
+  });
+  const pairList = indexer((key, i) => {
+    const [reference, simulated] = JSON.parse(base[i].id);
+    const benchmark = base[i].point.benchmark;
+    return [
+      relabeled ? groupIndex.get(base[i].group) : null,
+      seriesList.of(reference, benchmark),
+      seriesList.of(simulated, benchmark),
+    ];
+  });
+  const pairOf = (pair) => {
+    const i = position.get(pair);
+    return pairList.of(pair.id, i);
+  };
+  pairs.forEach(pairOf);
+  const units = Map.groupBy(pairs, (pair) => pair.unit);
+  const scatterStats = Array.from(units, ([unit, unitPairs]) => [
+    unit,
+    {
+      log: preferLogScale(
+        unitPairs.flatMap((pair) => [pair.actual, pair.prediction]),
+      ),
+      count: unitPairs.length,
+      stats: [...rankingStats(unitPairs), ...errorStats(unitPairs)],
+    },
+  ]);
+  const benchmarkStats = overview
+    ? []
+    : Array.from(
+        Map.groupBy(pairs, (pair) => pair.point.benchmark),
+        ([benchmark, benchmarkPairs]) => [
+          benchmarkList.of(benchmark),
+          benchmarkPairs.length,
+          errorStats(benchmarkPairs),
+        ],
+      );
+  const exact = {
+    count: pairs.length,
+    relabeled,
+    stats: errorStats(pairs),
+    percentiles: errorPercentiles(pairs),
+    cdfLog: preferLogScale(pairs.map((pair) => Math.abs(pair.signedError))),
+  };
+  const assemble = (current) => {
+    const sampled = sampleSummary(pairs, units, current);
+    const plots = {};
+    const samples = {plot: [], x: [], pair: [], actual: [], prediction: []};
+    for (const pair of sampled.samples) {
+      const {point} = pair;
+      if (!(point.plot in plots))
+        plots[point.plot] = [
+          groupIndex.get(point.group),
+          benchmarkList.of(point.benchmark),
+          point.non_scaling_params ?? null,
+        ];
+      samples.plot.push(point.plot);
+      samples.x.push(point.x);
+      samples.pair.push(pairOf(pair));
+      samples.actual.push(pair.actual);
+      samples.prediction.push(pair.prediction);
+    }
+    return {
+      count: exact.count,
+      relabeled,
+      groups,
+      stats: exact.stats,
+      percentiles: exact.percentiles,
+      series: seriesList.list,
+      pairs: pairList.list,
+      benchmarks: benchmarkList.list,
+      plots,
+      samples,
+      scurve: sampled.scurve,
+      cdf: {log: exact.cdfLog, ...sampled.cdf},
+      scatter: Object.fromEntries(
+        scatterStats.map(([unit, stats]) => [
+          unit,
+          {...stats, sample: sampled.scatter[unit]},
+        ]),
+      ),
+      benchmark_stats: benchmarkStats,
+    };
+  };
+  if (!limits) return assemble(null);
+  const encoder = new TextEncoder();
+  for (let current = {...limits}; ; ) {
+    const summary = assemble(current);
+    if (
+      encoder.encode(JSON.stringify(summary)).length <= summaryMaxBytes ||
+      !Object.values(current).some(Boolean)
+    )
+      return summary;
+    current = Object.fromEntries(
+      Object.entries(current).map(([key, value]) => [key, value >> 1]),
+    );
+  }
+}
+
+// Inverse of buildSummary for drawing: pair-like objects that the summary
+// charts and point details consume.
+export function summaryCharts(summary) {
+  const {series, groups, benchmarks, plots, samples} = summary;
+  const pairInfo = summary.pairs.map(([group, reference, simulated]) => {
+    const [referenceKey, referenceName] = series[reference];
+    const [simulatedKey, simulatedName, unit] = series[simulated];
+    const id = JSON.stringify([referenceKey, simulatedKey]);
+    const name = simulatedName + ' vs. ' + referenceName;
+    return group === null
+      ? {id, name, unit, referenceKey, simulatedKey}
+      : {
+          id: JSON.stringify([groups[group][1], id]),
+          name: groups[group][2] + ' · ' + name,
+          unit,
+          referenceKey,
+          simulatedKey,
+        };
+  });
+  const pairs = samples.plot.map((plot, i) => {
+    const info = pairInfo[samples.pair[i]];
+    const [group, benchmark, params] = plots[plot];
+    const actual = samples.actual[i];
+    const prediction = samples.prediction[i];
+    const point = {
+      group: groups[group][1],
+      benchmark: benchmarks[benchmark],
+      x: samples.x[i],
+      non_scaling_params: params ?? {},
+      values: {[info.referenceKey]: actual, [info.simulatedKey]: prediction},
+    };
+    return {
+      point,
+      group: point.group,
+      actual,
+      prediction,
+      signedError: (100 * (prediction - actual)) / Math.min(prediction, actual),
+      unit: info.unit,
+      id: info.id,
+      name: info.name,
+    };
+  });
+  const ranked = (chart) =>
+    chart.sample.map((sample, i) => ({...pairs[sample], rank: chart.rank[i]}));
+  return {
+    count: summary.count,
+    legend: pairInfo,
+    stats: summary.stats,
+    percentiles: summary.percentiles,
+    scurve: ranked(summary.scurve),
+    cdf: {log: summary.cdf.log, pairs: ranked(summary.cdf)},
+    scatter: Object.entries(summary.scatter).map(([unit, chart]) => ({
+      unit,
+      log: chart.log,
+      count: chart.count,
+      stats: chart.stats,
+      pairs: chart.sample.map((sample) => pairs[sample]),
+    })),
+    benchmarkStats: new Map(
+      summary.benchmark_stats.map(([benchmark, count, stats]) => [
+        benchmarks[benchmark],
+        {count, stats},
+      ]),
+    ),
+  };
+}

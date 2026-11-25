@@ -20,60 +20,64 @@ function matches(query) {
   if (query.includes('min-width: 821px')) return viewport === 'desktop';
   return false;
 }
-Object.defineProperty(window, 'matchMedia', {
-  value: (query) => ({
-    media: query,
-    get matches() {
-      return matches(query);
-    },
-    addEventListener(type, listener) {
-      listeners.add({query, listener});
-    },
-    removeEventListener(type, listener) {
-      for (const entry of listeners)
-        if (entry.listener === listener) listeners.delete(entry);
-    },
-  }),
-});
-window.ResizeObserver = class {
-  observe() {}
-  unobserve() {}
-  disconnect() {}
-};
-window.PointerEvent = class extends MouseEvent {
-  constructor(type, options = {}) {
-    super(type, options);
-    this.pointerType = options.pointerType ?? '';
-  }
-};
-HTMLElement.prototype.scrollIntoView = vi.fn();
-Object.defineProperty(HTMLCanvasElement.prototype, 'getBoundingClientRect', {
-  writable: true,
-  value() {
-    return {
-      left: 10,
-      top: 20,
-      width: 320,
-      height: this.height / 2,
-      right: 330,
-      bottom: 20 + this.height / 2,
-    };
-  },
-});
-HTMLCanvasElement.prototype.getContext = () =>
-  new Proxy(
-    {measureText: (text) => ({width: String(text).length * 5})},
-    {
-      get(target, name) {
-        return name in target ? target[name] : () => {};
+// Browser stand-ins for the jsdom tests; node-environment tests skip them.
+if (typeof window !== 'undefined') {
+  Object.defineProperty(window, 'matchMedia', {
+    value: (query) => ({
+      media: query,
+      get matches() {
+        return matches(query);
       },
-      set(target, name, value) {
-        target[name] = value;
-        return true;
+      addEventListener(type, listener) {
+        listeners.add({query, listener});
       },
+      removeEventListener(type, listener) {
+        for (const entry of listeners)
+          if (entry.listener === listener) listeners.delete(entry);
+      },
+    }),
+  });
+  window.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+  window.PointerEvent = class extends MouseEvent {
+    constructor(type, options = {}) {
+      super(type, options);
+      this.pointerType = options.pointerType ?? '';
+    }
+  };
+  HTMLElement.prototype.scrollIntoView = vi.fn();
+  Object.defineProperty(HTMLCanvasElement.prototype, 'getBoundingClientRect', {
+    writable: true,
+    value() {
+      return {
+        left: 10,
+        top: 20,
+        width: 320,
+        height: this.height / 2,
+        right: 330,
+        bottom: 20 + this.height / 2,
+      };
     },
-  );
+  });
+  HTMLCanvasElement.prototype.getContext = () =>
+    new Proxy(
+      {measureText: (text) => ({width: String(text).length * 5})},
+      {
+        get(target, name) {
+          return name in target ? target[name] : () => {};
+        },
+        set(target, name, value) {
+          target[name] = value;
+          return true;
+        },
+      },
+    );
+}
 afterEach(() => {
+  if (typeof window === 'undefined') return;
   cleanup();
   setViewport('desktop');
   setSystemDark(false);
