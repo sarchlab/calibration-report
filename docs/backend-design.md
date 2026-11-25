@@ -1,6 +1,26 @@
 # Backend design: hosted reports on Netlify
 
-Status: proposal for review. Nothing in this document is implemented yet.
+Status: partially implemented. A vertical slice is built:
+- the migration (`netlify/database/migrations/0001_calibration_reports.sql`) with the `cr` schema, the four ingest functions, and the `cr_ingest` role;
+- the Python writer and importer (`clients/python/calibration_report_writer.py`);
+- the read Functions (`netlify/functions/api.mjs`, `netlify/lib/api.js`) with the Blobs summary cache;
+- the hosted viewer (`site/Hosted.jsx`): a run list at `/` when built with `VITE_HOSTED=1`, and `?run=KEY`.
+
+Deferred, not built yet:
+- manifest and `/runs` ETags and `304`;
+- the summary catch-up timer;
+- the failed-run timer;
+- `export` and `all=1`;
+- discarding and retrying a plot page whose chunks carry different revisions;
+- merging point details across revisions (the viewer does not call the points endpoint yet, so details opened from a summary chart show the sampled values only);
+- a separate store for deploy previews;
+- the 60-second back-off after failed polls;
+- a measured 450K-point run (§8).
+
+Deviations from the text below:
+- The ingest functions take `json`, not `jsonb`, arguments. `json` keeps key order, which declaration order relies on.
+- `plots` takes `limit` up to 48 (default 6).
+- In a one-group run, the hosted Overview tab shows that group's summary (`scope=group:<id>`), as §5 already canonicalizes on the server.
 
 ## 1. Goals and non-goals
 
@@ -222,7 +242,7 @@ Lifecycle:
 
 A run whose jobs died stays `running` and looks stale after 30 minutes (§6); nothing changes state automatically. Rerunning the workflow reopens a `failed` run or continues a stale one.
 
-### Python writer client (to be written)
+### Python writer client
 
 A single module, for example `clients/python/calibration_report_writer.py`, depending only on `psycopg` 3:
 
@@ -238,7 +258,7 @@ with Writer(os.environ["CALIBRATION_REPORT_DSN"], run_key="mgpusim.mi300x.2026-1
 finish_run(dsn, "mgpusim.mi300x.2026-11-25-434ad66", "completed", progress)
 ```
 
-The client retries a failed flush with backoff, replaying the same batch. The same module provides `import data.json --run KEY` and `export --run KEY > data.json`; export reads the public API (§6) and needs no credential.
+The client retries a failed flush with backoff, replaying the same batch. The same module provides `import data.json --run KEY [--live]` and, not built yet, `export --run KEY > data.json`; export reads the public API (§6) and needs no credential.
 
 ### Cost of writing directly to the database
 
