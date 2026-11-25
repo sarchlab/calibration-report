@@ -45,9 +45,15 @@ export function PointDescription({description, benchmarks, groups}) {
       )}
       <dl className="point-measurements">
         {Object.entries(meta.values).map(([id, series]) => {
-          const value = point.values[id],
-            status = point.statuses?.[id];
-          if (!(id in point.values) && !status) return null;
+          // Own properties only: series keys are producer-chosen
+          // (`constructor`, `__proto__`).
+          const measured = Object.hasOwn(point.values, id);
+          const value = measured ? point.values[id] : undefined,
+            status =
+              point.statuses && Object.hasOwn(point.statuses, id)
+                ? point.statuses[id]
+                : undefined;
+          if (!measured && !status) return null;
           const role =
             series.role === 'hardware_measurement'
               ? 'Measured'

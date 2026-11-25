@@ -1,6 +1,29 @@
 # Backend design: hosted reports on Netlify
 
-Status: proposal for review. Nothing in this document is implemented yet.
+Status: partially implemented. A vertical slice is built:
+- the migration (`netlify/database/migrations/0001_calibration_reports.sql`) with the `cr` schema, the four ingest functions, and the `cr_ingest` role;
+- the Python writer and importer (`clients/python/calibration_report_writer.py`);
+- the read Functions (`netlify/functions/api.mjs`, `netlify/lib/api.js`) with the Blobs summary cache;
+- the hosted viewer (`site/Hosted.jsx`): a run list at `/` when built with `VITE_HOSTED=1`, and `?run=KEY`.
+
+Deferred, not built yet:
+- manifest and `/runs` ETags and `304`;
+- the summary catch-up timer;
+- the failed-run timer;
+- `export` and `all=1`;
+- discarding and retrying a plot page whose chunks carry different revisions;
+- merging point details across revisions (the viewer does not call the points endpoint yet, so details opened from a summary chart show the sampled values only);
+- a separate store for deploy previews;
+- the 60-second back-off after failed polls;
+- a measured 450K-point run (§8), including the cost of plot chunks: each batch of 256 rows re-runs the grouped observation query from its keyset position, and that per-batch aggregation is unmeasured;
+- one data-source interface for both viewers (below).
+
+Deviations from the text below:
+- The ingest functions take `json`, not `jsonb`, arguments. `json` keeps key order, which declaration order relies on.
+- `plots` takes `limit` up to 48 (default 6).
+- In a one-group run, the hosted Overview tab shows that group's summary (`scope=group:<id>`), as §5 already canonicalizes on the server.
+- The API source is a separate `HostedReport` component. It shares the layout (`site/Layout.jsx`), `Summary`, and `Benchmark` with the file viewer's `Report`. Putting both behind one data-source interface is deferred.
+- The manifest adds `param_keys`: each benchmark's parameter names in declaration order, by benchmark index. JSON objects reorder numeric-looking keys, so this order travels in an array.
 
 ## 1. Goals and non-goals
 
@@ -222,7 +245,7 @@ Lifecycle:
 
 A run whose jobs died stays `running` and looks stale after 30 minutes (§6); nothing changes state automatically. Rerunning the workflow reopens a `failed` run or continues a stale one.
 
-### Python writer client (to be written)
+### Python writer client
 
 A single module, for example `clients/python/calibration_report_writer.py`, depending only on `psycopg` 3:
 
@@ -238,7 +261,7 @@ with Writer(os.environ["CALIBRATION_REPORT_DSN"], run_key="mgpusim.mi300x.2026-1
 finish_run(dsn, "mgpusim.mi300x.2026-11-25-434ad66", "completed", progress)
 ```
 
-The client retries a failed flush with backoff, replaying the same batch. The same module provides `import data.json --run KEY` and `export --run KEY > data.json`; export reads the public API (§6) and needs no credential.
+The client retries a failed flush with backoff, replaying the same batch. The same module provides `import data.json --run KEY [--live]` and, not built yet, `export --run KEY > data.json`; export reads the public API (§6) and needs no credential.
 
 ### Cost of writing directly to the database
 
@@ -293,7 +316,7 @@ Each chunk is read in one snapshot and carries the run `revision` it was read at
 
 ### Summary
 
-The summary Function computes what the summary section and benchmark-wide error show today. It imports the pure functions of `site/model.js`, which has no imports and no DOM use (`site/model.js:1`; verified to load in plain Node): `comparisonPairs` (line 1), `errorStats` (56), `rankStatistics` and `rankingStats` (88, 161), `preferLogScale` (186). Logic that now sits in components moves there too: the Overview relabeling and percentiles (`site/Charts.jsx:503-545`), the scatter statistics and default scale (`site/Charts.jsx:468,477`), and the CDF default scale (`site/drawing.js:350`). A new `buildSummary(rows, benchmarks, groups, scope, limits)` wraps them with the sampling rules below. The file source calls it without limits, so the offline viewer keeps full-resolution charts.
+The summary Function computes what the summary section and benchmark-wide error show today. It imports the pure functions of `site/model.js`, which has no imports and no DOM use (`site/model.js:1`; verified to load in plain Node): `comparisonPairs` (line 1), `errorStats` (56), `rankStatistics` and `rankingStats` (88, 161), `preferLogScale` (186). Logic that now sits in components moves there too: the Overview relabeling and percentiles (`site/Charts.jsx:503-545`), the scatter statistics and default scale (`site/Charts.jsx:468,477`), and the CDF default scale (`site/drawing.js:350`). `buildSummary` in `site/model.js` assembles the hosted summary format from them with the sampling rules below; only the Function calls it. The browser shares the statistics helpers, not the summary assembly. The file source still computes its summary in the component from every pair, so the offline viewer keeps full-resolution charts. The hosted viewer decodes the summary format with `summaryCharts`.
 
 **Read**, in one `REPEATABLE READ READ ONLY` transaction, so revision, series metadata, and values come from one snapshot:
 
@@ -319,11 +342,12 @@ Sampled charts say so ("3,000 of 212,000 comparisons shown").
 {
   "rid": 7, "key": "mgpusim.mi300x.2026-11-25-434ad66", "scope": "group:3", "revision": 418,
   "state": "running", "computed_at": "2026-11-25T16:20:05Z", "min_interval": 60, "count": 212000,
+  "relabeled": false,
   "groups": [[3, "mi300x", "AMD MI300X"]],
   "stats": [["Average error", "18.2%"], ["Max error", "412%"]],
   "percentiles": [["P50", "9.81%"], ["P90", "41.0%"], ...],
   "series": [["mi300x", "MI300X kernel time", "ns"], ["mgpusim", "MGPUSim kernel time", "ns"]],
-  "pairs": [[0, 1]],
+  "pairs": [[null, 0, 1]],
   "benchmarks": ["polybench_fdtd2d"],
   "plots": {"17": [0, 0, {"tmax": 10}]},
   "samples": {"plot": [17], "x": [64], "pair": [0], "actual": [57889], "prediction": [79339]},
@@ -334,9 +358,9 @@ Sampled charts say so ("3,000 of 212,000 comparisons shown").
 }
 ```
 
-`samples` holds the union of the three samples in columns, and the charts index into it. A sample carries what click-through needs (`plot`, `x`, `pair`) and, through `plots` (`[group index, benchmark index, non_scaling_params]`), what hover needs (`PointDescription` reads `point.non_scaling_params.launch`, `site/PointDetails.jsx:41`). The full point is loaded on selection. Group indices refer to the summary's own `groups` array (`[id, key, name]` from the same snapshot, in id order), never to the manifest's `group_order`. In a multi-group Overview, pairs are relabeled per group as today. `benchmark_stats` entries are `[benchmark index, comparison count, statistics]`, so each benchmark key is serialized once.
+`samples` holds the union of the three samples in columns, and the charts index into it. A sample carries what click-through needs (`plot`, `x`, `pair`) and, through `plots` (`[group index, benchmark index, non_scaling_params]`), what hover needs (`PointDescription` reads `point.non_scaling_params.launch`, `site/PointDetails.jsx:41`). The full point is loaded on selection. Group indices refer to the summary's own `groups` array (`[id, key, name]` from the same snapshot, in id order), never to the manifest's `group_order`. `series` entries are `[key, name, unit]`. `pairs` lists each comparison once as `[group index, reference series index, simulated series index]`, where the series indices refer to `series`. The group index is `null` unless `relabeled` is true. That happens only in a multi-group Overview, where the same comparison in different groups is a separate curve, as today. `benchmark_stats` entries are `[benchmark index, comparison count, statistics]`, so each benchmark key is serialized once.
 
-**Byte budget: 2 MB serialized**, well under the 6 MB buffered limit. Worst cases follow from the §3 limits, with JSON escaping at most doubling a key, name, or unit (no control characters): `benchmarks` ≤ 1,000 × 403 bytes ≈ 400 KB; `benchmark_stats` ≤ 1,000 × ≈ 110 bytes ≈ 110 KB; `groups` ≤ 16 × ≈ 830 bytes ≈ 13 KB; `series` ≤ 32 × ≈ 930 bytes ≈ 30 KB; `pairs` ≤ 16 groups × 1,024 × ≈ 12 bytes ≈ 200 KB; per-unit statistics ≤ 32 × ≈ 400 bytes ≈ 13 KB; totals and percentiles ≈ 1 KB. The exact part is therefore under 800 KB, leaving at least 1.2 MB for samples. If the samples do not fit, `buildSummary` halves every sample limit and samples again; at limit 0 it returns the exact part alone, which fits by construction. If a response still exceeds 2 MB (the invariant is broken), the Function returns `500`, logs an error, and caches nothing. Sampling is deterministic and never changes the exact part.
+**Byte budget: 2 MB serialized**, well under the 6 MB buffered limit. Worst cases follow from the §3 limits, with JSON escaping at most doubling a key, name, or unit (no control characters): `benchmarks` ≤ 1,000 × 403 bytes ≈ 400 KB; `benchmark_stats` ≤ 1,000 × ≈ 110 bytes ≈ 110 KB; `groups` ≤ 16 × ≈ 830 bytes ≈ 13 KB; `series` ≤ 32 × ≈ 930 bytes ≈ 30 KB; `pairs` ≤ 16 groups × 1,024 × ≈ 12 bytes ≈ 200 KB; per-unit statistics ≤ 32 × ≈ 400 bytes ≈ 13 KB; totals and percentiles ≈ 1 KB. The exact part is therefore under 800 KB, leaving at least 1.2 MB for samples. The Function measures the complete response, including the envelope and the parameters of the sampled plots, which it reads in the same snapshot. If the response does not fit, it halves every sample limit and samples again. At limit 0 only the exact part remains, which fits by construction. If a response still exceeds 2 MB (the invariant is broken), the Function returns `500`, logs an error, and caches nothing. Sampling is deterministic and never changes the exact part.
 
 ### Summary cache
 
@@ -362,7 +386,7 @@ Runs are kept until someone deletes them. At about 100 MB per run, the 5 GB stor
 The viewer gains a data source interface with two implementations:
 
 - **API source**, when the URL has `?run=KEY`. A query string keeps the relative-asset build working without rewrites.
-- **File source**: today's behavior, in memory with `indexReport` and `buildSummary`, so `npm run dev`, `serve.py`, and static hosting keep working.
+- **File source**: today's behavior, in memory with `indexReport` and the shared statistics helpers, so `npm run dev`, `serve.py`, and static hosting keep working.
 
 A build setting, `VITE_HOSTED=1`, is set only in the Netlify build (`netlify.toml`). In the hosted build the root without `run` renders the run list. In the default build the root renders the file viewer from `./data.json`, as today.
 

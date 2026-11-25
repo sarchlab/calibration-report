@@ -314,9 +314,10 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     ctx.restore();
   }
 
-  function rankedErrors(pairs, colors) {
+  // A sampled chart's pairs carry their `rank` among `total` comparisons.
+  function rankedErrors(pairs, colors, total = pairs.length) {
     const ranked = [...pairs].sort((a, b) => a.signedError - b.signedError);
-    const end = Math.max(2, ranked.length);
+    const end = Math.max(2, total);
     const minimum = Math.min(0, ranked[0].signedError);
     const maximum = Math.max(0, ranked[ranked.length - 1].signedError);
     const margin = Math.max(0.2, (maximum - minimum) * 0.06);
@@ -330,24 +331,25 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       {format: (n) => (n > 0 ? '+' : '') + formatTick(n) + '%'},
     );
     referenceLine(chart, 1, 0, end, 0);
-    ranked.forEach((pair, i) =>
+    ranked.forEach((pair, i) => {
+      const rank = pair.rank ?? i + 1;
       summaryPoint(
         chart,
-        i + 1,
+        rank,
         pair.signedError,
         colors.get(pair.id).color,
-        pairDescription(pair, {'Case rank': (i + 1).toLocaleString('en-US')}),
-      ),
-    );
+        pairDescription(pair, {'Case rank': rank.toLocaleString('en-US')}),
+      );
+    });
     return {hitPoints: chart.points};
   }
 
-  function absoluteErrorCDF(pairs) {
+  function absoluteErrorCDF(pairs, total = pairs.length, preferLog) {
     const ranked = [...pairs].sort(
       (a, b) => Math.abs(a.signedError) - Math.abs(b.signedError),
     );
     const errors = ranked.map((pair) => Math.abs(pair.signedError));
-    const log = preferLogScale(errors);
+    const log = preferLog ?? preferLogScale(errors);
     const left = log ? 10 ** Math.floor(Math.log10(errors[0])) : 0;
     const maximum = errors.at(-1);
     const right = log
@@ -370,7 +372,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     for (let i = 0; i < errors.length; i++) {
       const px = x(errors[i]);
       ctx.lineTo(px, y(fraction));
-      fraction = (i + 1) / errors.length;
+      fraction = (ranked[i].rank ?? i + 1) / total;
       ctx.lineTo(px, y(fraction));
       chart.points.push({
         x: px,
@@ -436,7 +438,9 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       spec.bounds,
       spec.scales,
     );
-  if (spec.kind === 'ranked') return rankedErrors(spec.pairs, spec.colors);
-  if (spec.kind === 'cdf') return absoluteErrorCDF(spec.pairs);
+  if (spec.kind === 'ranked')
+    return rankedErrors(spec.pairs, spec.colors, spec.total);
+  if (spec.kind === 'cdf')
+    return absoluteErrorCDF(spec.pairs, spec.total, spec.log);
   return comparisonScatter(spec.pairs, spec.unit, spec.colors, spec.log);
 }

@@ -75,4 +75,28 @@ The viewer reads only `data.json`. With `report.live: true`, it shows a live ind
 
 Simulator repositories own benchmark collection, simulation orchestration, and adapters that export this format. This repository owns the format, viewer, and live HTTP server.
 
-A proposed hosted backend (Netlify Database, live ingestion from runners, server-computed summaries, paged reads) is described in [docs/backend-design.md](docs/backend-design.md).
+## Hosted backend (partial)
+
+A hosted backend is described in [docs/backend-design.md](docs/backend-design.md); its status line lists what is built and what is deferred. It uses Netlify Database for storage, takes live writes from runners, computes summaries on the server and serves data in pages. The built parts are:
+
+- **Database:** `netlify/database/migrations/0001_calibration_reports.sql` creates the `cr` schema, the four ingest functions, and the `cr_ingest` role (`EXECUTE` only).
+- **Writer:** `clients/python/calibration_report_writer.py` needs only `psycopg` 3. It provides a buffered `Writer`, `finish_run`, and a command-line importer:
+
+  ```sh
+  pip install "psycopg[binary]"
+  CALIBRATION_REPORT_DSN=postgresql://... python3 clients/python/calibration_report_writer.py import data.json --run KEY [--live]
+  ```
+
+  Without `--live`, the importer finishes the run as completed.
+- **Read API:** Netlify Functions under `/api/v1/runs` serve the run list, manifests, plot pages, single points and cached summaries. The Functions use the same statistics helpers in `site/model.js` as the browser; the hosted viewer decodes the server's sampled summary format rather than computing it.
+- **Hosted viewer:** `?run=KEY` opens one run from the API in any build. Without `?run`, the viewer reads `./data.json`, except in the hosted build: `netlify.toml` builds with `VITE_HOSTED=1`, which shows a run list at `/` instead.
+
+Database tests need a throwaway PostgreSQL 17 and are skipped without one:
+
+```sh
+docker run -d --name crpg -e POSTGRES_PASSWORD=pg -p 55432:5432 postgres:17
+CR_TEST_DSN=postgresql://postgres:pg@localhost:55432/postgres npm test
+docker rm -f crpg
+```
+
+`CR_PYTHON` can name a Python that has `psycopg` (default `python3`). To preview the hosted viewer without Netlify, run `VITE_HOSTED=1 npm run build`. Then run `NETLIFY_DB_URL=<dsn> node scripts/serve-hosted.mjs 8888`. The script serves `dist/` and the API, and caches summaries in memory.

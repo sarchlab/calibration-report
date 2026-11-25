@@ -2,12 +2,16 @@ import {Button, Paper, VisuallyHidden} from '@mantine/core';
 import {useId, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {drawChart} from './drawing.js';
 import {
+  comparisonPairs,
   displayName,
+  errorPercentiles,
   errorStats,
   isMarked,
   parameterLabel,
   preferLogScale,
   rankingStats,
+  relabelPairs,
+  summaryCharts,
   visibleStates,
   valueBounds,
 } from './model.js';
@@ -70,6 +74,13 @@ export function nearestPoint(event, canvas, points, pointerType) {
   });
   return best;
 }
+// A summary chart whose sample is empty (the byte budget left none) is
+// replaced by a note.
+function SummaryCanvas({spec, theme}) {
+  if (!spec.pairs.length)
+    return <p className="summary-note empty-sample">No sample available</p>;
+  return <PlotCanvas spec={spec} theme={theme} summary />;
+}
 export function PlotCanvas({spec, theme, summary = false}) {
   const interaction = usePoints();
   const {
@@ -89,6 +100,20 @@ export function PlotCanvas({spec, theme, summary = false}) {
     pointer = useRef();
   const id = useId();
   useLayoutEffect(() => () => removePlot(id), [id, removePlot]);
+  // Refreshed rows replace what a hover or pinned selection pointed at.
+  // Rebuilt arrays of the same row objects (new metadata) are not a refresh.
+  const shownRows = useRef(spec.rows);
+  useLayoutEffect(() => {
+    const previous = shownRows.current;
+    shownRows.current = spec.rows;
+    if (
+      previous === spec.rows ||
+      (previous?.length === spec.rows?.length &&
+        previous.every((row, i) => row === spec.rows[i]))
+    )
+      return;
+    removePlot(id);
+  }, [spec.rows, id, removePlot]);
   const [drawing, setDrawing] = useState(null);
   const [statusDetail, setStatusDetail] = useState('');
   useLayoutEffect(() => {
@@ -340,19 +365,34 @@ function CurvePlot({
     </div>
   );
 }
+// `series` is every series of the benchmark (file source). With `paged`
+// (API source), `series` is only the current page of `count` series, `wide`
+// is the server's benchmark-wide {count, stats} (absent until it loads),
+// series pairs come from their rows, and `parameterOrder` is the declaration
+// order of the parameters.
 export function Benchmark({
   id,
   series: sourceSeries,
+  count = sourceSeries.length,
   meta,
   pairs,
+  paged = false,
+  wide,
+  parameterOrder,
   theme,
   preferences,
   setPreference,
   pagination,
   setPagination,
 }) {
-  const window = pageWindow(sourceSeries.length, pagination, 6);
-  const benchmarkStats = useMemo(() => errorStats(pairs), [pairs]);
+  const window = pageWindow(count, pagination, 6);
+  const benchmarkWide = useMemo(
+    () =>
+      paged
+        ? (wide ?? {count: 0, stats: []})
+        : {count: pairs.length, stats: errorStats(pairs)},
+    [paged, wide, pairs],
+  );
   const series = useMemo(() => {
     const curves = Object.entries(meta.values)
       .map(([id, info], i) => ({
@@ -365,12 +405,23 @@ export function Benchmark({
       }))
       .sort((a, b) => a.layer - b.layer);
     const units = Map.groupBy(curves, (curve) => curve.unit);
-    return sourceSeries.slice(window.start, window.end).map(
-      ({parameters, rows, pairs: groupPairs}) => {
+    const visible = paged
+      ? sourceSeries
+      : sourceSeries.slice(window.start, window.end);
+    return visible.map(
+      ({
+        parameters,
+        rows,
+        pairs: groupPairs = comparisonPairs(rows, {[id]: meta}),
+      }) => {
         const group = [...rows].sort((a, b) => a.x - b.x);
         return {
           parameters,
-          label: parameterLabel(group[0].non_scaling_params, meta.params),
+          label: parameterLabel(
+            group[0].non_scaling_params,
+            meta.params,
+            parameterOrder,
+          ),
           plots: Array.from(units, ([unit, comparable]) => ({
             unit,
             comparable,
@@ -390,7 +441,7 @@ export function Benchmark({
         };
       },
     );
-  }, [sourceSeries, window.start, window.end, meta, theme, id]);
+  }, [sourceSeries, paged, window.start, window.end, meta, theme, id, parameterOrder]);
   const axisUnit = meta.params[meta.scaling_param].unit;
   const xLabel =
     displayName(meta.scaling_param) + (axisUnit ? ' (' + axisUnit + ')' : '');
@@ -403,16 +454,16 @@ export function Benchmark({
       p="md"
     >
       <h2>{displayName(id)}</h2>
-      {pairs.length > 0 && (
+      {benchmarkWide.count > 0 && (
         <div className="benchmark-error">
           <p>Benchmark-wide error</p>
-          <Stats entries={benchmarkStats} count={pairs.length} />
+          <Stats entries={benchmarkWide.stats} count={benchmarkWide.count} />
         </div>
       )}
       <PageControls
         label={'Series for ' + displayName(id)}
         noun="series"
-        count={sourceSeries.length}
+        count={count}
         window={window}
         sizes={seriesPageSizes}
         onChange={setPagination}
@@ -461,22 +512,26 @@ function Scatter({
   theme,
   preferences,
   setPreference,
+  exact,
 }) {
   const {close} = usePoints();
   const key = JSON.stringify(['scatter', scope, unit]);
-  const defaultLog = useMemo(
-    () => preferLogScale(pairs.flatMap((pair) => [pair.actual, pair.prediction])),
-    [pairs],
+  const computedLog = useMemo(
+    () =>
+      exact?.log ??
+      preferLogScale(pairs.flatMap((pair) => [pair.actual, pair.prediction])),
+    [pairs, exact],
   );
-  const log = preferences.get(key) ?? defaultLog;
+  const log = preferences.get(key) ?? computedLog;
   const spec = useMemo(
     () => ({kind: 'scatter', pairs, unit, colors, log}),
     [pairs, unit, colors, log],
   );
   const stats = useMemo(
-    () => [...rankingStats(pairs), ...errorStats(pairs)],
-    [pairs],
+    () => exact?.stats ?? [...rankingStats(pairs), ...errorStats(pairs)],
+    [pairs, exact],
   );
+  const count = exact?.count ?? pairs.length;
   return (
     <div className="plot">
       <div className="scale-controls">
@@ -492,58 +547,79 @@ function Scatter({
           X/Y log
         </Button>
       </div>
-      <PlotCanvas spec={spec} theme={theme} summary />
-      <PlotDetails entries={stats} count={pairs.length}>
+      <SummaryCanvas spec={spec} theme={theme} />
+      <SampleNote shown={pairs.length} count={count} />
+      <PlotDetails entries={stats} count={count}>
         <p>Dashed line indicates equal values.</p>
         <p>Pairwise accuracy uses pairs with distinct measured values.</p>
       </PlotDetails>
     </div>
   );
 }
+function SampleNote({shown, count}) {
+  if (shown >= count) return null;
+  return (
+    <p className="summary-note sample-note">
+      {shown.toLocaleString()} of {count.toLocaleString()} comparisons shown
+    </p>
+  );
+}
+// Summary of one scope, from the full pair list (file source) or from a
+// server summary with exact statistics and sampled charts (API source).
 export function Summary({
   pairs: sourcePairs,
+  summary,
   scope,
   groups,
   theme,
   preferences,
   setPreference,
 }) {
-  const {pairs, colors, byUnit, ranked, cdf, percentiles} = useMemo(() => {
-    const pairs =
-      scope === null && new Set(sourcePairs.map((pair) => pair.group)).size > 1
-        ? sourcePairs.map((pair) => ({
-            ...pair,
-            id: JSON.stringify([pair.group, pair.id]),
-            name: groups[pair.group].name + ' · ' + pair.name,
-          }))
-        : sourcePairs;
-    const colors = new Map();
-    for (const pair of pairs)
-      if (!colors.has(pair.id))
-        colors.set(pair.id, {
-          color: theme.palette[colors.size % theme.palette.length],
-          name: pair.name,
-        });
-    const errors = pairs
-      .map((pair) => Math.abs(pair.signedError))
-      .sort((a, b) => a - b);
+  const model = useMemo(() => {
+    const colorsFor = (curves) => {
+      const colors = new Map();
+      for (const curve of curves)
+        if (!colors.has(curve.id))
+          colors.set(curve.id, {
+            color: theme.palette[colors.size % theme.palette.length],
+            name: curve.name,
+          });
+      return colors;
+    };
+    if (summary) {
+      const charts = summaryCharts(summary);
+      const colors = colorsFor(charts.legend);
+      return {
+        count: charts.count,
+        colors,
+        stats: charts.stats,
+        percentiles: charts.percentiles,
+        ranked: {kind: 'ranked', pairs: charts.scurve, colors, total: charts.count},
+        cdf: {kind: 'cdf', pairs: charts.cdf.pairs, total: charts.count, log: charts.cdf.log},
+        scatter: charts.scatter.map((unit) => ({unit: unit.unit, pairs: unit.pairs, exact: unit})),
+      };
+    }
+    const pairs = relabelPairs(
+      sourcePairs,
+      scope === null,
+      (group) => groups[group].name,
+    );
+    const colors = colorsFor(pairs);
     return {
-      pairs,
+      count: pairs.length,
       colors,
-      byUnit: Map.groupBy(pairs, (pair) => pair.unit),
+      stats: errorStats(pairs),
+      percentiles: errorPercentiles(pairs),
       ranked: {kind: 'ranked', pairs, colors},
       cdf: {kind: 'cdf', pairs},
-      percentiles: errors.length
-        ? [50, 90, 95, 98].map((p) => [
-            'P' + p,
-            errors[Math.ceil((p / 100) * errors.length) - 1].toPrecision(3) +
-              '%',
-          ])
-        : [],
+      scatter: Array.from(
+        Map.groupBy(pairs, (pair) => pair.unit),
+        ([unit, values]) => ({unit, pairs: values}),
+      ),
     };
-  }, [sourcePairs, scope, groups, theme]);
-  const stats = useMemo(() => errorStats(pairs), [pairs]);
-  if (!pairs.length) return null;
+  }, [sourcePairs, summary, scope, groups, theme]);
+  const {count, colors, stats, percentiles, ranked, cdf} = model;
+  if (!count) return null;
   return (
     <section id="summary" aria-label="Accuracy summary">
       <h2>
@@ -553,7 +629,7 @@ export function Summary({
       </h2>
       <div className="summary-context">
         <p className="summary-note">
-          {pairs.length.toLocaleString()} paired measurements
+          {count.toLocaleString()} paired measurements
         </p>
         <Legend curves={[...colors.values()]} />
       </div>
@@ -566,8 +642,9 @@ export function Summary({
           p="md"
         >
           <figcaption>S-curve</figcaption>
-          <PlotCanvas spec={ranked} theme={theme} summary />
-          <PlotDetails entries={stats} count={pairs.length}>
+          <SummaryCanvas spec={ranked} theme={theme} />
+          <SampleNote shown={ranked.pairs.length} count={count} />
+          <PlotDetails entries={stats} count={count}>
             <p>
               Negative values are underestimates. Positive values are
               overestimates.
@@ -582,11 +659,12 @@ export function Summary({
           p="md"
         >
           <figcaption>Absolute error distribution (CDF)</figcaption>
-          <PlotCanvas spec={cdf} theme={theme} summary />
-          <PlotDetails entries={percentiles} count={pairs.length}>
+          <SummaryCanvas spec={cdf} theme={theme} />
+          <SampleNote shown={cdf.pairs.length} count={count} />
+          <PlotDetails entries={percentiles} count={count}>
             <p>|simulated − measured| / min(simulated, measured)</p>
           </PlotDetails>
-          <Stats entries={stats} count={pairs.length} />
+          <Stats entries={stats} count={count} />
         </Paper>
         <Paper
           component="figure"
@@ -596,16 +674,17 @@ export function Summary({
           p="md"
         >
           <figcaption>Measured vs. simulated</figcaption>
-          {Array.from(byUnit, ([unit, values]) => (
+          {model.scatter.map(({unit, pairs, exact}) => (
             <Scatter
               key={unit}
               scope={scope}
-              pairs={values}
+              pairs={pairs}
               unit={unit}
               colors={colors}
               theme={theme}
               preferences={preferences}
               setPreference={setPreference}
+              exact={exact}
             />
           ))}
         </Paper>

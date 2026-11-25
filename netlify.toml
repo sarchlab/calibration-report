@@ -1,0 +1,7 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  # The hosted build shows the run list at the site root (docs/backend-design.md §6).
+  VITE_HOSTED = "1"
