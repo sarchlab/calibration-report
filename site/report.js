@@ -257,18 +257,24 @@ function interactivePlot(canvas, points) {
     return best;
   }
 
-  const previous = el('button', '', 'Previous');
   const counter = el('span');
-  const next = el('button', '', 'Next');
-  const close = el('button', '', 'Close');
   function step(delta) {
-    show((selected + delta + points.length) % points.length, true);
+    show(((selected + delta) % points.length + points.length) % points.length, true);
   }
-  for (const button of [previous, next, close]) button.type = 'button';
-  previous.addEventListener('click', () => step(-1));
-  next.addEventListener('click', () => step(1));
-  close.addEventListener('click', () => hide(true));
-  controls.append(previous, counter, next, close);
+  function pointButton(symbol, label, action) {
+    const button = el('button', '', symbol);
+    button.type = 'button';
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.addEventListener('click', action);
+    return button;
+  }
+  const previousTen = pointButton('<<', 'Previous 10 points', () => step(-10));
+  const previous = pointButton('<', 'Previous point', () => step(-1));
+  const next = pointButton('>', 'Next point', () => step(1));
+  const nextTen = pointButton('>>', 'Next 10 points', () => step(10));
+  const close = pointButton('×', 'Close point details', () => hide(true));
+  controls.append(previousTen, previous, counter, next, nextTen, close);
   detail.append(text, previewHint, controls);
   surface.append(canvas, ring);
   wrapper.append(surface, detail, hint);

@@ -57,7 +57,7 @@ function byClass(root, className) {
     .filter(node => (node.className ?? '').split(' ').includes(className));
 }
 
-function fixture() {
+function fixture(pointCount = 2) {
   const document = new Element('document');
   document.body = new Element('body');
   document.createElement = tag => new Element(tag);
@@ -94,13 +94,17 @@ function fixture() {
     {x: 100, y: 50, description},
     {x: 200, y: 80, description: context.pointDescription({...row, x: 262144})},
   ];
-  const plot = context.interactivePlot(canvas, points);
+  while (points.length < pointCount) {
+    const index = points.length;
+    points.push({x: 100 + index * 5, y: 50, description: context.pointDescription({...row, x: (index + 1) * 131072})});
+  }
+  const plot = context.interactivePlot(canvas, points.slice(0, pointCount));
   document.body.append(plot);
   const detail = byClass(plot, 'point-detail')[0];
   const controls = byClass(plot, 'point-controls')[0];
-  const [previous, counter, next, close] = controls.children;
+  const [previousTen, previous, counter, next, nextTen, close] = controls.children;
   const tap = () => canvas.fire('click', {pointerType: 'touch', clientX: 110, clientY: 70});
-  return {context, document, desktop, temporaryLandscape, row, description, canvas, plot, detail, controls, previous, counter, next, close, tap};
+  return {context, document, desktop, temporaryLandscape, row, description, canvas, plot, detail, controls, previousTen, previous, counter, next, nextTen, close, tap};
 }
 
 test('details separate metadata, converted values, signed error, percentile and configuration', () => {
@@ -339,6 +343,43 @@ test('only temporary landscape width changes scroll the selected source into vie
   f.temporaryLandscape.matches = false; f.desktop.matches = false;
   f.tap(); f.close.fire('click');
   assert.equal(f.canvas.scrollCount, beforeOutsideClick, 'portrait panels do not scroll the source');
+});
+
+test('compact controls expose English labels and ten-point jumps wrap short and long series', () => {
+  const cases = [
+    {count: 1, homeBack: 1, homeForward: 1, endForward: 1, endBack: 1},
+    {count: 2, homeBack: 1, homeForward: 1, endForward: 2, endBack: 2},
+    {count: 3, homeBack: 3, homeForward: 2, endForward: 1, endBack: 2},
+    {count: 13, homeBack: 4, homeForward: 11, endForward: 10, endBack: 3},
+  ];
+  for (const {count, homeBack, homeForward, endForward, endBack} of cases) {
+    const f = fixture(count); f.canvas.fire('keydown', {key: 'Home'});
+    assert.deepEqual(f.controls.children.filter(node => node.tagName === 'button').map(button =>
+      [button.textContent, button.getAttribute('aria-label'), button.title]), [
+      ['<<', 'Previous 10 points', 'Previous 10 points'],
+      ['<', 'Previous point', 'Previous point'],
+      ['>', 'Next point', 'Next point'],
+      ['>>', 'Next 10 points', 'Next 10 points'],
+      ['×', 'Close point details', 'Close point details'],
+    ]);
+    const hideCount = f.detail.hideCount;
+    const appendCount = f.detail.appendCount;
+    for (const [key, button, expected] of [
+      ['Home', f.previousTen, homeBack], ['Home', f.nextTen, homeForward],
+      ['End', f.nextTen, endForward], ['End', f.previousTen, endBack],
+    ]) {
+      f.canvas.fire('keydown', {key});
+      button.focus(); button.fire('click');
+      assert.equal(f.counter.textContent, expected + ' / ' + count);
+      assert.equal(button.focused, true);
+      assert.equal(f.detail.hidden, false);
+      assert.equal(f.detail.hideCount, hideCount, 'jumping must not hide focused controls');
+      assert.equal(f.detail.appendCount, appendCount, 'jumping must not reparent the panel');
+    }
+    f.close.fire('click');
+    assert.equal(f.detail.hidden, true);
+    assert.equal(f.canvas.focused, true);
+  }
 });
 
 test('rapid-tap targets retain scrolling and pinch zoom through manipulation touch action', () => {

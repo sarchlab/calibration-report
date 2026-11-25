@@ -214,7 +214,7 @@ button[aria-pressed="true"] { color: #fff; background: var(--accent); border-col
 .point-parameters dt { color: var(--muted); }
 .point-parameters dd { margin: 0; text-align: right; font-weight: 500; font-variant-numeric: tabular-nums; }
 .point-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--divider); }
-.point-controls button { min-height: 44px; color: var(--text); font-size: 12px; padding: 6px 9px; }
+.point-controls button { min-width: 28px; min-height: 28px; color: var(--text); font-size: 12px; padding: 3px 7px; }
 /* Allow rapid taps without double-tap zoom; retain scrolling and pinch zoom. */
 .point-controls, .point-controls button, .interactive-plot .curve { touch-action: manipulation; }
 .point-controls span { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
