@@ -1,17 +1,33 @@
 export function comparisonPairs(rows, benchmarks) {
   const pairs = [];
+  const comparisons = new Map();
   for (const point of rows) {
-    const series = Object.entries(benchmarks[point.benchmark].values);
-    const hardware = series.filter(
-      ([, value]) => value.role === 'hardware_measurement',
-    );
-    for (const [id, simulated] of series) {
-      if (simulated.role !== 'simulator_output') continue;
-      const references = hardware.filter(
-        ([, value]) => value.unit === simulated.unit,
+    if (!comparisons.has(point.benchmark)) {
+      const series = Object.entries(benchmarks[point.benchmark].values);
+      const hardware = series.filter(
+        ([, value]) => value.role === 'hardware_measurement',
       );
-      if (references.length !== 1) continue;
-      const [reference, measured] = references[0];
+      const matches = [];
+      for (const [id, simulated] of series) {
+        if (simulated.role !== 'simulator_output') continue;
+        const references = hardware.filter(
+          ([, value]) => value.unit === simulated.unit,
+        );
+        if (references.length !== 1) continue;
+        const [reference, measured] = references[0];
+        matches.push({
+          reference,
+          id,
+          unit: simulated.unit,
+          pairId: JSON.stringify([reference, id]),
+          name: simulated.name + ' vs. ' + measured.name,
+        });
+      }
+      comparisons.set(point.benchmark, matches);
+    }
+    for (const {reference, id, unit, pairId, name} of comparisons.get(
+      point.benchmark,
+    )) {
       const actual = point.values[reference];
       const prediction = point.values[id];
       if (
@@ -28,9 +44,9 @@ export function comparisonPairs(rows, benchmarks) {
         prediction,
         signedError:
           (100 * (prediction - actual)) / Math.min(prediction, actual),
-        unit: simulated.unit,
-        id: JSON.stringify([reference, id]),
-        name: simulated.name + ' vs. ' + measured.name,
+        unit,
+        id: pairId,
+        name,
       });
     }
   }
@@ -39,10 +55,14 @@ export function comparisonPairs(rows, benchmarks) {
 
 export function errorStats(pairs) {
   if (!pairs.length) return [];
-  const errors = pairs.map((pair) => Math.abs(pair.signedError));
-  const mean =
-    errors.reduce((total, error) => total + error, 0) / errors.length;
-  const max = Math.max(...errors);
+  let total = 0,
+    max = 0;
+  for (const pair of pairs) {
+    const error = Math.abs(pair.signedError);
+    total += error;
+    max = Math.max(max, error);
+  }
+  const mean = total / pairs.length;
   return [
     ['Average error', mean.toFixed(2) + '%'],
     ['Max error', max.toFixed(2) + '%'],
@@ -66,25 +86,58 @@ export function averageRanks(values) {
 }
 
 export function rankStatistics(pairs) {
+  const count = pairs.length;
+  const total = count < 2 ? 0 : (count * (count - 1)) / 2;
   let concordant = 0,
-    discordant = 0,
-    measuredUnequal = 0,
-    simulatedUnequal = 0;
-  for (let i = 0; i < pairs.length; i++) {
-    for (let j = 0; j < i; j++) {
-      const x = Math.sign(pairs[i].actual - pairs[j].actual);
-      const y = Math.sign(pairs[i].prediction - pairs[j].prediction);
-      if (x) measuredUnequal++;
-      if (y) simulatedUnequal++;
-      if (x && y) {
-        if (x === y) concordant++;
-        else discordant++;
-      }
+    discordant = 0;
+  let measuredUnequal = total,
+    simulatedUnequal = total;
+  const measuredRanks = new Float64Array(count);
+  const simulatedRanks = averageRanks(pairs.map((pair) => pair.prediction));
+  const ordered = Array.from({length: count}, (_, i) => i).sort(
+    (a, b) => pairs[a].actual - pairs[b].actual,
+  );
+  // Distinct tie blocks have distinct ceil(average rank) indices in [1, n].
+  const frequencies = new Uint32Array(count + 1);
+  for (const rank of simulatedRanks) {
+    const index = Math.ceil(rank);
+    simulatedUnequal -= frequencies[index];
+    frequencies[index]++;
+  }
+  // A Fenwick tree counts earlier predictions below / at each average rank.
+  // Query an entire measured-value tie block before inserting any of it, so
+  // pairs tied on either axis never enter the concordant/discordant counts.
+  const tree = new Float64Array(count + 1);
+  const prefix = (index) => {
+    let sum = 0;
+    for (; index > 0; index -= index & -index) sum += tree[index];
+    return sum;
+  };
+  for (let start = 0; start < count;) {
+    let end = start + 1;
+    while (
+      end < count &&
+      pairs[ordered[end]].actual === pairs[ordered[start]].actual
+    )
+      end++;
+    measuredUnequal -= ((end - start) * (end - start - 1)) / 2;
+    for (let i = start; i < end; i++) {
+      const original = ordered[i];
+      measuredRanks[original] = (start + end + 1) / 2;
+      const rank = Math.ceil(simulatedRanks[original]);
+      concordant += prefix(rank - 1);
+      discordant += start - prefix(rank);
     }
+    for (let i = start; i < end; i++)
+      for (
+        let rank = Math.ceil(simulatedRanks[ordered[i]]);
+        rank <= count;
+        rank += rank & -rank
+      )
+        tree[rank]++;
+    start = end;
   }
   const tauDenominator = Math.sqrt(measuredUnequal * simulatedUnequal);
-  const measuredRanks = averageRanks(pairs.map((pair) => pair.actual));
-  const simulatedRanks = averageRanks(pairs.map((pair) => pair.prediction));
   const mean = (pairs.length + 1) / 2;
   let covariance = 0,
     measuredVariance = 0,
@@ -190,4 +243,57 @@ export function pointDescription(
 }
 export function pairDescription(pair, extra = {}) {
   return pointDescription(pair.point, [pair], extra);
+}
+
+// Build once per data revision. Off-page series keep only row/pair references;
+// their sorting, plot specifications and canvases are created when visited.
+export function indexReport(data, benchmarks) {
+  const rows = data.filter(
+    (point) =>
+      Object.values(point.values).some(Number.isFinite) ||
+      Object.keys(point.statuses ?? {}).some((id) => isMarked(point, id)),
+  );
+  const pairs = comparisonPairs(rows, benchmarks);
+  const groups = new Map();
+  const parameterKey = (point) =>
+    JSON.stringify(Object.entries(point.non_scaling_params).sort());
+  for (const point of rows) {
+    if (!groups.has(point.group))
+      groups.set(point.group, {pairs: [], benchmarks: new Map()});
+    const group = groups.get(point.group);
+    if (!group.benchmarks.has(point.benchmark))
+      group.benchmarks.set(point.benchmark, {
+        id: point.benchmark,
+        pairs: [],
+        series: new Map(),
+      });
+    const benchmark = group.benchmarks.get(point.benchmark);
+    const key = parameterKey(point);
+    if (!benchmark.series.has(key))
+      benchmark.series.set(key, {parameters: key, rows: [], pairs: []});
+    benchmark.series.get(key).rows.push(point);
+  }
+  for (const pair of pairs) {
+    const group = groups.get(pair.group);
+    const benchmark = group.benchmarks.get(pair.point.benchmark);
+    group.pairs.push(pair);
+    benchmark.pairs.push(pair);
+    benchmark.series.get(parameterKey(pair.point)).pairs.push(pair);
+  }
+  for (const group of groups.values()) {
+    for (const benchmark of group.benchmarks.values())
+      benchmark.series = [...benchmark.series.values()];
+    group.benchmarks = [...group.benchmarks.values()];
+  }
+  return {pairs, groups};
+}
+
+export function valueBounds(values) {
+  let min = Infinity,
+    max = -Infinity;
+  for (const value of values) {
+    min = Math.min(min, value);
+    max = Math.max(max, value);
+  }
+  return values.length ? {min, max} : null;
 }

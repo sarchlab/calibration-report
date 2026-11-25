@@ -20,9 +20,11 @@ import {
 } from 'react';
 import {Benchmark, Summary} from './Charts.jsx';
 import {PointProvider} from './PointDetails.jsx';
-import {comparisonPairs, isMarked} from './model.js';
+import {indexReport} from './model.js';
+import {PageControls, pageWindow} from './Pagination.jsx';
 
-const noPairs = [];
+const emptyView = {pairs: [], benchmarks: []};
+const benchmarkPageSizes = [5, 10, 20, 50];
 const storageKey = 'calibration-report-theme';
 const colorManager = localStorageColorSchemeManager({key: storageKey});
 const mantineTheme = createTheme({
@@ -210,6 +212,10 @@ function RunProgress({progress, live}) {
 export function Report({snapshot, revision = 0, waiting = false}) {
   const {report, benchmarks, data, progress} = snapshot;
   const [chosenGroup, setGroup] = useState(undefined);
+  const [pages, setPages] = useState(() => new Map());
+  const setPage = useCallback((key, value) => {
+    setPages((previous) => new Map(previous).set(key, value));
+  }, []);
   const [preferences, setPreferences] = useState(() => new Map());
   const setPreference = useCallback(
     (key, value) =>
@@ -230,18 +236,34 @@ export function Report({snapshot, revision = 0, waiting = false}) {
       ]),
     };
   }, [scheme]);
-  const {measured, pairs, groupIds} = useMemo(() => {
-    const measured = data.filter(
-      (point) =>
-        Object.values(point.values).some(Number.isFinite) ||
-        Object.keys(point.statuses ?? {}).some((id) => isMarked(point, id)),
-    );
-    return {
-      measured,
-      pairs: comparisonPairs(measured, benchmarks),
-      groupIds: [...new Set(measured.map((point) => point.group))],
-    };
-  }, [data, benchmarks]);
+  const index = useMemo(
+    () => indexReport(data, benchmarks),
+    [data, benchmarks],
+  );
+  const {pairs} = index;
+  const groupIds = [...index.groups.keys()];
+  // Clamp every remembered page on a live update, including inactive views.
+  // Persist the clamp so later growth does not unexpectedly restore an old page.
+  useEffect(() => {
+    setPages((previous) => {
+      let next = previous;
+      for (const [key, settings] of previous) {
+        const [groupId, benchmarkId] = JSON.parse(key);
+        const view = index.groups.get(groupId) ?? emptyView;
+        const count =
+          benchmarkId === undefined
+            ? view.benchmarks.length
+            : (view.benchmarks.find((benchmark) => benchmark.id === benchmarkId)
+                ?.series.length ?? 0);
+        const {page} = pageWindow(count, settings, settings.size);
+        if (page !== settings.page) {
+          if (next === previous) next = new Map(previous);
+          next.set(key, {...settings, page});
+        }
+      }
+      return next;
+    });
+  }, [index]);
   const group =
     (chosenGroup === null && pairs.length) || groupIds.includes(chosenGroup)
       ? chosenGroup
@@ -252,19 +274,14 @@ export function Report({snapshot, revision = 0, waiting = false}) {
   useEffect(() => {
     if (chosenGroup !== group) setGroup(group);
   }, [chosenGroup, group]);
-  const {groupPairs, byBenchmark, pairsByBenchmark} = useMemo(() => {
-    const groupPairs = overview
-      ? pairs
-      : pairs.filter((pair) => pair.group === group);
-    return {
-      groupPairs,
-      byBenchmark: Map.groupBy(
-        measured.filter((point) => point.group === group),
-        (point) => point.benchmark,
-      ),
-      pairsByBenchmark: Map.groupBy(groupPairs, (pair) => pair.point.benchmark),
-    };
-  }, [group, overview, pairs, measured]);
+  const view = index.groups.get(group) ?? emptyView;
+  const groupPairs = overview ? pairs : view.pairs;
+  const benchmarkPageKey = JSON.stringify([group]);
+  const benchmarkWindow = pageWindow(
+    view.benchmarks.length,
+    pages.get(benchmarkPageKey),
+    10,
+  );
   const views = groupIds.map((id) => ({id, name: report.groups[id].name}));
   if (pairs.length) views.unshift({id: null, name: 'Overview'});
   useEffect(() => {
@@ -355,19 +372,37 @@ export function Report({snapshot, revision = 0, waiting = false}) {
               id="charts"
               aria-label="Benchmark plots"
             >
-              {!overview &&
-                Array.from(byBenchmark, ([id, rows]) => (
-                  <Benchmark
-                    key={JSON.stringify([group, id])}
-                    id={id}
-                    rows={rows}
-                    meta={benchmarks[id]}
-                    pairs={pairsByBenchmark.get(id) ?? noPairs}
-                    theme={theme}
-                    preferences={preferences}
-                    setPreference={setPreference}
+              {!overview && view.benchmarks.length > 0 && (
+                <>
+                  <PageControls
+                    label="Benchmark"
+                    noun="benchmarks"
+                    count={view.benchmarks.length}
+                    window={benchmarkWindow}
+                    sizes={benchmarkPageSizes}
+                    onChange={(value) => setPage(benchmarkPageKey, value)}
                   />
-                ))}
+                  {view.benchmarks
+                    .slice(benchmarkWindow.start, benchmarkWindow.end)
+                    .map((benchmark) => {
+                      const pageKey = JSON.stringify([group, benchmark.id]);
+                      return (
+                        <Benchmark
+                          key={pageKey}
+                          id={benchmark.id}
+                          series={benchmark.series}
+                          meta={benchmarks[benchmark.id]}
+                          pairs={benchmark.pairs}
+                          theme={theme}
+                          preferences={preferences}
+                          setPreference={setPreference}
+                          pagination={pages.get(pageKey)}
+                          setPagination={(value) => setPage(pageKey, value)}
+                        />
+                      );
+                    })}
+                </>
+              )}
             </section>
           </Tabs.Panel>
         </Tabs>

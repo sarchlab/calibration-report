@@ -262,3 +262,11 @@ a { color: var(--link); text-underline-offset: 3px; }
 
 .mantine-Paper-root { background: var(--surface); color: var(--text); border-color: var(--border); }
 .point-controls .mantine-ActionIcon-icon { color: inherit; font-size: inherit; }
+
+.page-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; font-size: 12px; color: var(--muted); }
+.page-range { font-variant-numeric: tabular-nums; }
+.page-navigation { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.page-jump, .page-size { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.page-jump .mantine-NumberInput-root { width: 62px; }
+.page-size .mantine-NativeSelect-root { width: 64px; }
+.page-controls button { touch-action: manipulation; }

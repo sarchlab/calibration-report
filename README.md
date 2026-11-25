@@ -23,6 +23,14 @@ JSON Schema validates the structure. Producers and consumers also check cross-re
 
 Within a tab, the renderer makes one plot for each benchmark and non-scaling parameter combination. Each value key is a curve over `x`. Each benchmark occupies a full-width card. Its series cards wrap into three, two, or one columns as the available content width narrows, with equal widths and heights within that benchmark. Different benchmarks can have different series-card heights. Series cards use the available width beside the sidebar, including when a narrow landscape view opens point details.
 
+## Pagination and large reports
+
+Device views show 10 benchmarks per page and 6 parameter series per benchmark by default. Each level has page buttons, a direct page-number field (Enter or blur to apply), and a page-size selector. Benchmark page sizes are 5, 10, 20 or 50; series page sizes are 6, 12, 24 or 48. Changing the page size keeps the first visible item on the resulting page. All benchmark and series pages remain accessible.
+
+Page numbers and sizes are remembered independently for each device and each benchmark while the report is open. Live updates retain valid page numbers and clamp pages that no longer exist to the last available page, including for inactive devices. Later growth does not restore an obsolete page number. Only the visible benchmark and series pages mount plots. Leaving a selected plot's page closes its details.
+
+Pagination never changes the summary population: device and Overview summaries use all eligible comparisons, and benchmark-wide error uses every eligible comparison in that benchmark. The renderer builds a device/benchmark/series index once per data revision, computes exact Kendall statistics in O(n log n) time with tie-aware Fenwick counts, and avoids passing large arrays as function arguments. Input remains one schema-compatible `data.json`; no producer-side summary or pagination files are needed.
+
 ## Accuracy summary
 
 The Overview aggregates the qualified comparisons from all groups. Each group shows only its own comparisons. Both views include a ranked signed-error plot, a cumulative distribution of absolute relative error, and a measured-versus-simulated scatter plot. A comparison requires two positive measurements at the same point and one declared hardware series with the same unit as the simulator series. Ambiguous hardware references are omitted. The S-curve uses signed error, `(simulated - measured) / min(simulated, measured)`. The CDF takes the absolute value of the same error.
@@ -43,7 +51,7 @@ Keyboard users can Tab to a chart and use arrow keys, Home, or End to inspect po
 
 ## Validation
 
-Run `npm test` for the React interaction and statistics checks plus the Python static-server checks. The UI tests render real React and Mantine components in jsdom with a mocked canvas drawing context; verify actual hover, mobile tapping, layout, scrolling, and pinch zoom in a browser as well. `npm run build` verifies the production bundle.
+Run `npm test` for the React interaction and statistics checks plus the Python static-server checks. The statistics tests compare tied and randomized inputs to the quadratic definition and check exact counts at 455,291 pairs. Pagination tests cover both levels, unchanged summary populations, device switching, point-detail cleanup and live-update clamping. The UI tests render real React and Mantine components in jsdom with a mocked canvas drawing context; verify actual hover, mobile tapping, layout, scrolling, and pinch zoom in a browser as well. `npm run build` verifies the production bundle.
 
 ## Build and hosting
 

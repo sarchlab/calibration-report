@@ -207,6 +207,13 @@ export function PointProvider({
     setSelection(null);
     setHover(null);
   }, []);
+  const removePlot = useCallback(
+    (id) => {
+      if (selectedRef.current?.id === id) close();
+      else setHover((current) => (current?.id === id ? null : current));
+    },
+    [close],
+  );
   const select = useCallback(
     (plot, index) => {
       if (!selectedRef.current && landscape)
@@ -323,6 +330,7 @@ export function PointProvider({
     showHover,
     browse,
     contentRef,
+    removePlot,
     benchmarks,
     groups,
   };
