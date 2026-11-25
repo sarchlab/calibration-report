@@ -49,13 +49,19 @@ let selectedGroup;
 let previousCharts;
 let pointContext;
 let closePointDetails = () => {};
+let openPointDetails;
 let pointTooltipId = 0;
+const desktopSidebar = matchMedia('(min-width: 821px) and (hover: hover) and (pointer: fine)');
+desktopSidebar.addEventListener('change', () => openPointDetails?.focusIfHidden());
+const temporaryLandscapeSidebar = matchMedia('(max-width: 820px) and (orientation: landscape), (hover: none) and (orientation: landscape), (pointer: coarse) and (orientation: landscape)');
 
-document.addEventListener('pointerdown', event => {
-  if (!event.target.closest('.interactive-plot')) closePointDetails();
+// Dismiss after activation: shrinking the page during pointerdown moves click targets.
+document.addEventListener('click', event => {
+  if (openPointDetails && !openPointDetails.wrapper.contains(event.target) &&
+      !openPointDetails.detail.contains(event.target)) closePointDetails();
 });
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape') closePointDetails();
+  if (event.key === 'Escape') closePointDetails(true);
 });
 
 const detailNumber = new Intl.NumberFormat('en-US', {maximumSignificantDigits: 7});
@@ -165,6 +171,7 @@ function interactivePlot(canvas, points) {
   const text = el('div', 'point-description');
   text.setAttribute('aria-live', 'polite');
   text.setAttribute('aria-atomic', 'true');
+  const previewHint = el('p', 'point-preview-hint', 'Click for full details');
   const controls = el('div', 'point-controls');
   const hint = el('p', 'point-hint', 'Hover or tap a point · Arrow keys browse');
   let selected = -1;
@@ -175,31 +182,66 @@ function interactivePlot(canvas, points) {
   canvas.setAttribute('aria-label', canvas.getAttribute('aria-label') +
     '. Interactive data points. Use arrow keys to browse; Escape to close.');
 
-  function hide() {
+  function hide(restoreFocus = false, keepLayout = false) {
+    const wasPinned = pinned;
+    if (openPointDetails?.wrapper === wrapper) {
+      openPointDetails = undefined;
+      if (!keepLayout) document.body.classList.remove('point-details-open');
+    }
     detail.hidden = ring.hidden = true;
     wrapper.classList.remove('point-pinned');
+    detail.classList.remove('point-detail-pinned');
+    if (detail.parentElement !== wrapper) wrapper.append(detail);
     selected = -1;
     pinned = false;
     canvas.style.cursor = '';
+    if (restoreFocus && wasPinned) {
+      if (temporaryLandscapeSidebar.matches) canvas.scrollIntoView({block: 'nearest', inline: 'nearest'});
+      canvas.focus({preventScroll: true});
+    }
+  }
+
+  function sourceHidden() {
+    return pinned && desktopSidebar.matches && !document.body.classList.contains('overview-view') &&
+      wrapper.closest('#summary');
+  }
+
+  function focusIfHidden() {
+    if (sourceHidden()) text.focus({preventScroll: true});
   }
 
   function show(index, pin) {
+    if (!pin && openPointDetails?.pinned) return;
     if (selected === index && pinned === pin && !detail.hidden) return;
+    const openingSidebar = pin && !openPointDetails?.pinned && temporaryLandscapeSidebar.matches;
     // Keep this plot's controls visible and focused when browsing its points.
-    if (closePointDetails !== hide) closePointDetails();
+    if (closePointDetails !== hide) closePointDetails(false, pin);
+    const newlyPinned = pin && !pinned;
     closePointDetails = hide;
+    openPointDetails = {wrapper, detail, pinned: pin, focusIfHidden};
+    document.body.classList.toggle('point-details-open', pin);
     selected = index;
     pinned = pin;
     const point = points[index];
     text.replaceChildren(renderPointDescription(point.description));
     counter.textContent = (index + 1) + ' / ' + points.length;
     wrapper.classList.toggle('point-pinned', pin);
+    detail.classList.toggle('point-detail-pinned', pin);
+    // A summary can be hidden behind its selected details; keep the panel
+    // outside that ancestor and restore it to the plot when dismissed.
+    if (pin && detail.parentElement !== document.body) document.body.append(detail);
     detail.setAttribute('role', pin ? 'group' : 'tooltip');
     detail.setAttribute('aria-label', 'Point details');
+    text.tabIndex = pin ? 0 : -1;
+    previewHint.hidden = pin;
     controls.hidden = !pin;
     detail.hidden = ring.hidden = false;
     ring.style.left = (100 * point.x / (canvas.width / 2)) + '%';
     ring.style.top = (100 * point.y / (canvas.height / 2)) + '%';
+    if (newlyPinned) focusIfHidden();
+    // The first landscape pin rewraps earlier cards, which can push this chart
+    // offscreen. Preserve its visibility without scrolling on point navigation.
+    if (openingSidebar) canvas.scrollIntoView({block: 'nearest', inline: 'nearest'});
   }
 
   function nearest(event, pointerType = event.pointerType) {
@@ -215,19 +257,25 @@ function interactivePlot(canvas, points) {
     return best;
   }
 
-  const previous = el('button', '', 'Previous');
   const counter = el('span');
-  const next = el('button', '', 'Next');
-  const close = el('button', '', 'Close');
   function step(delta) {
-    show((selected + delta + points.length) % points.length, true);
+    show(((selected + delta) % points.length + points.length) % points.length, true);
   }
-  for (const button of [previous, next, close]) button.type = 'button';
-  previous.addEventListener('click', () => step(-1));
-  next.addEventListener('click', () => step(1));
-  close.addEventListener('click', () => { hide(); canvas.focus({preventScroll: true}); });
-  controls.append(previous, counter, next, close);
-  detail.append(text, controls);
+  function pointButton(symbol, label, action) {
+    const button = el('button', '', symbol);
+    button.type = 'button';
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.addEventListener('click', action);
+    return button;
+  }
+  const previousTen = pointButton('<<', 'Previous 10 points', () => step(-10));
+  const previous = pointButton('<', 'Previous point', () => step(-1));
+  const next = pointButton('>', 'Next point', () => step(1));
+  const nextTen = pointButton('>>', 'Next 10 points', () => step(10));
+  const close = pointButton('×', 'Close point details', () => hide(true));
+  controls.append(previousTen, previous, counter, next, nextTen, close);
+  detail.append(text, previewHint, controls);
   surface.append(canvas, ring);
   wrapper.append(surface, detail, hint);
   canvas.addEventListener('pointermove', event => {
@@ -244,10 +292,11 @@ function interactivePlot(canvas, points) {
   canvas.addEventListener('click', event => {
     const index = nearest(event, event.pointerType || clickPointerType);
     clickPointerType = undefined;
-    if (index < 0 || (pinned && index === selected)) hide();
+    if (index < 0) closePointDetails();
+    else if (pinned && index === selected) hide();
     else show(index, true);
   });
-  canvas.addEventListener('keydown', event => {
+  function browse(event) {
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Enter', ' '].includes(event.key)) return;
     event.preventDefault();
     if (event.key === 'End') show(points.length - 1, true);
@@ -255,11 +304,24 @@ function interactivePlot(canvas, points) {
     else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') step(-1);
     else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') step(1);
     else show(selected, true);
+  }
+  canvas.addEventListener('keydown', event => {
+    if (pinned && event.key === 'Tab' && !event.shiftKey) {
+      event.preventDefault();
+      text.focus({preventScroll: true});
+    } else browse(event);
+  });
+  text.addEventListener('keydown', event => {
+    if (event.key === 'Tab' && event.shiftKey && !sourceHidden()) {
+      event.preventDefault();
+      canvas.focus({preventScroll: true});
+    }
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) browse(event);
   });
   wrapper.addEventListener('focusout', event => {
-    // Touch browsers can blur the canvas without focusing the tapped button.
-    // Outside taps are handled by pointerdown; a null focus target is ambiguous.
-    if (event.relatedTarget && !wrapper.contains(event.relatedTarget)) hide();
+    // Keep pinned layout stable while focus moves before a click, including
+    // touch browsers' null focus targets. Click, Close, and Escape dismiss it.
+    if (!pinned && event.relatedTarget && !wrapper.contains(event.relatedTarget)) hide();
   });
   return wrapper;
 }
@@ -628,6 +690,7 @@ function plotBenchmark(id, rows, meta, pairs) {
   const units = Map.groupBy(curves, curve => curve.unit);
   const axisUnit = meta.params[meta.scaling_param].unit;
   const xLabel = displayName(meta.scaling_param) + (axisUnit ? ' (' + axisUnit + ')' : '');
+  const seriesGrid = el('div', 'series-grid');
 
   for (const [parameters, group] of fixed) {
     group.sort((a, b) => a.x - b.x);
@@ -657,8 +720,9 @@ function plotBenchmark(id, rows, meta, pairs) {
       );
       section.append(plot);
     }
-    card.append(section);
+    seriesGrid.append(section);
   }
+  card.append(seriesGrid);
   return card;
 }
 
@@ -760,6 +824,7 @@ function renderCharts(report, benchmarks, data) {
     }
   }
 
+  document.body.classList.toggle('overview-view', selectedGroup === null);
   const groupPairs = selectedGroup === null ? pairs : pairs.filter(pair => pair.group === selectedGroup);
   renderSummary(groupPairs, selectedGroup, report.groups);
   const list = document.querySelector('#charts');

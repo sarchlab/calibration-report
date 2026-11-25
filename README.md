@@ -21,7 +21,7 @@ JSON Schema validates the structure. Producers and consumers also check cross-re
 - Every series key in a point's `values` or `statuses` is declared in its benchmark's `values`. Status entries describe unavailable results.
 - Each combination of group, benchmark, `x`, and non-scaling parameter values appears at most once.
 
-Within a tab, the renderer makes one plot for each benchmark and non-scaling parameter combination. Each value key is a curve over `x`.
+Within a tab, the renderer makes one plot for each benchmark and non-scaling parameter combination. Each value key is a curve over `x`. Each benchmark occupies a full-width card. Its series cards wrap into three, two, or one columns as the available content width narrows, with equal widths and heights within that benchmark. Different benchmarks can have different series-card heights. Series cards use the available width beside the sidebar, including when a narrow landscape view opens point details.
 
 ## Accuracy summary
 
@@ -33,11 +33,13 @@ For a positive axis with at least three distinct values, the default scale minim
 
 ## Point details
 
-Hover over a point in a benchmark plot, S-curve, CDF, or scatter plot to inspect its benchmark, group, parameters, and measurements. Details separate the benchmark and GPU header, measured and simulated values, error metrics, and configuration. Comparison plots show signed error with its direction; the S-curve includes rank and the CDF includes absolute error and cumulative fraction (labeled CDF percentile). Values use the same units as the axes.
+Hover over a point in a benchmark plot, S-curve, CDF, or scatter plot for a compact preview of its measurements and error. Click, tap, or use keyboard navigation for full details. Details separate the benchmark and GPU header, measured and simulated values, error metrics, and configuration. Comparison plots show signed error with its direction; the S-curve includes rank and the CDF includes absolute error and cumulative fraction (labeled CDF percentile). Values use the same units as the axes.
 
-Click or tap a point to keep its details open below the chart. Touch targets include a 28 CSS-pixel radius around each point; the nearest point is selected. Previous and Next browse every plotted point, including overlapping points. Tap the selected point again, tap outside the chart, or use Close to dismiss. On phones, details stay in the page below the chart so they do not cover the selected point or block scrolling.
+Desktop reserves a permanent 360px right sidebar plus gutters. Device views show their three accuracy-summary charts stacked in that sidebar; Overview keeps its summary charts in the main area and shows the report's existing run statistics in the sidebar. Selecting a point replaces the sidebar content with full details, and dismissing it restores the summaries or statistics without changing the report width.
 
-Keyboard users can Tab to a chart and use arrow keys, Home, or End to inspect points. Escape dismisses details. Switching views, changing scales or themes, or receiving changed live data clears the selection; unchanged live polling preserves it.
+Narrow screens (820px or less) and touch-first devices keep summaries and run statistics in the page. Selecting a point opens a 300px sidebar in landscape, reserving width until dismissed, or a bottom panel occupying at most half the viewport in portrait. While the portrait panel is open, extra space at the end of the page lets even the last chart scroll above it. Opening a landscape sidebar keeps the selected chart in view after cards rewrap; Close and Escape also reveal its chart after restoring the width. Point navigation does not scroll the page. Panel content scrolls independently while the navigation controls remain visible. Touch targets include a 28 CSS-pixel radius around each point; the nearest point is selected. The compact `<` and `>` buttons move one point; `<<` and `>>` move ten points. Navigation wraps around both ends, including for series with fewer than ten points, and includes overlapping points. The `×` button closes details; all buttons have English accessible labels and hover titles. Selecting another point updates the sole panel without an intermediate resize; hovering other plots does not replace a pinned selection. Tap the selected point again, click or tap outside its plot and panel, or use Close to dismiss.
+
+Keyboard users can Tab to a chart and use arrow keys, Home, or End to inspect points. Tab from a selected chart enters the details panel; Left/Right and Home/End also browse while its content is focused. Tabbing away keeps selected details open. Escape dismisses details and returns focus to the selected chart, as Close does. Switching views, changing scales or themes, or receiving changed live data clears the selection; unchanged live polling preserves it.
 
 ## Validation
 
