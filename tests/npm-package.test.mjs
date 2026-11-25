@@ -28,7 +28,7 @@ before(async () => {
   // Exercise prepack in a copied checkout, preserving the real preview/data.
   const fixture = join(temporary, 'source');
   await mkdir(fixture);
-  for (const path of ['package.json', 'README.md', 'vite.config.js', 'bin', 'site', 'data.schema.json'])
+  for (const path of ['package.json', 'README.md', 'LICENSE', 'vite.config.js', 'bin', 'site', 'data.schema.json'])
     await cp(join(root, path), join(fixture, path), {
       recursive: true, filter: (source) => source !== join(root, 'site/data.json'),
     });
@@ -68,15 +68,22 @@ test('packing leaves the source checkout report data unchanged', async () => {
 
 test('published contents exclude local data, source maps and development files', async () => {
   assert.deepEqual(packedFiles.filter((name) => !name.startsWith('dist/assets/')), [
-    'README.md', 'bin/calibration-report.js', 'data.schema.json', 'dist/index.html', 'dist/THIRD_PARTY_LICENSES.md', 'package.json',
+    'LICENSE', 'README.md', 'bin/calibration-report.js', 'data.schema.json', 'dist/index.html', 'dist/LICENSE', 'dist/THIRD_PARTY_LICENSES.md', 'package.json',
   ]);
   assert.equal(packedFiles.filter((name) => name.startsWith('dist/assets/')).length, 2);
   assert(packedFiles.every((name) => !name.endsWith('data.json') && !name.endsWith('.map')));
   const installed = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'));
+  assert.equal(installed.license, 'MIT');
   assert.equal(installed.dependencies, undefined);
   assert.equal(installed.scripts.install, undefined);
   assert.equal(installed.scripts.postinstall, undefined);
   assert.deepEqual((await readdir(join(install, 'node_modules'))).filter((name) => !name.startsWith('.')), ['calibration-report']);
+});
+
+test('the package and built viewer preserve the project MIT license', async () => {
+  const source = await readFile(join(root, 'LICENSE'));
+  assert.deepEqual(await readFile(join(packageRoot, 'LICENSE')), source);
+  assert.deepEqual(await readFile(join(packageRoot, 'dist/LICENSE')), source);
 });
 
 test('the bundled viewer preserves complete dependency license notices', async () => {
@@ -101,7 +108,7 @@ test('installed executable generates byte-identical data and relative assets in 
   const html = await readFile(join(output, 'index.html'), 'utf8');
   const references = [...html.matchAll(/(?:src|href)="\.\/([^"]+)"/g)].map((match) => match[1]);
   assert.equal(references.length, 2);
-  for (const asset of ['index.html', 'THIRD_PARTY_LICENSES.md', ...references])
+  for (const asset of ['index.html', 'LICENSE', 'THIRD_PARTY_LICENSES.md', ...references])
     assert.deepEqual(await readFile(join(output, asset)), await readFile(join(packageRoot, 'dist', asset)));
   const empty = join(temporary, 'existing empty');
   await mkdir(empty);

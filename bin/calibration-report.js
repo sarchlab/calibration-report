@@ -54,6 +54,7 @@ async function main() {
     .filter((name) => /\.(js|css)$/.test(name));
   const files = [
     'index.html',
+    'LICENSE',
     'THIRD_PARTY_LICENSES.md',
     ...assets.map((name) => join('assets', name)),
   ];

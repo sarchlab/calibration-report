@@ -61,7 +61,7 @@ The npm package includes the prebuilt viewer and a small command-line tool. Runn
 npx calibration-report@0.3.0 --data ./data.json --out ./report
 ```
 
-The output contains `index.html`, bundled `assets/`, `THIRD_PARTY_LICENSES.md`, and a byte-for-byte copy of the supplied `data.json`. Publish this directory on a static host, or preview it over HTTP:
+The output contains `index.html`, bundled `assets/`, `LICENSE`, `THIRD_PARTY_LICENSES.md`, and a byte-for-byte copy of the supplied `data.json`. Publish this directory on a static host, or preview it over HTTP:
 
 ```sh
 python3 -m http.server 8000 --directory ./report
@@ -93,8 +93,12 @@ The viewer reads only `data.json`. With `report.live: true`, it shows a live ind
 
 ## Package publishing
 
-`npm pack` runs the production build through `prepack`. The publish allowlist includes only the CLI, built HTML/JavaScript/CSS, generated third-party license notices, JSON Schema, README and package metadata. Vite collects the full license text for dependencies included in the final browser bundle. Keep `THIRD_PARTY_LICENSES.md` with the generated site when redistributing it. The package excludes exported report data, source maps, source files, tests and development dependencies. Consumers do not run a build during installation. Inspect the tarball and run `npm test` before publishing; version changes should update both `package.json` and `package-lock.json`.
+`npm pack` runs the production build through `prepack`. The package includes only the CLI, built HTML/JavaScript/CSS, the project MIT license, generated third-party license notices, JSON Schema, README and package metadata. Vite collects the full license text for dependencies included in the final browser bundle. The build copies the root `LICENSE` into the static output. Keep both `LICENSE` and `THIRD_PARTY_LICENSES.md` with the generated site when redistributing it. The package excludes exported report data, source maps, source files, tests and development dependencies. Consumers do not run a build during installation. Inspect the tarball and run `npm test` before publishing; version changes should update both `package.json` and `package-lock.json`.
 
 ## Repository scope
 
 Simulator repositories own benchmark collection, simulation orchestration, and adapters that export this format. This repository owns the format, viewer, and live HTTP server.
+
+## License
+
+Calibration Report is licensed under the [MIT License](LICENSE). The bundled dependencies retain their own license notices in `THIRD_PARTY_LICENSES.md`.

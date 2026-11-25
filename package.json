@@ -30,6 +30,7 @@
   "files": [
     "bin/calibration-report.js",
     "dist/index.html",
+    "dist/LICENSE",
     "dist/THIRD_PARTY_LICENSES.md",
     "dist/assets/*.js",
     "dist/assets/*.css",
@@ -45,5 +46,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "license": "MIT"
 }
