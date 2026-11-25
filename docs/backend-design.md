@@ -170,9 +170,9 @@ Some rules compare a row with a set of rows, so they cannot be constraints. The 
 
 - `non_scaling_params` has exactly the declared parameters other than the scaling parameter.
 - `values` has at least one key (`minProperties: 1`).
-- A benchmark has at most 32 parameters and 64 series, which bounds one serialized point to well under 100 KB. A run has at most 16 groups, 1,000 benchmarks, and 32 distinct role-tagged series keys, which bounds the exact part of a summary (§5).
+- A benchmark has at most 32 parameters and 64 series, so one serialized point fits well within the 4 MB plot-chunk budget (§5). A run has at most 16 groups, 1,000 benchmarks, and 32 distinct role-tagged series keys, which bounds the exact part of a summary (§5).
 - A run's declared metadata (`report` and `benchmarks`, serialized as JSON) is at most **2 MB**, checked by `open_run` on create and on every append. Keys, names, and units are bounded in UTF-8 bytes (`octet_length`) and contain no control characters, so JSON escaping at most doubles them. The manifest adds `benchmark_keys` (≤ 1,000 × 403 bytes ≈ 400 KB), `plots` arrays (≤ 16 × 1,000 × ≈ 12 bytes ≈ 190 KB), `group_order`, and `progress` (≤ 4 KB), so it stays under about 2.6 MB, well inside the 6 MB Function limit.
-- Metadata is append-only. `cr.open_run` may add groups, benchmarks, and series. It rejects a changed scaling parameter, series unit or role, or group name, and **any change to an existing benchmark's parameter set**, because stored points were validated against that set. It also rejects a role-tagged series key whose name, unit, or role differs from an earlier declaration of the same key in the run, so the 32-key cap bounds distinct series definitions.
+- Metadata is append-only. `cr.open_run` may add groups, benchmarks, and series and update the title and description; every other difference is rejected (§4), including **any change to an existing benchmark's parameter set**, because stored points were validated against that set. It also rejects a role-tagged series key whose name, unit, or role differs from an earlier declaration of the same key in the run, so the 32-key cap bounds distinct series definitions.
 
 `plots.visible` is true when the plot has a point with a finite value or a drawn status (`failed`, `verification_failed`, `timeout`, `memory_limit`, `unsupported`, `running`), mirroring `isMarked` and `visibleStates` in `site/model.js`, which `indexReport` uses to drop rows. `cr.put_points` recomputes it for touched plots, so it can turn false.
 
@@ -197,7 +197,7 @@ Each function locks the run row (`SELECT ... FOR UPDATE`; `open_run` first runs 
 
 | Call | Arguments | Effect |
 |---|---|---|
-| `cr.open_run(run_key, report, benchmarks, progress)` | `report`, `benchmarks`, and `progress` objects from `data.json` (`report.live` is ignored) | Creates the run in state `running` with the given `progress`, appends metadata to a `running` run, or **reopens a `failed` run**. A changed `title` or `description` is updated in place. Each of these increments `revision` and sets `updated_at`; a call that changes nothing writes nothing. Any other difference from stored metadata (for example a parameter unit or an untagged series name) is rejected with an error naming the field. Never touches the progress of an existing run. Rejects a `completed` run, which is terminal. |
+| `cr.open_run(run_key, report, benchmarks, progress)` | `report`, `benchmarks`, and `progress` objects from `data.json` (`report.live` is ignored) | Creates the run in state `running` with the given `progress`, appends metadata to a `running` run, or **reopens a `failed` run**. A changed `title` or `description` is updated in place. Each of these increments `revision` and sets `updated_at`; a call that changes nothing writes nothing. Any other difference from stored metadata (for example a parameter unit or an untagged series name) is rejected with an error naming the field. Stored entities absent from the call stay unchanged (omission is not a difference), so matrix jobs can declare only their own benchmarks. Never touches the progress of an existing run. Rejects a `completed` run, which is terminal. |
 | `cr.put_points(run_key, points, progress)` | array of `data.json` points (may be empty); optional `progress` | Requires `running`. Upserts plots, points, and observations; recomputes `visible` for touched plots; replaces `progress` when given; sets `updated_at`; increments `revision`. |
 | `cr.heartbeat(run_key)` | | Requires `running`. Sets `updated_at` only. It does **not** increment `revision`, so it never invalidates a cached summary (§5). |
 | `cr.finish_run(run_key, state, progress)` | `state` is `completed` or `failed` | From `running`, sets the final state and progress and increments `revision`. Succeeds without writing if the run is already in the requested state; rejects the other terminal state. |
@@ -330,7 +330,7 @@ Sampled charts say so ("3,000 of 212,000 comparisons shown").
   "scurve": {"sample": [0], "rank": [118000]},
   "cdf": {"log": true, "sample": [0], "rank": [160500]},
   "scatter": {"ns": {"log": true, "count": 212000, "sample": [0], "stats": [["Kendall’s τ-b", "0.912"], ...]}},
-  "benchmark_stats": [[0, 1184, [["Average error", "12.0%"], ["Max error", "88.1%"]]]]
+  "benchmark_stats": [[0, 5320, [["Average error", "12.0%"], ["Max error", "88.1%"]]]]
 }
 ```
 
@@ -346,12 +346,12 @@ Each scope has one record in the site-wide Netlify Blobs store `getStore({name: 
 
 On each request the Function:
 
-1. Reads the record. If it is `completed` and its `key` matches the request, returns it without touching the database. Only such a **warm** hit avoids the database; a completed run with no record computes once.
+1. Reads the record. If it is `completed` and its `key` matches the request, returns it without touching the database. Only such a **warm** hit avoids the database; a completed run with no record computes its summary (step 4).
 2. Otherwise reads the run's state and revision. If the record's revision is current, returns it.
 3. Otherwise, if the record is younger than `SUMMARY_MIN_INTERVAL` and the run is `running` or `failed`, returns it; the body states its `revision` and `computed_at`, and the viewer shows "summary as of …".
-4. Otherwise computes, writes, and returns. Only the first request after a run becomes `completed` bypasses the interval (the final computation), so its final summary is exact.
+4. Otherwise computes, writes, and returns. Requests after a run becomes `completed` bypass the interval until the final summary is stored, so it is exact; overlapping requests may each compute it, as the no-lock policy accepts.
 
-The write uses `onlyIfMatch` with the ETag read in step 1 (or `onlyIfNew`), so an older computation never overwrites a newer record. There is no claim or lease: requests that arrive while a computation runs (about 10 s) may each compute. **Normally there is at most one computation per interval per scope; concurrent requests may duplicate it**, bounded by the number of concurrent viewers, which is small. A `failed` run is not terminal (`open_run` can reopen it), so its summary costs one small query per request and follows the interval like a live run.
+The write uses `onlyIfMatch` with the ETag read in step 1 (or `onlyIfNew`), so an older computation never overwrites a newer record. If a completed run's write loses, the Function rereads the record: it returns a stored completed result for the same revision, or conditionally publishes its own if the stored revision is older. There is no claim or lease: requests that arrive while a computation runs (about 10 s) may each compute. **Normally there is at most one computation per interval per scope; concurrent requests may duplicate it**, bounded by the number of concurrent viewers, which is small. A `failed` run is not terminal (`open_run` can reopen it), so its summary costs one small query per request and follows the interval like a live run.
 
 ### Retention and deletion
 
@@ -368,7 +368,7 @@ A build setting, `VITE_HOSTED=1`, is set only in the Netlify build (`netlify.tom
 
 `Report` consumes the interface:
 
-- Tabs follow `group_order` (groups with a non-zero visible plot count); Overview exists when the Overview summary's `count` is non-zero. The file source derives the same from `indexReport` (`site/App.jsx:244,285-286`).
+- Tabs follow `group_order` (groups with a non-zero visible plot count). With more than one group, Overview is selectable without waiting for a count, and shows an empty state if its summary has zero comparisons; with one group it uses the group's scope (§5). The file source keeps deriving tabs from `indexReport` (`site/App.jsx:244,285-286`).
 - `Summary` and the summary drawings in `site/drawing.js` consume the summary object (exact statistics, sampled series) instead of the full pair list.
 - Benchmark cards take counts from the manifest, rows from `plots` pages, and benchmark-wide error from `benchmark_stats`.
 - A sampled point's details show the sample's own values and derived metrics (error, rank, percentile). The panel also fetches `/points/{plot}/{x}` and merges the raw point only if its `revision` equals the summary's; otherwise it shows it separately, labeled as newer. A response for a selection that has since changed is dropped.
@@ -378,7 +378,7 @@ Polling, API source only:
 - Poll the manifest every 10 s while the run is `running`, not stale, and the tab is visible; every 60 s after 5 minutes without a new revision.
 - Stop once the run is stale (`updated_at` more than 30 minutes old; writers heartbeat every 5 minutes) and offer a manual refresh.
 - On a new revision, refetch the visible `plots` pages.
-- After every manifest poll, including a `304`, re-request the active summary only if the manifest's revision is greater than the summary's **and** `computed_at + min_interval` has passed, so a run that only heartbeats still catches up. On observing `completed`, fetch the final summary once.
+- After every manifest poll, including a `304`, re-request the active summary only if the manifest's revision is greater than the summary's **and** `computed_at + min_interval` has passed, so a run that only heartbeats still catches up. On observing `completed`, fetch the final summary once. On observing `failed` (at load or on a transition) with a manifest revision newer than the summary's, schedule one summary request at `computed_at + min_interval` (or immediately if that has passed), and stop once the revisions match; the manual refresh lets an open viewer discover a reopened run.
 
 Import and export mapping:
 
@@ -413,7 +413,7 @@ Assumptions: three runs per month, each about 6 hours, single group, watched liv
 | Web bandwidth and requests | ≤ 60 |
 | **Total** | **≈ 650–850** |
 
-Duplicated computations (§5) add to the summary line in proportion to concurrent viewers. An unwatched run costs no summary reads, and a finished run's summary is computed once. **On the Free tier this does not fit**: one watched run reads about 8 GB, over the 5 GB monthly database egress limit. There `SUMMARY_MIN_INTERVAL` must be about 10 minutes (≤ 36 reads, ≈ 0.8 GB per run, ≈ 2.4 GB per month), which brings the total to about 400 credits.
+Duplicated computations (§5) add to the summary line in proportion to concurrent viewers. Live plot-page refetches also consume database egress; they are unmeasured, sized in §8 risk 6, and on Free may need the same throttling as summaries. An unwatched run costs no summary reads, and a finished run's summary is computed once (overlapping requests may duplicate that computation). **On the Free tier this does not fit**: one watched run reads about 8 GB, over the 5 GB monthly database egress limit. There `SUMMARY_MIN_INTERVAL` must be about 10 minutes (≤ 36 reads, ≈ 0.8 GB per run, ≈ 2.4 GB per month), which brings the total to about 400 credits.
 
 The polling policy (§6) bounds a forgotten tab; without it, a tab polling every 10 s would keep the database awake around the clock, about 7,200 credits per month.
 
@@ -424,7 +424,7 @@ The polling policy (§6) bounds a forgotten tab; without it, a tab polling every
 3. **Storage billing.** Database storage is free "for now"; Blobs rates are not published on the credits page. The summary store holds about 1 MB per run. If storage becomes expensive, revive the deferred R2 archive.
 4. **Direct-write coupling.** See §4. Revisit if more than a handful of repositories report; a thin write Function could front the same SQL functions without a schema change.
 5. **Summary computation time.** A synchronous Function may run for 60 s ([Functions defaults](https://docs.netlify.com/build/functions/configuration/#default-values)). The aggregated read and pairing of 450,000 points is estimated at about 10 s, unmeasured. If it nears the limit, stream the read; a background Function (≤ 15 minutes) would fit but needs a decision. Longer computations also widen the window in which concurrent requests duplicate work.
-6. **Measurements on a synthetic 450,000-point run** in a database branch: `EXPLAIN (ANALYZE, BUFFERS)` of the summary read, plot pages, and manifest counts against the §3 indexes; bytes per summary read (≈ 22 MB); summary and page sizes against their budgets; storage per run (≈ 100 MB).
+6. **Measurements on a synthetic 450,000-point run** in a database branch: `EXPLAIN (ANALYZE, BUFFERS)` of the summary read, plot pages, and manifest counts against the §3 indexes; bytes per summary read (≈ 22 MB) and per live plot-page refetch; summary and page sizes against their budgets; storage per run (≈ 100 MB).
 7. **Deploy previews copy production data** ([branching](https://docs.netlify.com/build/data-and-storage/netlify-database/#database-branching)). Confirm the copy is cheap or disable database access for previews. Previews share run ids with production but may diverge, so they cache summaries in a deploy-scoped store (`getDeployStore`), never in `summaries`.
 
 Implementation checklist, before the first real run: a constraint smoke test against the migrated DDL (accepted and rejected `data.json` fixtures; oversize and non-scalar `params`; concurrent first `open_run` calls for one key; `finish_run` repeated and conflicting); a shared fixture test of `plots.visible` against `isMarked`; and the measurements in risk 6.
