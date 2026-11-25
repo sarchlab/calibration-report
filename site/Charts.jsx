@@ -9,8 +9,12 @@ import {
   preferLogScale,
   rankingStats,
   visibleStates,
+  valueBounds,
 } from './model.js';
 import {PointDescription, usePoints} from './PointDetails.jsx';
+import {PageControls, pageWindow} from './Pagination.jsx';
+
+const seriesPageSizes = [6, 12, 24, 48];
 
 export function Stats({entries, count}) {
   if (!entries.length) return null;
@@ -78,11 +82,13 @@ export function PlotCanvas({spec, theme, summary = false}) {
     showHover,
     browse,
     contentRef,
+    removePlot,
   } = interaction;
   const canvas = useRef(null),
     wrapper = useRef(null),
     pointer = useRef();
   const id = useId();
+  useLayoutEffect(() => () => removePlot(id), [id, removePlot]);
   const [drawing, setDrawing] = useState(null);
   const [statusDetail, setStatusDetail] = useState('');
   useLayoutEffect(() => {
@@ -281,9 +287,7 @@ function CurvePlot({
     const measures = curves
       .flatMap((curve) => rows.map((row) => row.values[curve.id]))
       .filter(Number.isFinite);
-    const bounds = measures.length
-      ? {min: Math.min(...measures), max: Math.max(...measures)}
-      : null;
+    const bounds = valueBounds(measures);
     const canLog = {x: rows[0].x > 0, y: bounds !== null && bounds.min > 0};
     const scales = {
       x:
@@ -338,17 +342,18 @@ function CurvePlot({
 }
 export function Benchmark({
   id,
-  rows,
+  series: sourceSeries,
   meta,
   pairs,
   theme,
   preferences,
   setPreference,
+  pagination,
+  setPagination,
 }) {
+  const window = pageWindow(sourceSeries.length, pagination, 6);
+  const benchmarkStats = useMemo(() => errorStats(pairs), [pairs]);
   const series = useMemo(() => {
-    const fixed = Map.groupBy(rows, (row) =>
-      JSON.stringify(Object.entries(row.non_scaling_params).sort()),
-    );
     const curves = Object.entries(meta.values)
       .map(([id, info], i) => ({
         id,
@@ -360,32 +365,32 @@ export function Benchmark({
       }))
       .sort((a, b) => a.layer - b.layer);
     const units = Map.groupBy(curves, (curve) => curve.unit);
-    return Array.from(fixed, ([parameters, values]) => {
-      const group = [...values].sort((a, b) => a.x - b.x),
-        points = new Set(group);
-      const groupPairs = pairs.filter((pair) => points.has(pair.point));
-      return {
-        parameters,
-        label: parameterLabel(group[0].non_scaling_params, meta.params),
-        plots: Array.from(units, ([unit, comparable]) => ({
-          unit,
-          comparable,
-          active: comparable.filter((curve) =>
-            group.some((row) => Number.isFinite(row.values[curve.id])),
-          ),
-          plotted: group.filter((row) =>
-            comparable.some(
-              (curve) =>
-                Number.isFinite(row.values[curve.id]) ||
-                isMarked(row, curve.id),
+    return sourceSeries.slice(window.start, window.end).map(
+      ({parameters, rows, pairs: groupPairs}) => {
+        const group = [...rows].sort((a, b) => a.x - b.x);
+        return {
+          parameters,
+          label: parameterLabel(group[0].non_scaling_params, meta.params),
+          plots: Array.from(units, ([unit, comparable]) => ({
+            unit,
+            comparable,
+            active: comparable.filter((curve) =>
+              group.some((row) => Number.isFinite(row.values[curve.id])),
             ),
-          ),
-          pairs: groupPairs.filter((pair) => pair.unit === unit),
-          key: JSON.stringify([rows[0].group, id, parameters, unit]),
-        })).filter((plot) => plot.plotted.length),
-      };
-    });
-  }, [rows, meta, pairs, theme, id]);
+            plotted: group.filter((row) =>
+              comparable.some(
+                (curve) =>
+                  Number.isFinite(row.values[curve.id]) ||
+                  isMarked(row, curve.id),
+              ),
+            ),
+            pairs: groupPairs.filter((pair) => pair.unit === unit),
+            key: JSON.stringify([rows[0].group, id, parameters, unit]),
+          })).filter((plot) => plot.plotted.length),
+        };
+      },
+    );
+  }, [sourceSeries, window.start, window.end, meta, theme, id]);
   const axisUnit = meta.params[meta.scaling_param].unit;
   const xLabel =
     displayName(meta.scaling_param) + (axisUnit ? ' (' + axisUnit + ')' : '');
@@ -401,9 +406,17 @@ export function Benchmark({
       {pairs.length > 0 && (
         <div className="benchmark-error">
           <p>Benchmark-wide error</p>
-          <Stats entries={errorStats(pairs)} count={pairs.length} />
+          <Stats entries={benchmarkStats} count={pairs.length} />
         </div>
       )}
+      <PageControls
+        label={'Series for ' + displayName(id)}
+        noun="series"
+        count={sourceSeries.length}
+        window={window}
+        sizes={seriesPageSizes}
+        onChange={setPagination}
+      />
       <div className="series-grid">
         {series.map((group) => (
           <Paper
@@ -451,9 +464,11 @@ function Scatter({
 }) {
   const {close} = usePoints();
   const key = JSON.stringify(['scatter', scope, unit]);
-  const log =
-    preferences.get(key) ??
-    preferLogScale(pairs.flatMap((pair) => [pair.actual, pair.prediction]));
+  const defaultLog = useMemo(
+    () => preferLogScale(pairs.flatMap((pair) => [pair.actual, pair.prediction])),
+    [pairs],
+  );
+  const log = preferences.get(key) ?? defaultLog;
   const spec = useMemo(
     () => ({kind: 'scatter', pairs, unit, colors, log}),
     [pairs, unit, colors, log],
@@ -527,6 +542,7 @@ export function Summary({
         : [],
     };
   }, [sourcePairs, scope, groups, theme]);
+  const stats = useMemo(() => errorStats(pairs), [pairs]);
   if (!pairs.length) return null;
   return (
     <section id="summary" aria-label="Accuracy summary">
@@ -551,7 +567,7 @@ export function Summary({
         >
           <figcaption>S-curve</figcaption>
           <PlotCanvas spec={ranked} theme={theme} summary />
-          <PlotDetails entries={errorStats(pairs)} count={pairs.length}>
+          <PlotDetails entries={stats} count={pairs.length}>
             <p>
               Negative values are underestimates. Positive values are
               overestimates.
@@ -570,7 +586,7 @@ export function Summary({
           <PlotDetails entries={percentiles} count={pairs.length}>
             <p>|simulated − measured| / min(simulated, measured)</p>
           </PlotDetails>
-          <Stats entries={errorStats(pairs)} count={pairs.length} />
+          <Stats entries={stats} count={pairs.length} />
         </Paper>
         <Paper
           component="figure"

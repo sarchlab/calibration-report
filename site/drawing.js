@@ -387,11 +387,16 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
   }
 
   function comparisonScatter(pairs, unit, colors, log) {
-    const values = pairs.flatMap((pair) => [pair.actual, pair.prediction]);
+    let minimum = Infinity,
+      maximum = -Infinity;
+    for (const pair of pairs) {
+      minimum = Math.min(minimum, pair.actual, pair.prediction);
+      maximum = Math.max(maximum, pair.actual, pair.prediction);
+    }
     const transform = log ? Math.log10 : (n) => n;
     const inverse = log ? (n) => 10 ** n : (n) => n;
-    const low = log ? transform(Math.min(...values)) : 0;
-    const high = transform(Math.max(...values));
+    const low = log ? transform(minimum) : 0;
+    const high = transform(maximum);
     const margin = log ? Math.max((high - low) * 0.04, 0.08) : high * 0.04;
     const range = [log ? inverse(low - margin) : 0, inverse(high + margin)];
     const axisUnit = [displayUnit(unit), log ? 'log' : '']
