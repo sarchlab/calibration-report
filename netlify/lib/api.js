@@ -569,7 +569,8 @@ export async function handleApi(
     if (request.method !== 'GET') throw new HttpError(405, 'GET only');
     const url = new URL(request.url);
     const prefix = `/api/${API_VERSION}/runs`;
-    if (!url.pathname.startsWith(prefix)) throw new HttpError(404, 'Not found');
+    if (url.pathname !== prefix && !url.pathname.startsWith(prefix + '/'))
+      throw new HttpError(404, 'Not found');
     const parts = url.pathname
       .slice(prefix.length)
       .split('/')

@@ -109,16 +109,18 @@ class Writer:
         self._opened = False
         self._stop = threading.Event()
         self._timer = None
-        self._error = None  # terminal error of timed work, for the producer
+        self._error = None  # terminal error of a flush or heartbeat
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if exc_type is not None and self._error is not None:
-            # Already failing: do not resubmit the rejected batch.
+        if self._error is not None:
+            # A batch was rejected: do not resubmit it.
             self._stop_timer()
             self._connection.close()
+            if exc_type is None:
+                raise self._error
             return
         self.close()
 
@@ -156,10 +158,15 @@ class Writer:
             if not self._buffer and self._progress is None:
                 return
             batch, progress = self._buffer, self._progress
-            self._connection.call(
-                "SELECT cr.put_points(%s, %s, %s)",
-                (self.run_key, Json(batch), None if progress is None else Json(progress)),
-            )
+            try:
+                # Replays a lost outcome itself; anything raised is terminal.
+                self._connection.call(
+                    "SELECT cr.put_points(%s, %s, %s)",
+                    (self.run_key, Json(batch), None if progress is None else Json(progress)),
+                )
+            except Exception as error:
+                self._error = error
+                raise
             self._buffer, self._progress = [], None
             self._last_write = self._clock()
 
@@ -226,9 +233,13 @@ class ReportFileError(ValueError):
 def _check_envelope(data):
     if not isinstance(data, dict):
         raise ReportFileError("the file must contain a JSON object")
-    missing = [k for k in ("report", "benchmarks", "progress", "data") if k not in data]
+    members = ("report", "benchmarks", "progress", "data")
+    missing = [k for k in members if k not in data]
     if missing:
         raise ReportFileError("missing top-level member(s): " + ", ".join(missing))
+    unknown = sorted(k for k in data if k not in members)
+    if unknown:
+        raise ReportFileError("unknown top-level member(s): " + ", ".join(unknown))
     if not isinstance(data["data"], list):
         raise ReportFileError("data must be an array")
 

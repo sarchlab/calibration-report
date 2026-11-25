@@ -503,6 +503,8 @@ describe.skipIf(!dsn)('hosted backend', () => {
       const response = await handleApi(new Request('http://localhost/api/v1/runs/%E0%A4%A'), {pool, store});
       expect(response.status).toBe(400);
       expect((await response.json()).error).toBe('Invalid path');
+      const near = await handleApi(new Request('http://localhost/api/v1/runsfoo'), {pool, store});
+      expect(near.status).toBe(404);
     });
 
     it('accepts only GET', async () => {

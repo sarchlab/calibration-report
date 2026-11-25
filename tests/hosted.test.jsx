@@ -2,6 +2,7 @@ import {MantineProvider} from '@mantine/core';
 import {fireEvent, render, screen, waitFor, within} from '@testing-library/react';
 import {afterEach, expect, test, vi} from 'vitest';
 import {HostedReport, RunList} from '../site/Hosted.jsx';
+import {PointDescription} from '../site/PointDetails.jsx';
 import {buildSummary, isVisibleRow, summaryLimits} from '../site/model.js';
 
 const benchmarks = {
@@ -53,7 +54,17 @@ const manifest = (revision, state = 'running', completed = 12, updatedAt) => ({
   benchmarks,
   plots: {a: [[0, 2]], b: [[0, 2]]},
 });
-function summary(scope, revision, computedAt, limits = summaryLimits) {
+// A benchmark that a later revision declares, with large errors.
+const fftMeta = {
+  scaling_param: 'n',
+  params: {n: {unit: ''}},
+  values: benchmarks.gemm.values,
+};
+const fftRows = [1, 2].map((x) => ({
+  group: 'a', benchmark: 'fft', x, plot: 50, non_scaling_params: {},
+  values: {hw: 100, sim: 900 + x},
+}));
+function summary(scope, revision, computedAt, limits = summaryLimits, fft = false) {
   const scoped = scope === 'overview' ? groups : groups.filter(([id]) => scope === 'group:' + id);
   const keys = scoped.map(([, key]) => key);
   return {
@@ -65,8 +76,8 @@ function summary(scope, revision, computedAt, limits = summaryLimits) {
     computed_at: computedAt,
     min_interval: 60,
     ...buildSummary({
-      rows: rows.filter((row) => keys.includes(row.group)),
-      benchmarks,
+      rows: [...rows, ...(fft ? fftRows : [])].filter((row) => keys.includes(row.group)),
+      benchmarks: fft ? {...benchmarks, fft: fftMeta} : benchmarks,
       groups: scoped,
       overview: scope === 'overview',
     })(limits),
@@ -122,12 +133,18 @@ function stubApi(state) {
     if (path === 'api/v1/runs') body = [{key: 'demo', title: 'Hosted fixture', state: 'running', updated_at: new Date().toISOString()}];
     else if (path === 'api/v1/runs/demo')
       body = manifest(state.revision, state.state, state.completed, state.updatedAt);
+      if (state.manifestFft) {
+        body.benchmarks = {...body.benchmarks, fft: fftMeta};
+        body.benchmark_keys = [...body.benchmark_keys, 'fft'];
+        body.param_keys = [...body.param_keys, ['n']];
+      }
     else if (path.includes('/summary')) {
       body = summary(
         query.get('scope'),
         state.summaryRevision ?? state.revision,
         state.computedAt,
         state.limits,
+        state.summaryFft,
       );
       if (state.state) body.state = state.state;
     }
@@ -186,7 +203,7 @@ test('a hosted run shows the server summary and server-paged series', async () =
   for (const heading of card.querySelectorAll('.series h3'))
     expect(heading.textContent).toMatch(/^launch=\d · {3}proto {2}=a · constructor=b · 10=c · 2=d$/);
   expect(calls).toContain('api/v1/runs/demo/summary?rid=7&scope=group%3A3');
-  expect(calls.some((c) => c.includes('/plots?rid=7&group=a&benchmark=gemm&offset=0&limit=2'))).toBe(true);
+  expect(calls.some((c) => c.includes('/plots?rid=7&group=a&benchmark=gemm&offset=0&limit=6'))).toBe(true);
 });
 
 test('a live summary is re-requested only after new data and the interval', async () => {
@@ -415,4 +432,68 @@ test('a run that goes quiet stops polling and offers Refresh', async () => {
   await waitFor(() => expect(screen.queryByRole('button', {name: 'Refresh'})).toBeNull());
   await advance(11);
   expect(polls()).toBe(stopped + 2);
+});
+
+test('point details skip series a point lacks, even with inherited names', () => {
+  const meta = JSON.parse(
+    '{"b":{"scaling_param":"x","params":{"x":{"unit":""}},"values":{' +
+      '"hw":{"name":"Measured","unit":"ns","role":"hardware_measurement"},' +
+      '"constructor":{"name":"Builder","unit":"ns"},' +
+      '"sim":{"name":"Simulated","unit":"ns","role":"simulator_output"}}}}',
+  );
+  const point = {
+    group: 'a', benchmark: 'b', x: 1, non_scaling_params: {},
+    values: {hw: 5, sim: null},
+    statuses: {sim: {state: 'timeout', reason: 'took too long'}},
+  };
+  render(
+    <MantineProvider>
+      <PointDescription description={{point}} benchmarks={meta} groups={report.groups} />
+    </MantineProvider>,
+  );
+  expect(document.querySelectorAll('.point-measurement')).toHaveLength(2);
+  expect(screen.queryByText('Builder')).toBeNull();
+  expect(screen.getByText('took too long')).toBeTruthy();
+});
+
+test('a summary ahead of the manifest waits for it before showing new benchmarks', async () => {
+  vi.useFakeTimers({shouldAdvanceTime: true});
+  const state = {revision: 1, computedAt: new Date(Date.now() - 10 * 60_000).toISOString()};
+  const calls = stubApi(state);
+  mount(<HostedReport runKey="demo" />);
+  await screen.findByText('12 paired measurements');
+  const select = (key) => {
+    const [scurve] = screen.getAllByRole('img');
+    scurve.focus();
+    fireEvent.keyDown(scurve, {key});
+  };
+  // The manifest shows revision 2; the summary is computed at revision 3,
+  // after a write that declared fft.
+  Object.assign(state, {revision: 2, summaryRevision: 3, summaryFft: true});
+  await advance(11);
+  await waitFor(() => expect(calls.filter((c) => c.includes('/summary'))).toHaveLength(2));
+  expect(screen.getByText('12 paired measurements')).toBeTruthy();
+  select('End');
+  expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
+  Object.assign(state, {revision: 3, summaryRevision: undefined, manifestFft: true});
+  await advance(10);
+  expect(await screen.findByText('14 paired measurements')).toBeTruthy();
+  select('End');
+  expect(screen.getByRole('group', {name: 'Point details'}).textContent).toMatch(/^fftDevice A/);
+});
+
+test('a failed run offers Refresh and resumes polling when it runs again', async () => {
+  vi.useFakeTimers({shouldAdvanceTime: true});
+  const state = {revision: 1, state: 'failed', computedAt: new Date().toISOString()};
+  const calls = stubApi(state);
+  mount(<HostedReport runKey="demo" />);
+  const refresh = await screen.findByRole('button', {name: 'Refresh'});
+  const polls = () => calls.filter((c) => c === 'api/v1/runs/demo').length;
+  await advance(15);
+  expect(polls()).toBe(1);
+  Object.assign(state, {state: undefined, revision: 2, updatedAt: new Date().toISOString()});
+  fireEvent.click(refresh);
+  await waitFor(() => expect(screen.queryByRole('button', {name: 'Refresh'})).toBeNull());
+  await advance(11);
+  expect(polls()).toBe(3);
 });

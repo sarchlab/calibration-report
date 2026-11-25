@@ -240,8 +240,18 @@ function useSummary(runKey, manifest, polls, scope, onReplaced) {
   useEffect(() => {
     if (request.error instanceof ReplacedRun) onReplaced();
   }, [request.error, onReplaced]);
-  const current = summary?.requested === scope && summary.rid === rid ? summary : null;
-  latest.current = {current, load, manifest, scopeKey};
+  const received =
+    summary?.requested === scope && summary.rid === rid ? summary : null;
+  // A summary ahead of the manifest may name benchmarks or series the
+  // manifest does not declare yet: show it once a poll catches up.
+  const shown = useRef(null);
+  if (received && manifest && received.revision <= manifest.revision)
+    shown.current = received;
+  const current =
+    shown.current?.requested === scope && shown.current.rid === rid
+      ? shown.current
+      : null;
+  latest.current = {current: received, load, manifest, scopeKey};
   useEffect(() => {
     const {current, load, manifest, scopeKey} = latest.current;
     if (!manifest || polls === 0) return;
@@ -256,7 +266,7 @@ function useSummary(runKey, manifest, polls, scope, onReplaced) {
     if (eligible) load();
   }, [polls, pending]);
   useEffect(() => {
-    const {manifest, load, scopeKey} = latest.current;
+    const {current, manifest, load, scopeKey} = latest.current;
     if (
       current &&
       current.state !== 'completed' &&
@@ -267,7 +277,7 @@ function useSummary(runKey, manifest, polls, scope, onReplaced) {
       finals.current.settled.add(scopeKey);
       load();
     }
-  }, [current, pending]);
+  }, [received, pending]);
   return {summary: current, error: request.error, retry: load};
 }
 
@@ -283,7 +293,8 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
     group,
     benchmark,
     offset: window.start,
-    limit: window.end - window.start,
+    // The page size, so a growing last page keeps its query.
+    limit: window.size,
   }).toString();
   const revision = manifest.state === 'running' ? manifest.revision : 'final';
   useEffect(() => {
@@ -455,7 +466,7 @@ export function HostedReport({runKey}) {
                 : 'Updated ' + new Date(manifest.updated_at).toLocaleTimeString()
           }
         >
-          {(stale || error) && (
+          {(stale || error || manifest.state === 'failed') && (
             <Button size="compact-xs" variant="default" onClick={refresh}>
               {error ? 'Retry' : 'Refresh'}
             </Button>

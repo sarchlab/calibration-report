@@ -54,4 +54,4 @@ createServer(async (req, res) => {
   } catch {
     res.writeHead(404).end();
   }
-}).listen(port, () => console.log(`http://localhost:${port}/`));
+}).listen(port, '127.0.0.1', () => console.log(`http://127.0.0.1:${port}/`));

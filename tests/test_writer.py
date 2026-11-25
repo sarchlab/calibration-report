@@ -122,6 +122,28 @@ class WriterTest(unittest.TestCase):
             w.__exit__(None, None, None)
         self.assertTrue(w._stop.is_set())
 
+    def test_rejected_batch_in_a_with_block_is_sent_once(self):
+        log = []
+        error = psycopg.errors.InvalidParameterValue("point 1: undeclared group")
+        with self.assertRaises(psycopg.errors.InvalidParameterValue) as raised:
+            with self.writer(log, batch_points=2) as w:
+                w.open({}, {}, {})
+                fake = w._connection._connect
+                fake.error = error
+                w.add({"x": 1})
+                w.add({"x": 2})  # size-triggered flush, rejected
+        self.assertIs(raised.exception, error)
+        self.assertEqual(fake.attempts, 2)  # open_run, then put_points once
+
+    def test_unrelated_exceptions_still_flush_on_exit(self):
+        log = []
+        with self.assertRaises(KeyError):
+            with self.writer(log, batch_points=10) as w:
+                w.open({}, {}, {})
+                w.add({"x": 1})
+                raise KeyError("producer bug")
+        self.assertEqual(log[-1][0], "cr.put_points")
+
     def test_timed_flush_failure_reaches_the_producer(self):
         def prepare(w, clock):
             w.add({"x": 1})
@@ -193,7 +215,13 @@ class ImportTest(unittest.TestCase):
 
     def test_import_checks_the_file_before_creating_the_run(self):
         data = json.loads((ROOT / "examples" / "data.json").read_text())
-        for i, bad in enumerate([{**data, "data": {}}, [], {k: v for k, v in data.items() if k != "progress"}]):
+        cases = [
+            {**data, "data": {}},
+            [],
+            {k: v for k, v in data.items() if k != "progress"},
+            {**data, "extra": 1},
+        ]
+        for i, bad in enumerate(cases):
             key = "python-envelope-%d" % i
             path = ROOT / "tests" / ("envelope-%d.tmp.json" % i)
             path.write_text(json.dumps(bad))
