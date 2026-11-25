@@ -107,6 +107,21 @@ class WriterTest(unittest.TestCase):
         self.assertEqual(fake.attempts - before, 1)  # the batch is not resubmitted
         self.assertTrue(w._stop.is_set())
 
+    def test_timed_serialization_error_reaches_the_producer(self):
+        log, clock = [], Clock()
+        w = self.writer(log, clock=clock, flush_seconds=30, heartbeat_seconds=300)
+        w._timer = object()
+        w.open({}, {}, {})
+        w._connection._connect.error = TypeError("Object of type set is not JSON serializable")
+        w.add({"x": {1}})
+        clock.now = 31
+        self.assertFalse(w._timed())
+        with self.assertRaises(TypeError):
+            w.add({"x": 2})
+        with self.assertRaises(TypeError):
+            w.__exit__(None, None, None)
+        self.assertTrue(w._stop.is_set())
+
     def test_timed_flush_failure_reaches_the_producer(self):
         def prepare(w, clock):
             w.add({"x": 1})
@@ -175,6 +190,29 @@ class ImportTest(unittest.TestCase):
             writer_module.main(args)
         self.assertEqual(stop.exception.code, 1)
         self.assertLess(time.monotonic() - started, 0.9)  # the first backoff is 1 s
+
+    def test_import_checks_the_file_before_creating_the_run(self):
+        data = json.loads((ROOT / "examples" / "data.json").read_text())
+        for i, bad in enumerate([{**data, "data": {}}, [], {k: v for k, v in data.items() if k != "progress"}]):
+            key = "python-envelope-%d" % i
+            path = ROOT / "tests" / ("envelope-%d.tmp.json" % i)
+            path.write_text(json.dumps(bad))
+            self.addCleanup(path.unlink)
+            with self.assertRaises(SystemExit) as stop:
+                writer_module.main(["import", str(path), "--run", key, "--dsn", DSN])
+            self.assertEqual(stop.exception.code, 1)
+            with psycopg.connect(DSN) as conn:
+                self.assertIsNone(conn.execute("SELECT 1 FROM cr.runs WHERE key = %s", (key,)).fetchone())
+        empty = ROOT / "tests" / "envelope-empty.tmp.json"
+        empty.write_text(json.dumps({**data, "data": []}))
+        self.addCleanup(empty.unlink)
+        key = "python-envelope-empty"
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute("DELETE FROM cr.runs WHERE key = %s", (key,))
+        writer_module.main(["import", str(empty), "--run", key, "--dsn", DSN])
+        with psycopg.connect(DSN) as conn:
+            state = conn.execute("SELECT state FROM cr.runs WHERE key = %s", (key,)).fetchone()
+        self.assertEqual(state, ("completed",))
 
     def test_validation_errors_are_readable(self):
         bad = ROOT / "tests" / "bad-report.tmp.json"

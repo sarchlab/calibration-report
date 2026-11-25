@@ -176,13 +176,13 @@ class Writer:
                 self._last_write = self._clock()
 
     def _timed(self):
-        """One step of timed work. A terminal error (the connection already
-        retried lost outcomes) is saved for the producer and stops timed work;
-        the rejected batch is not resubmitted."""
+        """One step of timed work. Any error (the connection already retried
+        lost outcomes; others include serialization errors) is saved for the
+        producer and stops timed work; the rejected batch is not resubmitted."""
         with self._lock:
             try:
                 self.tick()
-            except psycopg.Error as error:
+            except Exception as error:  # noqa: BLE001 - the producer gets it
                 self._error = error
                 self._stop.set()
                 return False
@@ -219,9 +219,24 @@ def finish_run(dsn, run_key, state, progress=None, connection=None):
         connection.close()
 
 
+class ReportFileError(ValueError):
+    """The file is not a data.json object."""
+
+
+def _check_envelope(data):
+    if not isinstance(data, dict):
+        raise ReportFileError("the file must contain a JSON object")
+    missing = [k for k in ("report", "benchmarks", "progress", "data") if k not in data]
+    if missing:
+        raise ReportFileError("missing top-level member(s): " + ", ".join(missing))
+    if not isinstance(data["data"], list):
+        raise ReportFileError("data must be an array")
+
+
 def import_report(dsn, path, run_key, live=False, batch_points=BATCH_POINTS):
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
+    _check_envelope(data)  # before open_run creates the run
     writer = Writer(dsn, run_key, batch_points=batch_points, flush_seconds=0, heartbeat_seconds=0)
     with writer:
         writer.open(data["report"], data["benchmarks"], data["progress"])
@@ -250,6 +265,8 @@ def main(argv=None):
         import_report(args.dsn, args.file, args.run, live=args.live)
     except psycopg.Error as error:
         parser.exit(1, "import failed: %s\n" % (error.diag.message_primary or error))
+    except (ValueError, OSError) as error:  # file envelope and JSON syntax errors
+        parser.exit(1, "import failed: %s\n" % error)
 
 
 if __name__ == "__main__":

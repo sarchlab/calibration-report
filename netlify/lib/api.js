@@ -574,7 +574,13 @@ export async function handleApi(
       .slice(prefix.length)
       .split('/')
       .filter(Boolean)
-      .map(decodeURIComponent);
+      .map((part) => {
+        try {
+          return decodeURIComponent(part);
+        } catch {
+          throw new HttpError(400, 'Invalid path');
+        }
+      });
     const query = url.searchParams;
     if (parts.length === 0) return await listRuns(pool);
     const [key, resource, ...rest] = parts;

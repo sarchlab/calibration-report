@@ -371,10 +371,14 @@ function sampleSummary(pairs, units, limits) {
     const limit = limits.scatter;
     const chosen = new Set();
     if (limit < unitPairs.length) {
+      const take = (pair) => {
+        if (chosen.size < limit) chosen.add(pair);
+      };
       const largest = [...unitPairs]
         .sort((a, b) => Math.abs(b.signedError) - Math.abs(a.signedError))
         .slice(0, Math.floor(limit / 3));
-      for (const pair of largest) chosen.add(pair);
+      for (const pair of largest) take(pair);
+      // Extrema in a fixed order while capacity remains.
       for (const key of ['actual', 'prediction']) {
         let low = unitPairs[0],
           high = unitPairs[0];
@@ -382,11 +386,14 @@ function sampleSummary(pairs, units, limits) {
           if (pair[key] < low[key]) low = pair;
           if (pair[key] > high[key]) high = pair;
         }
-        if (limit > 0) chosen.add(low).add(high);
+        take(low);
+        take(high);
       }
-      const byActual = [...unitPairs].sort((a, b) => a.actual - b.actual);
-      for (const i of spaced(byActual.length, Math.max(0, limit - chosen.size)))
-        chosen.add(byActual[i]);
+      // The rest evenly spaced by measured value.
+      const rest = [...unitPairs]
+        .filter((pair) => !chosen.has(pair))
+        .sort((a, b) => a.actual - b.actual);
+      for (const i of spaced(rest.length, limit - chosen.size)) take(rest[i]);
     } else for (const pair of unitPairs) chosen.add(pair);
     scatter[unit] = [...chosen].map(add);
   }

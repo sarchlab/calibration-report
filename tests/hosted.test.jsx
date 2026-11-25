@@ -39,11 +39,11 @@ const rows = groups.flatMap(([, group], g) =>
   ),
 );
 const paramKeys = [['size', 'launch', '__proto__', 'constructor', '10', '2']];
-const manifest = (revision, state = 'running', completed = 12) => ({
+const manifest = (revision, state = 'running', completed = 12, updatedAt) => ({
   id: 7,
   revision,
   state,
-  updated_at: new Date().toISOString(),
+  updated_at: updatedAt,
   report,
   group_ids: {a: 3, b: 4},
   group_order: ['a', 'b'],
@@ -91,7 +91,9 @@ function plotPage(group, bump = 0) {
   return {revision: 1, total: 2, plots, next: null};
 }
 
+// `updatedAt` changes only when a test simulates a write or heartbeat.
 function stubApi(state) {
+  state.updatedAt ??= new Date().toISOString();
   const calls = [];
   vi.stubGlobal('fetch', async (url) => {
     const path = String(url);
@@ -119,7 +121,7 @@ function stubApi(state) {
     let body;
     if (path === 'api/v1/runs') body = [{key: 'demo', title: 'Hosted fixture', state: 'running', updated_at: new Date().toISOString()}];
     else if (path === 'api/v1/runs/demo')
-      body = manifest(state.revision, state.state, state.completed);
+      body = manifest(state.revision, state.state, state.completed, state.updatedAt);
     else if (path.includes('/summary')) {
       body = summary(
         query.get('scope'),
@@ -343,4 +345,74 @@ test('a summary behind the manifest is re-requested at most once per poll', asyn
   await advance(35);
   expect(calls.filter((c) => c === 'api/v1/runs/demo')).toHaveLength(4);
   expect(summaries()).toBe(4);
+});
+
+test('completion supersedes a pending live summary with the final one', async () => {
+  vi.useFakeTimers({shouldAdvanceTime: true});
+  const state = {
+    revision: 1,
+    summaryRevision: 1,
+    computedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    holds: [],
+  };
+  const calls = stubApi(state);
+  mount(<HostedReport runKey="demo" />);
+  await screen.findByText('Overview · Accuracy summary');
+  const gate = deferred();
+  state.holds.push({match: 'api/v1/runs/demo/summary', promise: gate.promise});
+  Object.assign(state, {revision: 2, summaryRevision: undefined});
+  await advance(11); // the live summary request is held
+  expect(calls.filter((c) => c.includes('/summary'))).toHaveLength(2);
+  Object.assign(state, {revision: 3, state: 'completed'});
+  await advance(10);
+  await waitFor(() => expect(calls.filter((c) => c.includes('/summary'))).toHaveLength(3));
+  gate.resolve(); // the superseded live response arrives last
+  await advance(1);
+  expect(screen.queryByText(/Summary as of/)).toBeNull();
+  await advance(20);
+  expect(calls.filter((c) => c.includes('/summary'))).toHaveLength(3);
+  expect(calls.filter((c) => c === 'api/v1/runs/demo')).toHaveLength(3);
+});
+
+test('an unchanged manifest still triggers the summary at the first eligible poll', async () => {
+  vi.useFakeTimers({shouldAdvanceTime: true});
+  const state = {revision: 1, computedAt: new Date().toISOString()};
+  const calls = stubApi(state);
+  mount(<HostedReport runKey="demo" />);
+  await screen.findByText('Overview · Accuracy summary');
+  const summaries = () => calls.filter((c) => c.includes('/summary')).length;
+  state.revision = 2; // a write, with updated_at kept fixed
+  await advance(50);
+  expect(summaries()).toBe(1);
+  expect(screen.getByText(/Summary as of/)).toBeTruthy();
+  await advance(15);
+  expect(summaries()).toBe(2);
+  await advance(30);
+  expect(summaries()).toBe(2);
+  expect(screen.queryByText(/Summary as of/)).toBeNull();
+});
+
+test('a run that goes quiet stops polling and offers Refresh', async () => {
+  vi.useFakeTimers({shouldAdvanceTime: true});
+  const state = {
+    revision: 1,
+    computedAt: new Date().toISOString(),
+    updatedAt: new Date(Date.now() - 30 * 60_000 + 15_000).toISOString(),
+  };
+  const calls = stubApi(state);
+  mount(<HostedReport runKey="demo" />);
+  await screen.findByText('Overview · Accuracy summary');
+  const polls = () => calls.filter((c) => c === 'api/v1/runs/demo').length;
+  expect(screen.queryByRole('button', {name: 'Refresh'})).toBeNull();
+  await advance(25);
+  const refresh = await screen.findByRole('button', {name: 'Refresh'});
+  expect(screen.getByText('No updates for 30 minutes')).toBeTruthy();
+  const stopped = polls();
+  await advance(30);
+  expect(polls()).toBe(stopped);
+  state.updatedAt = new Date().toISOString(); // the run wrote again
+  fireEvent.click(refresh);
+  await waitFor(() => expect(screen.queryByRole('button', {name: 'Refresh'})).toBeNull());
+  await advance(11);
+  expect(polls()).toBe(stopped + 2);
 });

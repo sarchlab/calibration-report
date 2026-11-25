@@ -292,6 +292,24 @@ describe.skipIf(!dsn)('hosted backend', () => {
       ).rejects.toThrow(/differs/);
     });
 
+    it('accepts integral progress numbers in any JSON spelling', async () => {
+      const {report, benchmarks} = example;
+      // Raw JSON text, so 2.0 and 2e0 reach the database as written.
+      const openRaw = (key, progress) =>
+        sql('SELECT cr.open_run($1, $2, $3, $4::json)', [
+          key, JSON.stringify(report), JSON.stringify(benchmarks), progress,
+        ]);
+      await openRaw('integral', '{"total": 2.0, "completed": 2e0, "running": 0}');
+      for (const [i, progress] of [
+        '{"total": 2.5, "completed": 0, "running": 0}',
+        '{"total": -1, "completed": 0, "running": 0}',
+        '{"total": "2", "completed": 0, "running": 0}',
+        '{"total": 2, "completed": 1e-1, "running": 0}',
+      ].entries())
+        await expect(openRaw('fractional-' + i, progress)).rejects.toThrow(/non-negative integer/);
+      expect((await sql("SELECT count(*)::int AS n FROM cr.runs WHERE key LIKE 'fractional-%'")).rows[0].n).toBe(0);
+    });
+
     it('caps the stored series of a benchmark after appends', async () => {
       const {report, progress} = example;
       const bench = example.benchmarks.polybench_fdtd2d;
@@ -479,6 +497,12 @@ describe.skipIf(!dsn)('hosted backend', () => {
       const {status, body} = await api(`/synthetic/summary?rid=${manifest.id}&scope=${scope}`, {pool: broken});
       expect(status).toBe(200);
       expect(body.state).toBe('completed');
+    });
+
+    it('rejects malformed paths', async () => {
+      const response = await handleApi(new Request('http://localhost/api/v1/runs/%E0%A4%A'), {pool, store});
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe('Invalid path');
     });
 
     it('accepts only GET', async () => {

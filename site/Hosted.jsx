@@ -106,23 +106,31 @@ function mergeManifest(previous, next) {
 // One poll chain: at most one manifest request in flight and one timer. It
 // polls while the run is live, not stale, and the tab visible, and keeps
 // polling after a failed request while the last known manifest is live.
+// `polls` counts successful polls, changed or not; `stale` is published when
+// polling stops because the run went quiet.
 function useManifest(runKey) {
   const [manifest, setManifest] = useState(null);
   const [error, setError] = useState(null);
+  const [polls, setPolls] = useState(0);
+  const [stale, setStale] = useState(false);
   const [generation, setGeneration] = useState(0);
   const last = useRef(null);
   const refresh = useCallback(() => setGeneration((g) => g + 1), []);
   useEffect(() => {
     let timer = null;
     let inFlight = null;
+    const publishStale = () =>
+      setStale(last.current?.state === 'running' && isStale(last.current));
     const schedule = () => {
       clearTimeout(timer);
       timer = isLive(last.current) ? setTimeout(tick, POLL_MS) : null;
+      publishStale();
     };
     // A scheduled request rechecks visibility and staleness first.
     function tick() {
       timer = null;
       if (isLive(last.current)) poll();
+      else publishStale();
     }
     async function poll() {
       if (inFlight) return;
@@ -137,6 +145,7 @@ function useManifest(runKey) {
         last.current = next;
         setManifest(next);
         setError(null);
+        setPolls((n) => n + 1);
       } catch (e) {
         if (inFlight !== controller) return;
         setError(e.message);
@@ -160,7 +169,7 @@ function useManifest(runKey) {
       document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [runKey, generation]);
-  return {manifest, error, refresh};
+  return {manifest, error, polls, stale, refresh};
 }
 
 // One request at a time: a new or cancelled request supersedes the previous
@@ -195,15 +204,25 @@ function useRequest() {
   return {start, cancel, error, pending};
 }
 
-// The summary of the active scope. Once per manifest poll it is re-requested
-// if the manifest shows newer data and the server's interval has passed; on
-// completion it is re-requested once for the final summary.
-function useSummary(runKey, manifest, scope, onReplaced) {
+// The summary of the active scope. Once per successful manifest poll it is
+// re-requested if the manifest shows newer data and the server's interval has
+// passed. The first completed manifest supersedes any live request with a
+// request for the final summary, and a live summary that settles after
+// completion is followed by one request for the final summary.
+function useSummary(runKey, manifest, polls, scope, onReplaced) {
   const [summary, setSummary] = useState(null);
   const request = useRequest();
   const {start, cancel, pending} = request;
   const rid = manifest?.id;
+  const scopeKey = rid + '|' + scope;
+  // Scopes whose final summary was requested, by trigger; a request made
+  // while the manifest is completed is already the final one.
+  const finals = useRef({completion: new Set(), settled: new Set()});
+  // Read through refs so that only a poll re-evaluates.
+  const latest = useRef(null);
   const load = useCallback(() => {
+    if (latest.current?.manifest?.state === 'completed')
+      finals.current.completion.add(rid + '|' + scope);
     start(
       (signal) =>
         fetchJson(
@@ -222,17 +241,33 @@ function useSummary(runKey, manifest, scope, onReplaced) {
     if (request.error instanceof ReplacedRun) onReplaced();
   }, [request.error, onReplaced]);
   const current = summary?.requested === scope && summary.rid === rid ? summary : null;
-  // Read through refs so that only a new manifest (one poll) re-evaluates.
-  const latest = useRef({current, load});
-  latest.current = {current, load};
+  latest.current = {current, load, manifest, scopeKey};
   useEffect(() => {
-    const {current, load} = latest.current;
+    const {current, load, manifest, scopeKey} = latest.current;
+    if (!manifest || polls === 0) return;
+    if (manifest.state === 'completed') {
+      if (current?.state !== 'completed' && !finals.current.completion.has(scopeKey))
+        load(); // supersedes an in-flight live request
+      return;
+    }
     if (!current || pending() || manifest.revision <= current.revision) return;
-    const final = manifest.state === 'completed' && current.state !== 'completed';
     const eligible =
       Date.now() >= Date.parse(current.computed_at) + current.min_interval * 1000;
-    if (final || eligible) load();
-  }, [manifest, pending]);
+    if (eligible) load();
+  }, [polls, pending]);
+  useEffect(() => {
+    const {manifest, load, scopeKey} = latest.current;
+    if (
+      current &&
+      current.state !== 'completed' &&
+      manifest?.state === 'completed' &&
+      !pending() &&
+      !finals.current.settled.has(scopeKey)
+    ) {
+      finals.current.settled.add(scopeKey);
+      load();
+    }
+  }, [current, pending]);
   return {summary: current, error: request.error, retry: load};
 }
 
@@ -337,7 +372,7 @@ function HostedBenchmark({runKey, manifest, group, benchmark, count, wide, onRep
 }
 
 export function HostedReport({runKey}) {
-  const {manifest, error, refresh} = useManifest(runKey);
+  const {manifest, error, polls, stale, refresh} = useManifest(runKey);
   const {scheme, theme} = useChartTheme();
   const [chosen, setChosen] = useState(null);
   const [pages, setPages] = useState(() => new Map());
@@ -362,7 +397,7 @@ export function HostedReport({runKey}) {
     summary,
     error: summaryError,
     retry: retrySummary,
-  } = useSummary(runKey, manifest, manifest ? scopeOf(group) : null, refresh);
+  } = useSummary(runKey, manifest, polls, manifest ? scopeOf(group) : null, refresh);
   const benchmarkStats = useMemo(
     () =>
       new Map(
@@ -391,7 +426,6 @@ export function HostedReport({runKey}) {
       </main>
     );
   const {report, progress} = manifest;
-  const stale = manifest.state === 'running' && isStale(manifest);
   const views = [
     {id: null, name: 'Overview'},
     ...manifest.group_order.map((id) => ({id, name: report.groups[id].name})),

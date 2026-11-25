@@ -171,7 +171,10 @@ BEGIN
       IF json_typeof(v) NOT IN ('string', 'null') THEN
         PERFORM cr.fail('progress.' || k || ' must be a string or null');
       END IF;
-    ELSIF json_typeof(v) <> 'number' OR (v #>> '{}') !~ '^[0-9]+$' THEN
+    ELSIF json_typeof(v) <> 'number' THEN
+      PERFORM cr.fail('progress.' || k || ' must be a non-negative integer');
+    -- Numerically, so 2.0 and 2e0 are integers.
+    ELSIF (v #>> '{}')::numeric < 0 OR (v #>> '{}')::numeric <> trunc((v #>> '{}')::numeric) THEN
       PERFORM cr.fail('progress.' || k || ' must be a non-negative integer');
     END IF;
   END LOOP;
