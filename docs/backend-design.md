@@ -229,7 +229,7 @@ Every endpoint is a Netlify Function at `/api/...`, runs one read-only transacti
 | `GET /api/runs` | `[{key, title, state, stale, progress, updated_at}]`, newest first | run list on the site root |
 | `GET /api/runs/{key}` | manifest (below) | header, progress, tabs, benchmark-level pagination, live polling |
 | `GET /api/runs/{key}/plots?group=&benchmark=&offset=&limit=` | `{total, plots: [{id, non_scaling_params, rows: [point]}]}` with `data.json` points | series-level pagination inside one benchmark card |
-| `GET /api/runs/{key}/measurements?group=[&since=REV]` | columnar measurements (below) | Overview and per-group summaries, benchmark-wide error |
+| `GET /api/runs/{key}/measurements?group=&(benchmark=\|since=REV)[&page=N]` | one page of columnar measurements (below) | Overview and per-group summaries, benchmark-wide error |
 | `GET /api/runs/{key}/points/{plot}/{x}` | one full `data.json` point | point details opened from a summary chart |
 
 Manifest:
@@ -251,7 +251,7 @@ Measurements contain every hardware-measurement and simulator-output value of on
 
 ```json
 {
-  "revision": 418, "group": "mi300x",
+  "revision": 418, "group": "mi300x", "page": 0, "next_page": null,
   "benchmarks": ["polybench_fdtd2d"],
   "series": [["mi300x", "mgpusim"]],
   "benchmark": [0, 0, 0],
@@ -261,15 +261,21 @@ Measurements contain every hardware-measurement and simulator-output value of on
 }
 ```
 
-`benchmark[i]` indexes `benchmarks`, and `values[i]` is aligned with that benchmark's entry in `series` (its series that declare a `role`). The viewer rebuilds lightweight rows `{group, benchmark, x, plot, values}` from these columns and passes them to the existing `comparisonPairs(rows, benchmarks)`. Pairing rules (role, matching unit, exactly one hardware reference), signed error, and the statistics (`errorStats`, `rankStatistics`, and `rankingStats`) therefore stay in one place, `site/model.js`, and are not duplicated in SQL. At about 450,000 points with two values each, the payload is roughly 15–20 MB of JSON before compression and about 4–6 MB gzip-compressed. The Overview fetches every group in parallel and concatenates the rows. With `since=REV` the endpoint returns only points written after that revision, and the viewer merges them by `(plot, x)`. A live refresh therefore costs a few kilobytes, not the whole payload.
+`benchmark[i]` indexes `benchmarks`, and `values[i]` is aligned with that benchmark's entry in `series` (its series that declare a `role`). The viewer rebuilds lightweight rows `{group, benchmark, x, plot, values}` from these columns and passes them to the existing `comparisonPairs(rows, benchmarks)`. Pairing rules (role, matching unit, exactly one hardware reference), signed error, and the statistics (`errorStats`, `rankStatistics`, and `rankingStats`) therefore stay in one place, `site/model.js`, and are not duplicated in SQL. A whole run is too large for one response. At about 450,000 points with two values each, a run's measurements are roughly 15–20 MB of JSON before compression, and the MI300X report has a single group, so splitting by group alone does not help. Netlify buffers a synchronous Function response up to 6 MB and streams one up to 20 MB ([Functions defaults](https://docs.netlify.com/build/functions/configuration/#default-values)). The endpoint is therefore paged from the start:
 
-Function cost stays small. No endpoint computes statistics. The manifest and `plots` queries are indexed lookups. `measurements` is one indexed scan per request, and it is requested in full only once per group per finished run, because later requests hit the CDN cache.
+- A request names one `benchmark` (or `since=REV`, below) and returns at most 50,000 points, ordered by point id, which is about 2 MB of JSON. `next_page` is the next `page` number, or `null` on the last page. Most benchmarks fit in one page.
+- The viewer fetches every benchmark of the visible groups in parallel (the benchmark list is in the manifest), follows `next_page` within each benchmark, and concatenates all pages before calling `comparisonPairs`. The Overview does the same for every group.
+- With `since=REV` (no `benchmark`), the endpoint returns the points written after that revision across the group, with the same paging, and the viewer merges them by `(plot, x)`. A live refresh therefore costs a few kilobytes, not the whole run.
+
+Each page URL is fixed by `(run, revision, group, benchmark or since, page)`, so pages of a finished run are cached as immutable like every other response.
+
+Function cost stays small. No endpoint computes statistics. The manifest and `plots` queries are indexed lookups. Each `measurements` page is one indexed range scan. A finished run's pages are each computed once, because later requests hit the CDN cache.
 
 ## 6. Viewer changes and `data.json` compatibility
 
 The viewer gains a data source interface with two implementations:
 
-- **API source**, used when the URL names a run (`/runs/{key}`; the site root lists runs). It loads the manifest, polls it every 10 s with `If-None-Match` only while `report.live` is true (the same condition `useReport` uses today), and on a new revision fetches `measurements?since=` and the visible `plots` pages.
+- **API source**, used when the URL names a run (`/runs/{key}`; the site root lists runs). It loads the manifest, polls it every 10 s with `If-None-Match` only while `report.live` is true (the same condition `useReport` uses today), and on a new revision fetches `measurements?since=` (following `next_page`) and the visible `plots` pages. Initial summaries load all `measurements` pages in parallel, as described in §5.
 - **File source**, used when there is no run in the URL and `./data.json` exists. This is today's behavior. It implements the same interface in memory with `indexReport`, so `npm run dev`, `serve.py`, and GitHub Pages hosting keep working unchanged.
 
 `Report` then consumes the interface. Summaries take pairs from `comparisonPairs` over the measurement rows. Benchmark cards take counts from the manifest and rows from `plots` pages, and `pageWindow` clamping uses the manifest counts. In API mode a summary pair's `point` is a lightweight row, so `PointDetails` loads the full point from `/points/{plot}/{x}` when a pair from a summary chart is opened. Benchmark-card points are already complete.
@@ -303,7 +309,7 @@ Assume three runs per month (tens per year), each about 6 hours long and viewed 
 | Database awake while runs write (1 CU × 6 h × 3) | 18 CU-h | 180 |
 | Database woken by viewers of finished runs (≈5 min each, 100 visits) | 8 CU-h | 80 |
 | Measurements leaving the database (≈30 MB per uncached full load, 20 loads) | 0.6 GB | 12 |
-| Function compute (≈2 s at 1 GB per full measurements request, plus small requests) | < 0.1 GB-h | < 1 |
+| Function compute (≈2 s at 1 GB per uncached full set of measurements pages, plus small requests) | < 0.1 GB-h | < 1 |
 | Web bandwidth (≈5 MB per page load, 200 loads, plus live deltas) | 1–2 GB | 20–40 |
 | Requests (one poll per 10 s per live viewer, plus page loads) | < 100,000 | < 20 |
 | **Total** | | **≈ 300–350** |
@@ -316,5 +322,5 @@ This is about 3% of the monthly grant. The dominant term is the database staying
 2. **Plan limits.** The database limits table lists Free, Personal, Pro, and Enterprise, but not Open Source ([limits](https://docs.netlify.com/build/data-and-storage/netlify-database/billing-and-usage/#limits)). If Open Source maps to Free, the 5 GB storage cap and the **48 compute-unit hours per month** cap would bind: three 6-hour runs already use 18 CU-h, and viewers add more. Ask Netlify support which column applies before building.
 3. **Storage billing.** Storage is free "for now", and Netlify says rates will be announced in advance. At about 100 MB per run the archive grows by a few GB per year. If the announced rate makes that expensive, revive the deferred R2 archive (finished runs exported as summary plus shards, then deleted from the database).
 4. **Direct-write coupling.** See §4. Revisit if more than a handful of repositories report, or if credentials need per-producer scoping. A thin write Function could front the same three SQL functions without a schema change.
-5. **Measurement payload and function response limits.** About 4–6 MB compressed per group must be returned by a Function. Confirm the current Functions response-size limit and whether the response must be streamed. Splitting by group (already in the design) and `since=` deltas keep individual responses bounded. If the limit is still a problem, the next step is to page measurements by benchmark, not to drop exact statistics.
+5. **Measurement payload.** A whole run's measurements are 15–20 MB of JSON, above the 6 MB buffered-response limit. The design pages them by benchmark with at most 50,000 points per page (§5), so each response stays near 2 MB. Measure real page sizes and the time to load all pages for the MI300X report. The viewer still downloads the whole run once, about 4–6 MB after gzip. If that turns out too slow, reduce what is sent (for example, single-precision values), not the exactness of the statistics.
 6. **Deploy previews copy production data.** Each deploy preview gets a database branch with a copy of production data ([branching](https://docs.netlify.com/build/data-and-storage/netlify-database/#database-branching)). Confirm that copying several GB per preview is cheap (copy-on-write), or disable previews' database access.
