@@ -1,9 +1,11 @@
 import {
   comparisonPairs,
   displayUnit,
+  launchBands,
   preferLogScale,
   pointDescription,
   pairDescription,
+  quantile,
 } from './model.js';
 
 const tickNumber = new Intl.NumberFormat('en-US', {
@@ -153,13 +155,7 @@ function bandCutoffs(pairs) {
   if (timed.length < BAND_MINIMUM) return null;
   const sorted = timed.map((pair) => pair.actual).sort((a, b) => a - b);
   // Interpolated quantiles, so both tail bands hold a sample at the minimum.
-  const quantile = (q) => {
-    const position = q * (sorted.length - 1);
-    const low = Math.floor(position);
-    const high = Math.min(low + 1, sorted.length - 1);
-    return sorted[low] + (sorted[high] - sorted[low]) * (position - low);
-  };
-  return {unit, values: BAND_QUANTILES.map(quantile)};
+  return {unit, values: BAND_QUANTILES.map((q) => quantile(sorted, q))};
 }
 
 // Labels for each band, with enough significant digits that distinct
@@ -296,6 +292,42 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     const x = (index) => xAxis.position(rows[index].x);
     const y = yAxis.position;
 
+    // Launch-group percentile bands behind every curve, outermost first in
+    // the curve's color, so nested levels darken toward the median. A level
+    // missing at an X breaks it; an isolated X is a narrow bar.
+    if (bounds)
+      for (const curve of curves) {
+        ctx.save();
+        ctx.fillStyle = curve.color;
+        ctx.globalAlpha = 0.14;
+        launchBands.forEach((_, level) => {
+          let run = [];
+          const flush = () => {
+            if (run.length === 1) {
+              const [px, low, high] = run[0];
+              ctx.fillRect(px - 2, high, 4, low - high);
+            } else if (run.length > 1) {
+              ctx.beginPath();
+              run.forEach(([px, , high], j) =>
+                j ? ctx.lineTo(px, high) : ctx.moveTo(px, high),
+              );
+              for (let j = run.length - 1; j >= 0; j--)
+                ctx.lineTo(run[j][0], run[j][1]);
+              ctx.closePath();
+              ctx.fill();
+            }
+            run = [];
+          };
+          rows.forEach((row, i) => {
+            const band = row.launches?.curves[curve.id]?.bands[level];
+            if (band) run.push([x(i), y(band[0]), y(band[1])]);
+            else flush();
+          });
+          flush();
+        });
+        ctx.restore();
+      }
+
     for (const curve of curves) {
       ctx.strokeStyle = ctx.fillStyle = curve.color;
       ctx.lineWidth = 1.65;
@@ -318,13 +350,18 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
         ctx.beginPath();
         ctx.arc(x(i), y(value), 2.6, 0, 2 * Math.PI);
         ctx.fill();
+        // A launch-group median is compared only when both medians come
+        // from the same paired dispatches.
+        const paired = row.launches?.comparisons
+          .filter((comparison) => comparison.count > 0)
+          .map((comparison) => comparison.id);
         hitPoints.push({
           x: x(i),
           y: y(value),
           description: pointDescription(
             row,
             comparisonPairs([row], benchmarks).filter(
-              (pair) => pair.unit === unit,
+              (pair) => pair.unit === unit && (!paired || paired.includes(pair.id)),
             ),
             {},
             curve.id,

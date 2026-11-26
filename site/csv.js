@@ -1,5 +1,6 @@
 // CSV export of a hosted run, built in the browser from the read API's plot
 // pages (docs/backend-design.md §6). Pure apart from `fetchPage`.
+import {PLOTS_FORMAT} from './model.js';
 
 const PLOTS_PER_PAGE = 48;
 const CONCURRENCY = 4;
@@ -113,8 +114,10 @@ export async function runCsv(manifest, fetchPage, {onProgress, signal} = {}) {
     high = manifest.revision;
   async function exportTask(task, chunks) {
     // The greatest x emitted per plot: rows arrive in x order, so a plot that
-    // a shifted window returns again yields only rows beyond it.
+    // a shifted window returns again yields only rows beyond it. Progress
+    // counts charts, as the manifest does.
     const emitted = new Map();
+    const charts = new Set();
     let counted = 0;
     for (let offset = 0, total = task.count; offset < total; offset += PLOTS_PER_PAGE) {
       let after = null;
@@ -125,6 +128,7 @@ export async function runCsv(manifest, fetchPage, {onProgress, signal} = {}) {
           benchmark: task.benchmark,
           offset,
           limit: PLOTS_PER_PAGE,
+          format: PLOTS_FORMAT,
         });
         if (after) query.set('after', after);
         const body = await fetchPage(query.toString(), controller.signal);
@@ -133,6 +137,7 @@ export async function runCsv(manifest, fetchPage, {onProgress, signal} = {}) {
         high = Math.max(high, body.revision);
         total = body.total;
         const points = body.plots.flatMap((plot) => {
+          charts.add(plot.chart);
           const last = emitted.get(plot.id) ?? -Infinity;
           const fresh = plot.rows.filter((row) => row.x > last);
           emitted.set(plot.id, fresh.length ? fresh.at(-1).x : last);
@@ -142,8 +147,8 @@ export async function runCsv(manifest, fetchPage, {onProgress, signal} = {}) {
         rows += points.length;
         after = body.next;
       } while (after);
-      done += emitted.size - counted;
-      counted = emitted.size;
+      done += charts.size - counted;
+      counted = charts.size;
       onProgress?.({plots: Math.min(done, plots), of: plots});
     }
   }

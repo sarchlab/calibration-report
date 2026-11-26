@@ -9,7 +9,7 @@ import {
   useState,
 } from 'react';
 import {useMediaQuery} from '@mantine/hooks';
-import {displayName, displayUnit} from './model.js';
+import {displayName, displayUnit, launchBands} from './model.js';
 
 const PointContext = createContext(null);
 export const desktopQuery =
@@ -25,9 +25,122 @@ const parameterNumber = new Intl.NumberFormat('en-US', {
 export const wrapIndex = (index, count) => ((index % count) + count) % count;
 export const usePoints = () => useContext(PointContext);
 
+const formatValue = (value, unit) =>
+  detailNumber.format(unit === 'ns' ? value / 1e6 : value) +
+  (unit ? ' ' + displayUnit(unit) : '');
+
+const percent = (q) => 'P' + Math.round(q * 100);
+
+// Details of a launch-group median point: dispatch and pair counts, each
+// curve's spread over the dispatches its median was taken from, and every
+// dispatch at this X.
+function LaunchGroupDetails({launches, meta}) {
+  const {rows, comparisons, curves} = launches;
+  // The dispatch table mounts only while its disclosure is open.
+  const [listed, setListed] = useState(false);
+  const series = Object.entries(meta.values).filter(([id]) =>
+    rows.some(
+      (row) =>
+        Object.hasOwn(row.values, id) ||
+        (row.statuses && Object.hasOwn(row.statuses, id)),
+    ),
+  );
+  const cell = (row, id, unit) => {
+    const value = Object.hasOwn(row.values, id) ? row.values[id] : undefined;
+    if (Number.isFinite(value)) return formatValue(value, unit);
+    const status =
+      row.statuses && Object.hasOwn(row.statuses, id) ? row.statuses[id] : null;
+    return status ? displayName(status.state) : '—';
+  };
+  return (
+    <div className="point-launches">
+      <div className="point-section-label">Launch group</div>
+      <dl className="point-parameters">
+        <div>
+          <dt>Dispatches at this X</dt>
+          <dd>{rows.length.toLocaleString('en-US')}</dd>
+        </div>
+        {comparisons.map((comparison) => (
+          <div key={comparison.name}>
+            <dt>
+              Paired
+              {comparisons.length > 1 ? ' · ' + comparison.name : ''}
+            </dt>
+            <dd>
+              {comparison.count.toLocaleString('en-US')} of{' '}
+              {rows.length.toLocaleString('en-US')}
+            </dd>
+          </div>
+        ))}
+        {series.flatMap(([id, info]) => {
+          const set = Object.hasOwn(curves, id) ? curves[id] : null;
+          if (!set) return [];
+          const {sorted, bands} = set;
+          const range = (low, high) =>
+            formatValue(low, info.unit) + ' – ' + formatValue(high, info.unit);
+          return [
+            <div key={id} className="point-launch-series">
+              <dt>{info.name}</dt>
+              <dd>median of {sorted.length.toLocaleString('en-US')}</dd>
+            </div>,
+            ...bands
+              .map((band, level) => [band, launchBands[level]])
+              .filter(([band]) => band)
+              .reverse()
+              .map(([[low, high], {low: lq, high: hq}]) => (
+                <div key={id + ':' + lq} className="point-launch-spread">
+                  <dt>
+                    {percent(lq)}–{percent(hq)}
+                  </dt>
+                  <dd>{range(low, high)}</dd>
+                </div>
+              )),
+            <div key={id + ':range'} className="point-launch-spread">
+              <dt>Range</dt>
+              <dd>{range(sorted[0], sorted.at(-1))}</dd>
+            </div>,
+          ];
+        })}
+      </dl>
+      <details
+        className="point-dispatches"
+        onToggle={(event) => setListed(event.currentTarget.open)}
+      >
+        <summary>Dispatches ({rows.length.toLocaleString('en-US')})</summary>
+        {listed && (
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Launch</th>
+                {series.map(([id, info]) => (
+                  <th scope="col" key={id} title={info.name}>
+                    {info.name.replace(/ kernel time(?: \(median\))?$/i, '')}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={i}>
+                  <th scope="row">{String(row.non_scaling_params.launch ?? '—')}</th>
+                  {series.map(([id, info]) => (
+                    <td key={id}>{cell(row, id, info.unit)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </details>
+    </div>
+  );
+}
+
 export function PointDescription({description, benchmarks, groups}) {
   const {point, comparisons = [], extra = {}, selectedSeries} = description;
   const meta = benchmarks[point.benchmark];
+  // A launch-group median names its group where a dispatch names its launch.
+  const kernel = point.launches ? 'launch_group' : 'launch';
   const title = displayName(point.benchmark).replace(
     /\b(fp\d+|int\d+)\b/gi,
     (word) => word.toUpperCase(),
@@ -38,9 +151,9 @@ export function PointDescription({description, benchmarks, groups}) {
         <strong className="point-title">{title}</strong>
         <span className="point-group">{groups[point.group].name}</span>
       </div>
-      {point.non_scaling_params.launch !== undefined && (
+      {point.non_scaling_params[kernel] !== undefined && (
         <div className="point-kernel">
-          {String(point.non_scaling_params.launch)}
+          {String(point.non_scaling_params[kernel])}
         </div>
       )}
       <dl className="point-measurements">
@@ -114,7 +227,9 @@ export function PointDescription({description, benchmarks, groups}) {
                 <div className="point-comparison-name">{pair.name}</div>
               )}
               <div className="point-metric-row">
-                <span className="point-metric-label">Signed error</span>
+                <span className="point-metric-label">
+                  {point.launches ? 'Error between medians' : 'Signed error'}
+                </span>
                 <span className="point-error-result">
                   <strong className="point-error-value">
                     {pair.signedError > 0
@@ -143,6 +258,9 @@ export function PointDescription({description, benchmarks, groups}) {
           ))}
         </div>
       )}
+      {point.launches && (
+        <LaunchGroupDetails launches={point.launches} meta={meta} />
+      )}
       <div className="point-configuration">
         <div className="point-section-label">Configuration</div>
         <dl className="point-parameters">
@@ -150,7 +268,7 @@ export function PointDescription({description, benchmarks, groups}) {
             [meta.scaling_param]: point.x,
             ...point.non_scaling_params,
           }).map(([key, value]) => {
-            if (key === 'launch' && key !== meta.scaling_param) return null;
+            if (key === kernel && key !== meta.scaling_param) return null;
             const label = displayName(key)
               .replace(
                 /\b(fmas|mads)\b/gi,

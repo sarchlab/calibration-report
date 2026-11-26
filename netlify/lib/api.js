@@ -1,7 +1,13 @@
 // Read API of hosted reports (docs/backend-design.md §5). Platform-free: the
 // Netlify Function passes a pg-compatible pool and a Netlify Blobs store, and
 // tests pass their own.
-import {API_VERSION, SUMMARY_FORMAT, buildSummary, summaryLimits} from '../../site/model.js';
+import {
+  API_VERSION,
+  PLOTS_FORMAT,
+  SUMMARY_FORMAT,
+  buildSummary,
+  summaryLimits,
+} from '../../site/model.js';
 
 const PAGE_BYTES = 4 * 1024 * 1024;
 const PAGE_ROWS = 20000;
@@ -11,6 +17,10 @@ const PAGE_BATCH = 256;
 const SUMMARY_MAX_BYTES = 2 * 1024 * 1024;
 const encoder = new TextEncoder();
 const MAX_PLOTS_PER_PAGE = 48;
+// The chart of a plot: chartParams (site/model.js) in SQL. Plots whose
+// params name a `launch_group` share a chart across `launch` values; any
+// other plot is its own chart.
+const chartKey = `CASE WHEN params ? 'launch_group' THEN params - 'launch' ELSE params END`;
 const drawnStates = [
   'failed',
   'verification_failed',
@@ -122,7 +132,8 @@ async function manifest(pool, key) {
       );
       const counts = await rows(
         client,
-        `SELECT group_id, benchmark_id, count(*)::int AS plots, min(id) AS first
+        `SELECT group_id, benchmark_id, count(DISTINCT ${chartKey})::int AS plots,
+                min(id) AS first
          FROM cr.plots WHERE run_id = $1 AND visible
          GROUP BY group_id, benchmark_id ORDER BY first`,
         [run.id],
@@ -242,6 +253,10 @@ async function plotPage(pool, key, query) {
   const benchmarkKey = query.get('benchmark');
   if (groupKey === null || benchmarkKey === null)
     throw new HttpError(400, 'group and benchmark are required');
+  // A request without the current format comes from an older viewer, whose
+  // offsets count plots rather than charts.
+  if (query.get('format') !== String(PLOTS_FORMAT))
+    throw new HttpError(400, 'Unsupported plots format; reload the page');
   const offset = nonNegativeInteger(query.get('offset'), 0, 'offset');
   const limit = Math.min(
     MAX_PLOTS_PER_PAGE,
@@ -259,31 +274,40 @@ async function plotPage(pool, key, query) {
         [run.id, groupKey, benchmarkKey],
       );
       if (!ids) throw new HttpError(404, 'Unknown group or benchmark');
+      // Charts are paged; each is named by its first plot id and lists its
+      // plots, which page together.
+      const visible = `SELECT id, params, min(id) OVER (PARTITION BY ${chartKey}) AS chart
+         FROM cr.plots WHERE group_id = $1 AND benchmark_id = $2 AND visible`;
       const [{total}] = await rows(
         client,
-        `SELECT count(*)::int AS total FROM cr.plots
-         WHERE group_id = $1 AND benchmark_id = $2 AND visible`,
+        `SELECT count(DISTINCT chart)::int AS total FROM (${visible}) v`,
         [ids.group_id, ids.benchmark_id],
       );
       const plots = await rows(
         client,
-        `SELECT id, params FROM cr.plots
-         WHERE group_id = $1 AND benchmark_id = $2 AND visible
-         ORDER BY id OFFSET $3 LIMIT $4`,
+        `WITH v AS (${visible}),
+              page AS (SELECT DISTINCT chart FROM v ORDER BY chart OFFSET $3 LIMIT $4)
+         SELECT v.id, v.params, v.chart FROM v JOIN page USING (chart) ORDER BY v.id`,
         [ids.group_id, ids.benchmark_id, offset, limit],
       );
-      const params = new Map(plots.map((p) => [String(p.id), p.params]));
+      const byId = new Map(plots.map((p) => [String(p.id), p]));
       const byPlot = new Map();
-      // The envelope counts against the budget: every page plot with its
-      // parameters, and the longest cursor.
+      // The envelope counts against the budget: the longest cursor, and each
+      // plot of the response with its parameters once it has a row.
       const envelope = encoder.encode(
         JSON.stringify({
           revision: run.revision,
           total,
-          plots: plots.map((p) => ({id: p.id, non_scaling_params: p.params, rows: []})),
+          plots: [],
           next: '9'.repeat(20) + ':' + '-1.0000000000000000e+308',
         }),
       ).length;
+      const plotEntry = (plot, pagePoints) => ({
+        id: Number(plot.id),
+        chart: Number(plot.chart),
+        non_scaling_params: plot.params,
+        rows: pagePoints,
+      });
       let bytes = envelope,
         emitted = 0,
         next = null,
@@ -304,19 +328,17 @@ async function plotPage(pool, key, query) {
           [plots.map((p) => p.id), position?.plot ?? null, position?.x ?? 0, drawnStates],
         );
         for (const row of batch) {
-          const point = toPoint(
-            row,
-            groupKey,
-            benchmarkKey,
-            params.get(String(row.plot_id)),
-          );
-          const size = encoder.encode(JSON.stringify(point)).length + 1; // comma
+          const id = String(row.plot_id);
+          const plot = byId.get(id);
+          const point = toPoint(row, groupKey, benchmarkKey, plot.params);
+          let size = encoder.encode(JSON.stringify(point)).length + 1; // comma
+          if (!byPlot.has(id))
+            size += encoder.encode(JSON.stringify(plotEntry(plot, []))).length + 1;
           if (emitted === PAGE_ROWS || (emitted > 0 && bytes + size > PAGE_BYTES)) {
             next = position.plot + ':' + position.x;
             done = true;
             break;
           }
-          const id = String(row.plot_id);
           if (!byPlot.has(id)) byPlot.set(id, []);
           byPlot.get(id).push(point);
           bytes += size;
@@ -329,11 +351,7 @@ async function plotPage(pool, key, query) {
         {
           revision: run.revision,
           total,
-          plots: [...byPlot].map(([id, pagePoints]) => ({
-            id: Number(id),
-            non_scaling_params: params.get(id),
-            rows: pagePoints,
-          })),
+          plots: [...byPlot].map(([id, pagePoints]) => plotEntry(byId.get(id), pagePoints)),
           next,
         },
         {immutable: run.state === 'completed'},

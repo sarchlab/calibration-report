@@ -2,11 +2,14 @@ import {Button, Paper, VisuallyHidden} from '@mantine/core';
 import {useId, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {drawChart} from './drawing.js';
 import {
+  chartParams,
   comparisonPairs,
   displayName,
   errorPercentiles,
   errorStats,
+  isLaunchGroup,
   isMarked,
+  launchGroupRows,
   parameterLabel,
   preferLogScale,
   rankingStats,
@@ -102,18 +105,20 @@ export function PlotCanvas({spec, theme, summary = false}) {
   useLayoutEffect(() => () => removePlot(id), [id, removePlot]);
   // Refreshed rows replace what a hover or pinned selection pointed at.
   // Rebuilt arrays of the same row objects (new metadata) are not a refresh.
-  const shownRows = useRef(spec.rows);
+  // A launch-group chart compares its dispatches, not its rebuilt medians.
+  const sourceRows = spec.dispatches ?? spec.rows;
+  const shownRows = useRef(sourceRows);
   useLayoutEffect(() => {
     const previous = shownRows.current;
-    shownRows.current = spec.rows;
+    shownRows.current = sourceRows;
     if (
-      previous === spec.rows ||
-      (previous?.length === spec.rows?.length &&
-        previous.every((row, i) => row === spec.rows[i]))
+      previous === sourceRows ||
+      (previous?.length === sourceRows?.length &&
+        previous.every((row, i) => row === sourceRows[i]))
     )
       return;
     removePlot(id);
-  }, [spec.rows, id, removePlot]);
+  }, [sourceRows, id, removePlot]);
   const [drawing, setDrawing] = useState(null);
   const [statusDetail, setStatusDetail] = useState('');
   useLayoutEffect(() => {
@@ -129,35 +134,44 @@ export function PlotCanvas({spec, theme, summary = false}) {
       ? hover
       : null;
   const point = active && points[active.index];
+  // One marker per X with unavailable results; in a launch-group chart, a
+  // status shared by several dispatches is listed once with its count.
   const markers = drawing?.xPosition
-    ? spec.rows.flatMap((row) => {
-        const marked = spec.series.filter((curve) => isMarked(row, curve.id));
-        if (!marked.length) return [];
-        const main =
-          marked.find((curve) => row.statuses[curve.id].state !== 'running') ??
-          marked[0];
-        const {state, symbol} = row.statuses[main.id];
-        const message = [
-          spec.xLabel + ' = ' + row.x,
-          ...marked.map((curve) => {
-            const status = row.statuses[curve.id];
-            return (
+    ? Array.from(
+        Map.groupBy(sourceRows, (row) => row.x),
+        ([x, rows]) => {
+          const marked = rows.flatMap((row) =>
+            spec.series
+              .filter((curve) => isMarked(row, curve.id))
+              .map((curve) => ({curve, status: row.statuses[curve.id]})),
+          );
+          if (!marked.length) return null;
+          const main =
+            marked.find(({status}) => status.state !== 'running') ?? marked[0];
+          const {state, symbol} = main.status;
+          const lines = new Map();
+          for (const {curve, status} of marked) {
+            const line =
               curve.name +
               ' · ' +
               visibleStates.get(status.state).label +
-              (status.reason ? ' · ' + status.reason : '')
-            );
-          }),
-        ].join('\n');
-        return [
-          {
-            row,
+              (status.reason ? ' · ' + status.reason : '');
+            lines.set(line, (lines.get(line) ?? 0) + 1);
+          }
+          const message = [
+            spec.xLabel + ' = ' + x,
+            ...Array.from(lines, ([line, n]) =>
+              n > 1 ? line + ' · ' + n + ' dispatches' : line,
+            ),
+          ].join('\n');
+          return {
+            x,
             state,
             symbol: symbol ?? visibleStates.get(state).symbol,
             message,
-          },
-        ];
-      })
+          };
+        },
+      ).filter(Boolean)
     : [];
   return (
     <div
@@ -245,7 +259,7 @@ export function PlotCanvas({spec, theme, summary = false}) {
             aria-label="Unavailable results"
             style={{top: 100 * drawing.statusPosition + '%'}}
           >
-            {markers.map(({row, state, symbol, message}, i) => (
+            {markers.map(({x, state, symbol, message}, i) => (
               <button
                 type="button"
                 className="plot-status-marker"
@@ -254,7 +268,7 @@ export function PlotCanvas({spec, theme, summary = false}) {
                   /\p{Emoji_Presentation}|\uFE0F/u.test(symbol) || undefined
                 }
                 key={i}
-                style={{left: 100 * drawing.xPosition(row.x) + '%'}}
+                style={{left: 100 * drawing.xPosition(x) + '%'}}
                 title={message}
                 aria-label={message}
                 onClick={() => setStatusDetail(message)}
@@ -299,6 +313,7 @@ export function PlotCanvas({spec, theme, summary = false}) {
 function CurvePlot({
   plotKey,
   rows,
+  dispatches,
   curves,
   series,
   xLabel,
@@ -310,7 +325,12 @@ function CurvePlot({
   const {close} = usePoints();
   const spec = useMemo(() => {
     const measures = curves
-      .flatMap((curve) => rows.map((row) => row.values[curve.id]))
+      .flatMap((curve) =>
+        rows.flatMap((row) => [
+          row.values[curve.id],
+          ...(row.launches?.curves[curve.id]?.bands.flat() ?? []),
+        ]),
+      )
       .filter(Number.isFinite);
     const bounds = valueBounds(measures);
     const canLog = {x: rows[0].x > 0, y: bounds !== null && bounds.min > 0};
@@ -323,6 +343,7 @@ function CurvePlot({
     return {
       kind: 'curve',
       rows,
+      dispatches,
       curves,
       series,
       xLabel,
@@ -331,7 +352,7 @@ function CurvePlot({
       scales,
       canLog,
     };
-  }, [rows, curves, series, xLabel, unit, preferences]);
+  }, [rows, dispatches, curves, series, xLabel, unit, preferences]);
   return (
     <div className="plot">
       <div className="scale-controls" role="group" aria-label="Axis scales">
@@ -415,29 +436,38 @@ export function Benchmark({
         pairs: groupPairs = comparisonPairs(rows, {[id]: meta}),
       }) => {
         const group = [...rows].sort((a, b) => a.x - b.x);
+        const grouped = isLaunchGroup(group[0].non_scaling_params);
         return {
           parameters,
           label: parameterLabel(
-            group[0].non_scaling_params,
+            chartParams(group[0].non_scaling_params),
             meta.params,
             parameterOrder,
           ),
-          plots: Array.from(units, ([unit, comparable]) => ({
-            unit,
-            comparable,
-            active: comparable.filter((curve) =>
-              group.some((row) => Number.isFinite(row.values[curve.id])),
-            ),
-            plotted: group.filter((row) =>
+          plots: Array.from(units, ([unit, comparable]) => {
+            const plotted = group.filter((row) =>
               comparable.some(
                 (curve) =>
                   Number.isFinite(row.values[curve.id]) ||
                   isMarked(row, curve.id),
               ),
-            ),
-            pairs: groupPairs.filter((pair) => pair.unit === unit),
-            key: JSON.stringify([rows[0].group, id, parameters, unit]),
-          })).filter((plot) => plot.plotted.length),
+            );
+            // Statistics always use every dispatch pair, never the medians.
+            const pairs = groupPairs.filter((pair) => pair.unit === unit);
+            return {
+              unit,
+              comparable,
+              active: comparable.filter((curve) =>
+                group.some((row) => Number.isFinite(row.values[curve.id])),
+              ),
+              rows: grouped
+                ? launchGroupRows(plotted, comparable, pairs)
+                : plotted,
+              dispatches: grouped ? plotted : undefined,
+              pairs,
+              key: JSON.stringify([rows[0].group, id, parameters, unit]),
+            };
+          }).filter((plot) => plot.rows.length),
         };
       },
     );
@@ -481,7 +511,8 @@ export function Benchmark({
               <div className="series-plot" key={plot.unit}>
                 <CurvePlot
                   plotKey={plot.key}
-                  rows={plot.plotted}
+                  rows={plot.rows}
+                  dispatches={plot.dispatches}
                   curves={plot.active}
                   series={plot.comparable}
                   xLabel={xLabel}

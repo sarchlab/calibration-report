@@ -1,30 +1,38 @@
+// The comparisons among `series` ([id, {name, unit, role}] entries): each
+// simulator series against the one hardware series of its unit, if exactly
+// one exists.
+export function seriesComparisons(series) {
+  const hardware = series.filter(
+    ([, value]) => value.role === 'hardware_measurement',
+  );
+  const matches = [];
+  for (const [id, simulated] of series) {
+    if (simulated.role !== 'simulator_output') continue;
+    const references = hardware.filter(
+      ([, value]) => value.unit === simulated.unit,
+    );
+    if (references.length !== 1) continue;
+    const [reference, measured] = references[0];
+    matches.push({
+      reference,
+      id,
+      unit: simulated.unit,
+      pairId: JSON.stringify([reference, id]),
+      name: simulated.name + ' vs. ' + measured.name,
+    });
+  }
+  return matches;
+}
+
 export function comparisonPairs(rows, benchmarks) {
   const pairs = [];
   const comparisons = new Map();
   for (const point of rows) {
-    if (!comparisons.has(point.benchmark)) {
-      const series = Object.entries(benchmarks[point.benchmark].values);
-      const hardware = series.filter(
-        ([, value]) => value.role === 'hardware_measurement',
+    if (!comparisons.has(point.benchmark))
+      comparisons.set(
+        point.benchmark,
+        seriesComparisons(Object.entries(benchmarks[point.benchmark].values)),
       );
-      const matches = [];
-      for (const [id, simulated] of series) {
-        if (simulated.role !== 'simulator_output') continue;
-        const references = hardware.filter(
-          ([, value]) => value.unit === simulated.unit,
-        );
-        if (references.length !== 1) continue;
-        const [reference, measured] = references[0];
-        matches.push({
-          reference,
-          id,
-          unit: simulated.unit,
-          pairId: JSON.stringify([reference, id]),
-          name: simulated.name + ' vs. ' + measured.name,
-        });
-      }
-      comparisons.set(point.benchmark, matches);
-    }
     for (const {reference, id, unit, pairId, name} of comparisons.get(
       point.benchmark,
     )) {
@@ -248,6 +256,93 @@ export function pairDescription(pair, extra = {}) {
   return pointDescription(pair.point, [pair], extra);
 }
 
+// The parameters that name a point's chart: its non_scaling_params, without
+// `launch` when it has a `launch_group`, so that repeated launches of one
+// group share a chart and each launch stays a separate row. The hosted API
+// applies the same rule in SQL (`chartKey` in netlify/lib/api.js).
+export function chartParams(params) {
+  if (!Object.hasOwn(params, 'launch_group')) return params;
+  const {launch: _launch, ...rest} = params;
+  return rest;
+}
+
+export const isLaunchGroup = (params) => Object.hasOwn(params, 'launch_group');
+
+// Shaded percentile bands of launch-group charts, outermost first: the
+// [low, high] quantiles and the dispatches an X needs to draw the level.
+export const launchBands = [
+  {low: 0.02, high: 0.98, minimum: 50},
+  {low: 0.1, high: 0.9, minimum: 10},
+  {low: 0.25, high: 0.75, minimum: 4},
+];
+
+// Linearly interpolated quantile of ascending values.
+export function quantile(sorted, q) {
+  const position = q * (sorted.length - 1);
+  const low = Math.floor(position);
+  const high = Math.min(low + 1, sorted.length - 1);
+  return sorted[low] + (sorted[high] - sorted[low]) * (position - low);
+}
+
+// The drawn rows of one unit's plot of a launch-group chart: one row per X of
+// `rows` (the dispatches, sorted by x) whose values are medians. `pairs` are
+// the chart's comparison pairs of that unit (comparisonPairs). A curve's
+// median and bands at an X are taken over its dispatches with a valid pair:
+// a simulated curve over the pairs with its reference, a measured curve over
+// the union of the pairs it is the reference of, so a measured-versus-
+// simulated curve pair uses one dispatch set. A curve without valid pairs at
+// that X (hardware-only, untagged, or unpaired results) uses every dispatch
+// with a finite value. `curves` carry their series metadata (name, unit,
+// role). `launches` keeps the dispatches, the paired count of every
+// comparison of `curves` at that X (0 when none paired), and, per curve, the
+// sorted values and band ranges (null below a level's minimum).
+export function launchGroupRows(rows, curves, pairs) {
+  const pairsAt = Map.groupBy(pairs, (pair) => pair.point.x);
+  const configured = seriesComparisons(curves.map((curve) => [curve.id, curve]));
+  return Array.from(Map.groupBy(rows, (row) => row.x), ([x, dispatches]) => {
+    const paired = new Map();
+    const found = Map.groupBy(pairsAt.get(x) ?? [], (pair) => pair.id);
+    const comparisons = configured.map(({pairId, name}) => ({
+      id: pairId,
+      name,
+      count: found.get(pairId)?.length ?? 0,
+    }));
+    for (const [id, list] of found) {
+      const [reference, simulated] = JSON.parse(id);
+      paired.set(simulated, new Map(list.map((pair) => [pair.point, pair.prediction])));
+      if (!paired.has(reference)) paired.set(reference, new Map());
+      for (const pair of list) paired.get(reference).set(pair.point, pair.actual);
+    }
+    // Series keys are producer-chosen (`__proto__`).
+    const values = Object.create(null);
+    const sets = Object.create(null);
+    for (const curve of curves) {
+      const sorted = (
+        paired.has(curve.id)
+          ? [...paired.get(curve.id).values()]
+          : dispatches.map((row) => row.values[curve.id]).filter(Number.isFinite)
+      ).sort((a, b) => a - b);
+      if (!sorted.length) continue;
+      values[curve.id] = quantile(sorted, 0.5);
+      sets[curve.id] = {
+        sorted,
+        bands: launchBands.map(({low, high, minimum}) =>
+          sorted.length >= minimum ? [quantile(sorted, low), quantile(sorted, high)] : null,
+        ),
+      };
+    }
+    const first = dispatches[0];
+    return {
+      group: first.group,
+      benchmark: first.benchmark,
+      x,
+      non_scaling_params: chartParams(first.non_scaling_params),
+      values,
+      launches: {rows: dispatches, comparisons, curves: sets},
+    };
+  });
+}
+
 // Build once per data revision. Off-page series keep only row/pair references;
 // their sorting, plot specifications and canvases are created when visited.
 export function indexReport(data, benchmarks) {
@@ -255,7 +350,7 @@ export function indexReport(data, benchmarks) {
   const pairs = comparisonPairs(rows, benchmarks);
   const groups = new Map();
   const parameterKey = (point) =>
-    JSON.stringify(Object.entries(point.non_scaling_params).sort());
+    JSON.stringify(Object.entries(chartParams(point.non_scaling_params)).sort());
   for (const point of rows) {
     if (!groups.has(point.group))
       groups.set(point.group, {pairs: [], benchmarks: new Map()});
@@ -305,6 +400,11 @@ export const API_VERSION = 'v1';
 // summary changes (2: point_progress); part of the summary URL (`format=`)
 // and of its cache key, so cached old-format summaries are never served.
 export const SUMMARY_FORMAT = 2;
+// Version of the plots response within API_VERSION (2: pages charts, plots
+// carry `chart`); the viewer sends it as `format=` on every plots request, so
+// a cached immutable response of an older format is never reused, and the
+// Function rejects any other format.
+export const PLOTS_FORMAT = 2;
 
 // The row filter of indexReport: a finite value or a drawn status.
 export function isVisibleRow(point) {

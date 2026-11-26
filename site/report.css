@@ -211,6 +211,15 @@ a { color: var(--link); text-underline-offset: 3px; }
 .point-direction { padding: 2px 5px; border-radius: 4px; background: var(--stat-surface); color: var(--secondary); font-size: 9px; font-weight: 500; }
 .point-comparison-name { font-size: 10px; color: var(--muted); margin-bottom: 4px; }
 .point-configuration { border-top: 1px solid var(--divider); padding-top: 10px; }
+.point-launches { border-top: 1px solid var(--divider); padding: 10px 0; }
+.point-launch-series { margin-top: 3px; }
+.point-launch-series dt { color: var(--text); font-weight: 500; }
+.point-dispatches { margin-top: 8px; font-size: 11px; }
+.point-dispatches summary { cursor: pointer; color: var(--muted); }
+.point-dispatches table { width: 100%; margin-top: 5px; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.point-dispatches th, .point-dispatches td { padding: 2px 4px; text-align: right; font-weight: 400; white-space: nowrap; }
+.point-dispatches th[scope="col"] { color: var(--muted); font-weight: 500; }
+.point-dispatches th:first-child { text-align: left; }
 .point-section-label { color: var(--muted); font-size: 9px; font-weight: 650; text-transform: uppercase; letter-spacing: .08em; }
 .point-parameters { display: grid; gap: 5px; margin: 7px 0 0; font-size: 11px; }
 .point-parameters > div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; align-items: baseline; }
@@ -226,6 +235,8 @@ a { color: var(--link); text-underline-offset: 3px; }
 .point-controls button:last-child { margin-left: auto; color: var(--muted); }
 .point-preview-hint { margin: 8px 0 0; color: var(--muted); font-size: 10px; }
 .point-detail:not(.point-detail-pinned) .point-configuration,
+.point-detail:not(.point-detail-pinned) .point-dispatches,
+.point-detail:not(.point-detail-pinned) .point-launch-spread,
 .point-detail:not(.point-detail-pinned) .point-measurement-reason { display: none; }
 .point-detail-pinned { position: fixed; top: 16px; right: 16px; bottom: auto; left: auto; z-index: 10; display: flex; flex-direction: column; box-sizing: border-box; width: var(--point-panel-width); max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); margin: 0; overflow: hidden; }
 .point-detail-pinned .point-description { min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; }

@@ -84,7 +84,8 @@ function summary(scope, revision, computedAt, limits = summaryLimits, fft = fals
     })(limits),
   };
 }
-function plotPage(group, bump = 0) {
+// With `launchGroup`, both launches belong to launch group `k`, one chart.
+function plotPage(group, bump = 0, launchGroup = false) {
   const plots = [0, 1].map((launch) => {
     const plotRows = rows
       .filter((row) => row.group === group && row.non_scaling_params.launch === launch)
@@ -92,10 +93,12 @@ function plotPage(group, bump = 0) {
       .map(({plot, ...point}) => ({...point, values: {...point.values, sim: point.values.sim + bump}}));
     // jsonb key order, and keys that object literals cannot hold.
     const params = JSON.parse(
-      `{"2":"d","10":"c","constructor":"b","__proto__":"a","launch":${launch}}`,
+      `{"2":"d","10":"c","constructor":"b","__proto__":"a","launch":${launch}` +
+        (launchGroup ? ',"launch_group":"k"}' : '}'),
     );
     return {
       id: 100 + launch,
+      chart: launchGroup ? 100 : 100 + launch,
       non_scaling_params: params,
       rows: plotRows.map((row) => ({...row, non_scaling_params: params})),
     };
@@ -134,6 +137,12 @@ function stubApi(state) {
     if (path === 'api/v1/runs') body = [{key: 'demo', title: 'Hosted fixture', state: 'running', updated_at: new Date().toISOString()}];
     else if (path === 'api/v1/runs/demo') {
       body = manifest(state.revision, state.state, state.completed, state.updatedAt);
+      if (state.launchGroup) {
+        const gemm = body.benchmarks.gemm;
+        body.benchmarks = {gemm: {...gemm, params: {...gemm.params, launch_group: {unit: ''}}}};
+        body.param_keys = [[...paramKeys[0], 'launch_group']];
+        body.plots = {a: [[0, 1]], b: [[0, 1]]};
+      }
       if (state.manifestFft) {
         body.benchmarks = {...body.benchmarks, fft: fftMeta};
         body.benchmark_keys = [...body.benchmark_keys, 'fft'];
@@ -150,7 +159,17 @@ function stubApi(state) {
       if (state.state) body.state = state.state;
       if (state.pointProgress) body.point_progress = state.pointProgress;
     }
-    else if (path.includes('/plots')) body = plotPage(query.get('group'), state.bump);
+    else if (path.includes('/plots')) {
+      body = plotPage(query.get('group'), state.bump, state.launchGroup);
+      // With `plotRevisions`, a page comes in two chunks, each answered at
+      // the next listed revision.
+      if (state.plotRevisions) {
+        body.revision = state.plotRevisions.shift() ?? body.revision;
+        body = query.get('after')
+          ? {...body, plots: body.plots.slice(1)}
+          : {...body, plots: body.plots.slice(0, 1), next: '100:4'};
+      }
+    }
     const text = JSON.stringify(body);
     return {ok: true, status: 200, json: async () => JSON.parse(text)};
   }
@@ -205,7 +224,54 @@ test('a hosted run shows the server summary and server-paged series', async () =
   for (const heading of card.querySelectorAll('.series h3'))
     expect(heading.textContent).toMatch(/^launch=\d · {3}proto {2}=a · constructor=b · 10=c · 2=d$/);
   expect(calls).toContain('api/v1/runs/demo/summary?rid=7&scope=group%3A3&format=2');
-  expect(calls.some((c) => c.includes('/plots?rid=7&group=a&benchmark=gemm&offset=0&limit=6'))).toBe(true);
+  expect(calls.some((c) => c.includes('/plots?rid=7&group=a&benchmark=gemm&offset=0&limit=6&format=2'))).toBe(true);
+});
+
+test('a hosted launch group gathers its plots into one median chart', async () => {
+  stubApi({revision: 1, computedAt: new Date().toISOString(), launchGroup: true});
+  mount(<HostedReport runKey="demo" />);
+  expect(await screen.findByText('Overview · Accuracy summary')).toBeTruthy();
+  fireEvent.click(screen.getByRole('tab', {name: 'Device A'}));
+  await screen.findByText('Benchmark-wide error');
+  const card = screen.getByRole('article');
+  expect(card.querySelectorAll('.series')).toHaveLength(1);
+  expect(card.querySelector('.series h3').textContent).toBe(
+    '  proto  =a · constructor=b · 10=c · 2=d · launch group=k',
+  );
+  // Statistics count both launches' pairs; the chart draws one median per X.
+  expect(within(card).getAllByTitle('Based on 6 paired measurements').length).toBeGreaterThan(0);
+  const canvas = within(card).getByRole('img');
+  canvas.focus();
+  fireEvent.keyDown(canvas, {key: 'Home'});
+  expect(screen.getByText('1 / 6')).toBeTruthy();
+  const details = document.querySelector('.point-detail-pinned');
+  expect(within(details).getByText('Dispatches at this X').nextSibling.textContent).toBe('2');
+  expect(within(details).getAllByText('median of 2')).toHaveLength(2);
+});
+
+test('a plot page whose chunks span revisions is read again', async () => {
+  const state = {
+    revision: 1,
+    computedAt: new Date().toISOString(),
+    launchGroup: true,
+    plotRevisions: [1, 2, 2, 2],
+  };
+  const calls = stubApi(state);
+  mount(<HostedReport runKey="demo" />);
+  expect(await screen.findByText('Overview · Accuracy summary')).toBeTruthy();
+  fireEvent.click(screen.getByRole('tab', {name: 'Device A'}));
+  await screen.findByText('Benchmark-wide error');
+  const pages = calls.filter((c) => c.includes('/plots?') && c.includes('group=a'));
+  expect(pages).toHaveLength(4);
+  expect(pages[1]).toContain('&after=100%3A4');
+  expect(pages[2]).not.toContain('after=');
+  const card = screen.getByRole('article');
+  expect(card.querySelectorAll('.series')).toHaveLength(1);
+  const canvas = within(card).getByRole('img');
+  canvas.focus();
+  fireEvent.keyDown(canvas, {key: 'Home'});
+  const details = document.querySelector('.point-detail-pinned');
+  expect(within(details).getByText('Dispatches at this X').nextSibling.textContent).toBe('2');
 });
 
 test('a live summary is re-requested only after new data and the interval', async () => {
