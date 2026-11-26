@@ -1,5 +1,6 @@
 // CSV export of a hosted run, built in the browser from the read API's plot
 // pages (docs/backend-design.md §6). Pure apart from `fetchPage`.
+import {PLOTS_FORMAT} from './model.js';
 
 const PLOTS_PER_PAGE = 48;
 const CONCURRENCY = 4;
@@ -127,6 +128,7 @@ export async function runCsv(manifest, fetchPage, {onProgress, signal} = {}) {
           benchmark: task.benchmark,
           offset,
           limit: PLOTS_PER_PAGE,
+          format: PLOTS_FORMAT,
         });
         if (after) query.set('after', after);
         const body = await fetchPage(query.toString(), controller.signal);

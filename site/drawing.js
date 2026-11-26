@@ -350,13 +350,16 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
         ctx.beginPath();
         ctx.arc(x(i), y(value), 2.6, 0, 2 * Math.PI);
         ctx.fill();
+        // A launch-group median is compared only when both medians come
+        // from the same paired dispatches.
+        const paired = row.launches?.comparisons.map((comparison) => comparison.id);
         hitPoints.push({
           x: x(i),
           y: y(value),
           description: pointDescription(
             row,
             comparisonPairs([row], benchmarks).filter(
-              (pair) => pair.unit === unit,
+              (pair) => pair.unit === unit && (!paired || paired.includes(pair.id)),
             ),
             {},
             curve.id,

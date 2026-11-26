@@ -220,7 +220,9 @@ export function PointDescription({description, benchmarks, groups}) {
                 <div className="point-comparison-name">{pair.name}</div>
               )}
               <div className="point-metric-row">
-                <span className="point-metric-label">Signed error</span>
+                <span className="point-metric-label">
+                  {point.launches ? 'Error between medians' : 'Signed error'}
+                </span>
                 <span className="point-error-result">
                   <strong className="point-error-value">
                     {pair.signedError > 0

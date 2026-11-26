@@ -109,7 +109,11 @@ describe('medians and bands', () => {
     const [row] = rowsFor(rows);
     expect(row.launches.rows).toHaveLength(10);
     expect(row.launches.comparisons).toEqual([
-      {name: 'Simulator kernel time vs. GPU kernel time', count: 5},
+      {
+        id: JSON.stringify(['hw', 'sim']),
+        name: 'Simulator kernel time vs. GPU kernel time',
+        count: 5,
+      },
     ]);
     expect(row.values.hw).toBe(median([100, 102, 104, 106, 108]));
     expect(row.values.sim).toBe(median([300, 302, 304, 306, 308]));
@@ -122,6 +126,49 @@ describe('medians and bands', () => {
     expect(row.values).toEqual({hw: 30});
     expect(row.launches.comparisons).toEqual([]);
     expect(row.launches.curves.hw.bands).toEqual([null, null, [20, 40]]);
+  });
+
+  test('medians are compared only over one non-empty paired set', () => {
+    const hitComparisons = (rows) =>
+      drawChart(
+        document.createElement('canvas'),
+        {
+          kind: 'curve',
+          rows: rowsFor(rows),
+          curves,
+          xLabel: 'size',
+          unit: 'ns',
+          bounds: {min: 1, max: 1e3},
+          scales: {x: false, y: false},
+        },
+        {grid: '#ddd', label: '#333'},
+        benchmarks,
+      ).hitPoints.map((point) => point.description.comparisons.length);
+    // One dispatch has only a measured value, the other only a simulated one:
+    // both medians fall back to unpaired values.
+    const unpaired = dispatches(2, (i) => (i ? {sim: 200} : {hw: 100}));
+    expect(rowsFor(unpaired)[0].values).toEqual({hw: 100, sim: 200});
+    expect(hitComparisons(unpaired)).toEqual([0, 0]);
+    expect(hitComparisons(dispatches(3))).toEqual([1, 1]);
+  });
+
+  test('producer-chosen series keys survive as median values', () => {
+    const meta = JSON.parse(
+      '{"b":{"scaling_param":"x","params":{"x":{"unit":""}},' +
+        '"values":{"__proto__":{"name":"Odd","unit":"ns"}}}}',
+    );
+    const rows = [5, 7, 9].map((value, launch) => ({
+      group: 'gpu',
+      benchmark: 'b',
+      x: 1,
+      non_scaling_params: {launch, launch_group: 'g'},
+      values: JSON.parse(`{"__proto__": ${value}}`),
+    }));
+    const [row] = launchGroupRows(rows, [{id: '__proto__'}], comparisonPairs(rows, meta));
+    expect(Object.hasOwn(row.values, '__proto__')).toBe(true);
+    expect(row.values['__proto__']).toBe(7);
+    expect(Object.hasOwn(row.launches.curves, '__proto__')).toBe(true);
+    expect(JSON.stringify(row.values)).toBe('{"__proto__":7}');
   });
 
   test('bands are filled behind grouped curves only, in each curve color', () => {
@@ -279,6 +326,7 @@ describe('file viewer', () => {
         />
       </MantineProvider>,
     );
+    expect(screen.getByText('Error between medians')).toBeTruthy();
     const details = document.querySelector('.point-launches');
     expect(document.querySelector('.point-kernel').textContent).toBe('fdtd_update_ex');
     expect(within(details).getByText('Dispatches at this X').nextSibling.textContent).toBe('199');

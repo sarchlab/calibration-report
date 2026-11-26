@@ -104,6 +104,7 @@ describe('runCsv', () => {
       queries.push(query);
       const {group, benchmark} = Object.fromEntries(q);
       expect(q.get('rid')).toBe('7');
+      expect(q.get('format')).toBe('2');
       if (group === 'a' && benchmark === 'gemm') {
         // Plot 1 continues in a second chunk.
         if (!q.get('after'))

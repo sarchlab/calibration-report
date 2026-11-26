@@ -1,7 +1,13 @@
 // Read API of hosted reports (docs/backend-design.md §5). Platform-free: the
 // Netlify Function passes a pg-compatible pool and a Netlify Blobs store, and
 // tests pass their own.
-import {API_VERSION, SUMMARY_FORMAT, buildSummary, summaryLimits} from '../../site/model.js';
+import {
+  API_VERSION,
+  PLOTS_FORMAT,
+  SUMMARY_FORMAT,
+  buildSummary,
+  summaryLimits,
+} from '../../site/model.js';
 
 const PAGE_BYTES = 4 * 1024 * 1024;
 const PAGE_ROWS = 20000;
@@ -247,6 +253,10 @@ async function plotPage(pool, key, query) {
   const benchmarkKey = query.get('benchmark');
   if (groupKey === null || benchmarkKey === null)
     throw new HttpError(400, 'group and benchmark are required');
+  // A request without the current format comes from an older viewer, whose
+  // offsets count plots rather than charts.
+  if (query.get('format') !== String(PLOTS_FORMAT))
+    throw new HttpError(400, 'Unsupported plots format; reload the page');
   const offset = nonNegativeInteger(query.get('offset'), 0, 'offset');
   const limit = Math.min(
     MAX_PLOTS_PER_PAGE,

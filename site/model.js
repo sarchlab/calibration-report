@@ -284,8 +284,9 @@ export function quantile(sorted, q) {
 // the union of the pairs it is the reference of, so a measured-versus-
 // simulated curve pair uses one dispatch set. A curve without valid pairs at
 // that X (hardware-only, untagged, or unpaired results) uses every dispatch
-// with a finite value. `launches` keeps the dispatches and, per curve, the
-// sorted values and band ranges (null below a level's minimum).
+// with a finite value. `launches` keeps the dispatches, the paired count of
+// each comparison present at that X, and, per curve, the sorted values and
+// band ranges (null below a level's minimum).
 export function launchGroupRows(rows, curves, pairs) {
   const pairsAt = Map.groupBy(pairs, (pair) => pair.point.x);
   return Array.from(Map.groupBy(rows, (row) => row.x), ([x, dispatches]) => {
@@ -293,13 +294,14 @@ export function launchGroupRows(rows, curves, pairs) {
     const comparisons = [];
     for (const [id, list] of Map.groupBy(pairsAt.get(x) ?? [], (pair) => pair.id)) {
       const [reference, simulated] = JSON.parse(id);
-      comparisons.push({name: list[0].name, count: list.length});
+      comparisons.push({id, name: list[0].name, count: list.length});
       paired.set(simulated, new Map(list.map((pair) => [pair.point, pair.prediction])));
       if (!paired.has(reference)) paired.set(reference, new Map());
       for (const pair of list) paired.get(reference).set(pair.point, pair.actual);
     }
-    const values = {};
-    const sets = {};
+    // Series keys are producer-chosen (`__proto__`).
+    const values = Object.create(null);
+    const sets = Object.create(null);
     for (const curve of curves) {
       const sorted = (
         paired.has(curve.id)
@@ -384,6 +386,11 @@ export const API_VERSION = 'v1';
 // summary changes (2: point_progress); part of the summary URL (`format=`)
 // and of its cache key, so cached old-format summaries are never served.
 export const SUMMARY_FORMAT = 2;
+// Version of the plots response within API_VERSION (2: pages charts, plots
+// carry `chart`); the viewer sends it as `format=` on every plots request, so
+// a cached immutable response of an older format is never reused, and the
+// Function rejects any other format.
+export const PLOTS_FORMAT = 2;
 
 // The row filter of indexReport: a finite value or a drawn status.
 export function isVisibleRow(point) {

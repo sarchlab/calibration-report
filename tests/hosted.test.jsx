@@ -159,8 +159,17 @@ function stubApi(state) {
       if (state.state) body.state = state.state;
       if (state.pointProgress) body.point_progress = state.pointProgress;
     }
-    else if (path.includes('/plots'))
+    else if (path.includes('/plots')) {
       body = plotPage(query.get('group'), state.bump, state.launchGroup);
+      // With `plotRevisions`, a page comes in two chunks, each answered at
+      // the next listed revision.
+      if (state.plotRevisions) {
+        body.revision = state.plotRevisions.shift() ?? body.revision;
+        body = query.get('after')
+          ? {...body, plots: body.plots.slice(1)}
+          : {...body, plots: body.plots.slice(0, 1), next: '100:4'};
+      }
+    }
     const text = JSON.stringify(body);
     return {ok: true, status: 200, json: async () => JSON.parse(text)};
   }
@@ -215,7 +224,7 @@ test('a hosted run shows the server summary and server-paged series', async () =
   for (const heading of card.querySelectorAll('.series h3'))
     expect(heading.textContent).toMatch(/^launch=\d · {3}proto {2}=a · constructor=b · 10=c · 2=d$/);
   expect(calls).toContain('api/v1/runs/demo/summary?rid=7&scope=group%3A3&format=2');
-  expect(calls.some((c) => c.includes('/plots?rid=7&group=a&benchmark=gemm&offset=0&limit=6'))).toBe(true);
+  expect(calls.some((c) => c.includes('/plots?rid=7&group=a&benchmark=gemm&offset=0&limit=6&format=2'))).toBe(true);
 });
 
 test('a hosted launch group gathers its plots into one median chart', async () => {
@@ -238,6 +247,31 @@ test('a hosted launch group gathers its plots into one median chart', async () =
   const details = document.querySelector('.point-detail-pinned');
   expect(within(details).getByText('Dispatches at this X').nextSibling.textContent).toBe('2');
   expect(within(details).getAllByText('median of 2')).toHaveLength(2);
+});
+
+test('a plot page whose chunks span revisions is read again', async () => {
+  const state = {
+    revision: 1,
+    computedAt: new Date().toISOString(),
+    launchGroup: true,
+    plotRevisions: [1, 2, 2, 2],
+  };
+  const calls = stubApi(state);
+  mount(<HostedReport runKey="demo" />);
+  expect(await screen.findByText('Overview · Accuracy summary')).toBeTruthy();
+  fireEvent.click(screen.getByRole('tab', {name: 'Device A'}));
+  await screen.findByText('Benchmark-wide error');
+  const pages = calls.filter((c) => c.includes('/plots?') && c.includes('group=a'));
+  expect(pages).toHaveLength(4);
+  expect(pages[1]).toContain('&after=100%3A4');
+  expect(pages[2]).not.toContain('after=');
+  const card = screen.getByRole('article');
+  expect(card.querySelectorAll('.series')).toHaveLength(1);
+  const canvas = within(card).getByRole('img');
+  canvas.focus();
+  fireEvent.keyDown(canvas, {key: 'Home'});
+  const details = document.querySelector('.point-detail-pinned');
+  expect(within(details).getByText('Dispatches at this X').nextSibling.textContent).toBe('2');
 });
 
 test('a live summary is re-requested only after new data and the interval', async () => {

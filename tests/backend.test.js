@@ -440,7 +440,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
       const view = index.groups.get('a').benchmarks.find((b) => b.id === 'gemm');
       const rid = manifest.id;
       const {body, headers} = await api(
-        `/synthetic/plots?rid=${rid}&group=a&benchmark=gemm&offset=1&limit=2`,
+        `/synthetic/plots?format=2&rid=${rid}&group=a&benchmark=gemm&offset=1&limit=2`,
       );
       expect(headers.get('cache-control')).toContain('immutable');
       expect(body.total).toBe(view.series.length);
@@ -452,18 +452,25 @@ describe.skipIf(!dsn)('hosted backend', () => {
       // A continuation cursor resumes after the given row.
       const first = body.plots[0];
       const rest = await api(
-        `/synthetic/plots?rid=${rid}&group=a&benchmark=gemm&offset=1&limit=2&after=${first.id}:${first.rows[0].x}`,
+        `/synthetic/plots?format=2&rid=${rid}&group=a&benchmark=gemm&offset=1&limit=2&after=${first.id}:${first.rows[0].x}`,
       );
       expect(rest.body.plots[0].rows).toEqual(first.rows.slice(1));
     });
 
     it('returns single points and rejects replaced run ids', async () => {
-      const {body: page} = await api(`/synthetic/plots?rid=${manifest.id}&group=b&benchmark=gemm`);
+      const {body: page} = await api(`/synthetic/plots?format=2&rid=${manifest.id}&group=b&benchmark=gemm`);
       const plot = page.plots[0];
       const {body} = await api(`/synthetic/points/${plot.id}/${plot.rows[0].x}?rid=${manifest.id}`);
       expect(body.point).toEqual(plot.rows[0]);
-      expect((await api(`/synthetic/plots?rid=999999&group=a&benchmark=gemm`)).status).toBe(409);
+      expect((await api(`/synthetic/plots?format=2&rid=999999&group=a&benchmark=gemm`)).status).toBe(409);
       expect((await api(`/unknown`)).status).toBe(404);
+    });
+
+    it('rejects plot pages of a missing or older format', async () => {
+      const path = `/synthetic/plots?rid=${manifest.id}&group=a&benchmark=gemm`;
+      for (const format of ['', '&format=1'])
+        expect((await api(path + format)).status).toBe(400);
+      expect((await api(path + '&format=2')).status).toBe(200);
     });
 
     it('computes exact summary statistics equal to the file viewer', async () => {
@@ -545,7 +552,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
       await put('live', report.data.slice(150));
       manifest = await api('/live');
       expect(manifest.revision).toBeGreaterThan(first.revision);
-      const page = await api(`/live/plots?rid=${manifest.id}&group=a&benchmark=fft&limit=48`);
+      const page = await api(`/live/plots?format=2&rid=${manifest.id}&group=a&benchmark=fft&limit=48`);
       expect(page.plots.flatMap((p) => p.rows).length).toBe(
         report.data.filter((p) => p.group === 'a' && p.benchmark === 'fft').length,
       );
@@ -759,7 +766,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
         chunks = 0;
       do {
         const {body, bytes} = await api(
-          `/wide-points/plots?rid=${manifest.id}&group=g&benchmark=b` +
+          `/wide-points/plots?format=2&rid=${manifest.id}&group=g&benchmark=b` +
             (after ? '&after=' + after : ''),
         );
         expect(bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
@@ -846,7 +853,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
           chunks = 0;
         do {
           const {body, bytes} = await api(
-            `/fdtd/plots?rid=${manifest.id}&group=gpu&benchmark=polybench_fdtd2d` +
+            `/fdtd/plots?format=2&rid=${manifest.id}&group=gpu&benchmark=polybench_fdtd2d` +
               `&offset=${offset}&limit=6` +
               (after ? '&after=' + after : ''),
           );
@@ -878,7 +885,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
       }
       // Single points stay addressable by their dispatch plot.
       const {body: page} = await api(
-        `/fdtd/plots?rid=${manifest.id}&group=gpu&benchmark=polybench_fdtd2d&limit=1`,
+        `/fdtd/plots?format=2&rid=${manifest.id}&group=gpu&benchmark=polybench_fdtd2d&limit=1`,
       );
       const [plot] = page.plots;
       const {body: single} = await api(`/fdtd/points/${plot.id}/${plot.rows[0].x}?rid=${manifest.id}`);

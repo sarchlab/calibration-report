@@ -5,13 +5,15 @@ import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {ReportHeader, RunProgress, useChartTheme} from './Layout.jsx';
 import {Benchmark, Summary} from './Charts.jsx';
 import {PointProvider} from './PointDetails.jsx';
-import {API_VERSION, SUMMARY_FORMAT} from './model.js';
+import {API_VERSION, PLOTS_FORMAT, SUMMARY_FORMAT} from './model.js';
 import {runCsv} from './csv.js';
 import {PageControls, pageWindow} from './Pagination.jsx';
 
 const POLL_MS = 10_000;
 const STALE_MS = 30 * 60_000;
 const benchmarkPageSizes = [5, 10, 20, 50];
+// Reads of one plot page before giving up on a run that keeps changing.
+const PAGE_ATTEMPTS = 3;
 
 class ReplacedRun extends Error {}
 
@@ -296,6 +298,7 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
     offset: window.start,
     // The page size, so a growing last page keeps its query.
     limit: window.size,
+    format: PLOTS_FORMAT,
   }).toString();
   const revision = manifest.state === 'running' ? manifest.revision : 'final';
   const wanted = useRef(revision);
@@ -304,22 +307,35 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
     const loading = wanted.current;
     start(
       async (signal) => {
-        // One series per chart: a launch-group chart gathers its plots.
-        const charts = new Map();
-        let after = null;
-        do {
-          const body = await fetchJson(
-            `${runPath(runKey)}/plots?${query}${after ? '&after=' + encodeURIComponent(after) : ''}`,
-            signal,
-          );
-          for (const plot of body.plots) {
-            if (!charts.has(plot.chart))
-              charts.set(plot.chart, {parameters: String(plot.chart), rows: []});
-            charts.get(plot.chart).rows.push(...plot.rows);
-          }
-          after = body.next;
-        } while (after);
-        return [...charts].sort(([a], [b]) => a - b).map(([, series]) => series);
+        // One series per chart: a launch-group chart gathers its plots. All
+        // chunks of a page must come from one revision, or a write between
+        // them could split a chart; a mixed page is read again.
+        for (let attempt = 0; attempt < PAGE_ATTEMPTS; attempt++) {
+          const charts = new Map();
+          let after = null,
+            first = null,
+            mixed = false;
+          do {
+            const body = await fetchJson(
+              `${runPath(runKey)}/plots?${query}${after ? '&after=' + encodeURIComponent(after) : ''}`,
+              signal,
+            );
+            first ??= body.revision;
+            if (body.revision !== first) {
+              mixed = true;
+              break;
+            }
+            for (const plot of body.plots) {
+              if (!charts.has(plot.chart))
+                charts.set(plot.chart, {parameters: String(plot.chart), rows: []});
+              charts.get(plot.chart).rows.push(...plot.rows);
+            }
+            after = body.next;
+          } while (after);
+          if (!mixed)
+            return [...charts].sort(([a], [b]) => a - b).map(([, series]) => series);
+        }
+        throw new Error('The run kept changing while its page loaded');
       },
       (series) => setPage({query, revision: loading, series}),
     );
