@@ -1,7 +1,7 @@
 // Read API of hosted reports (docs/backend-design.md §5). Platform-free: the
 // Netlify Function passes a pg-compatible pool and a Netlify Blobs store, and
 // tests pass their own.
-import {API_VERSION, buildSummary, summaryLimits} from '../../site/model.js';
+import {API_VERSION, SUMMARY_FORMAT, buildSummary, summaryLimits} from '../../site/model.js';
 
 const PAGE_BYTES = 4 * 1024 * 1024;
 const PAGE_ROWS = 20000;
@@ -374,6 +374,39 @@ async function singlePoint(pool, key, query, plot, x) {
   );
 }
 
+// Live progress of the whole run, derived from its written points: parallel
+// writers cannot maintain runs.progress, which then changes only at open and
+// finish (§5). A point counts once,
+// by the observations of its benchmark's simulator_output series (a missing
+// observation counts as queued): failed if any has a state other than queued
+// or running, else running if any is running, else completed if every one
+// has a value and no state, else queued. Points of benchmarks without a
+// simulator_output series are not counted. Every scope's summary carries
+// the whole run's progress, so the progress card does not change with tabs.
+async function runPointProgress(client, groups) {
+  const progress = {total: 0, completed: 0, running: 0, failed: 0, queued: 0};
+  for (const {status, n} of await rows(
+    client,
+    `SELECT status, count(*)::int AS n FROM (
+       SELECT CASE
+         WHEN bool_or(o.state NOT IN ('queued', 'running')) THEN 'failed'
+         WHEN bool_or(o.state = 'running') THEN 'running'
+         WHEN bool_and(o.value IS NOT NULL AND o.state IS NULL) THEN 'completed'
+         ELSE 'queued' END AS status
+       FROM cr.points p
+       JOIN cr.series s ON s.benchmark_id = p.benchmark_id AND s.role = 'simulator_output'
+       LEFT JOIN cr.observations o ON o.point_id = p.id AND o.series_id = s.id
+       WHERE p.group_id = ANY ($1::bigint[])
+       GROUP BY p.id) per_point
+     GROUP BY status`,
+    [groups.map(([id]) => id)],
+  )) {
+    progress[status] = n;
+    progress.total += n;
+  }
+  return progress;
+}
+
 const halve = (limits) =>
   Object.fromEntries(Object.entries(limits).map(([k, v]) => [k, v >> 1]));
 
@@ -401,10 +434,11 @@ async function computeSummary(pool, key, rid, requested, scope, envelope) {
       // The group count may have changed since the scope was resolved: a
       // one-group Overview is no longer its group.
       if (requested === 'overview' && canonicalScope(groups) !== scope) return null;
-      if (scope !== 'overview') {
-        groups = groups.filter(([id]) => 'group:' + id === scope);
-        if (!groups.length) throw new HttpError(404, 'Unknown scope');
-      }
+      const scoped =
+        scope === 'overview' ? groups : groups.filter(([id]) => 'group:' + id === scope);
+      if (!scoped.length) throw new HttpError(404, 'Unknown scope');
+      const pointProgress = await runPointProgress(client, groups);
+      groups = scoped;
       const series = await rows(
         client,
         `SELECT b.id AS benchmark_id, b.key AS benchmark, s.key, s.name, s.unit, s.role
@@ -457,7 +491,7 @@ async function computeSummary(pool, key, rid, requested, scope, envelope) {
           plotParams.set(String(id), params);
         for (const id of Object.keys(summary.plots))
           summary.plots[id][2] = plotParams.get(id);
-        const body = envelope(run, summary);
+        const body = envelope(run, {...summary, point_progress: pointProgress});
         const exactOnly = !Object.values(limits).some(Boolean);
         if (encoder.encode(JSON.stringify(body)).length <= SUMMARY_MAX_BYTES)
           return body;
@@ -481,8 +515,13 @@ async function summaryResponse(pool, store, key, query, env, now) {
   if (!/^(overview|group:\d+)$/.test(requested))
     throw new HttpError(400, 'Invalid scope');
   if (rid === null || !/^\d+$/.test(rid)) throw new HttpError(409, 'rid required');
+  // A viewer built for another summary format must reload; one that names
+  // none gets the current format.
+  const format = query.get('format');
+  if (format !== null && format !== String(SUMMARY_FORMAT))
+    throw new HttpError(400, 'Unsupported summary format; reload the page');
   const interval = Number(env.SUMMARY_MIN_INTERVAL ?? 60);
-  const blobKey = (scope) => `${API_VERSION}/${rid}/${scope}`;
+  const blobKey = (scope) => `${API_VERSION}/summary${SUMMARY_FORMAT}/${rid}/${scope}`;
   const respond = (body) => json(body, {immutable: body.state === 'completed'});
   const lookup = (scope) => store.getWithMetadata(blobKey(scope), {type: 'json'});
   const final = (entry) =>

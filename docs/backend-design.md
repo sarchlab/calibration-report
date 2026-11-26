@@ -5,6 +5,7 @@ Status: partially implemented. A vertical slice is built:
 - the Python writer and importer (`clients/python/calibration_report_writer.py`);
 - the read Functions (`netlify/functions/api.mjs`, `netlify/lib/api.js`) with the Blobs summary cache;
 - the hosted viewer (`site/Hosted.jsx`): a run list at `/` when built with `VITE_HOSTED=1`, and `?run=KEY`.
+- live point progress in the summary (`point_progress`) and a browser-built CSV download in the hosted viewer (`site/csv.js`).
 
 Deferred, not built yet:
 - manifest and `/runs` ETags and `304`;
@@ -23,6 +24,8 @@ Deviations from the text below:
 - `plots` takes `limit` up to 48 (default 6).
 - In a one-group run, the hosted Overview tab shows that group's summary (`scope=group:<id>`), as §5 already canonicalizes on the server.
 - The API source is a separate `HostedReport` component. It shares the layout (`site/Layout.jsx`), `Summary`, and `Benchmark` with the file viewer's `Report`. Putting both behind one data-source interface is deferred.
+- The summary adds `point_progress` (§5) and the hosted progress card shows it (§6).
+- The hosted viewer offers **Download CSV** (§6), built in the browser from plot pages, not from `export`.
 - The manifest adds `param_keys`: each benchmark's parameter names in declaration order, by benchmark index. JSON objects reorder numeric-looking keys, so this order travels in an array.
 
 ## 1. Goals and non-goals
@@ -276,13 +279,13 @@ Because the functions accept only `data.json` shapes and the role has only `EXEC
 
 ## 5. Read API
 
-Every endpoint is a Netlify Function under `/api/v1/` that returns JSON. `v1` is the format version: a constant in `site/model.js` shared by the Functions and the viewer, bumped whenever `buildSummary` or any response shape changes. Data requests carry `rid=<run id>` from the manifest. When a request reaches the database, the Function returns `409` if `rid` is not the current id of `key` (the run was deleted and imported again).
+Every endpoint is a Netlify Function under `/api/v1/` that returns JSON. `v1` is the format version: a constant in `site/model.js` shared by the Functions and the viewer, bumped whenever `buildSummary` or any response shape changes. A change to the summary alone bumps `SUMMARY_FORMAT` (same file; now `2`, which added `point_progress`) instead: the viewer sends it as `format=` on summary requests, so an immutable completed-run summary of an older format is never reused from the browser cache, and it is part of the summary cache key. The Function rejects another `format` with `400` and serves the current one when `format` is absent. Data requests carry `rid=<run id>` from the manifest. When a request reaches the database, the Function returns `409` if `rid` is not the current id of `key` (the run was deleted and imported again).
 
 | Endpoint (under `/api/v1/runs`) | Returns | Used for |
 |---|---|---|
 | `/` | `[{key, title, state, progress, updated_at}]`, newest first | run list on the hosted root |
 | `/{key}` | manifest (below) | header, progress, tabs, benchmark pagination, live polling |
-| `/{key}/summary?rid=&scope=` | summary of one scope: `group:<id>` or `overview` (below) | summary section, benchmark-wide error |
+| `/{key}/summary?rid=&scope=&format=` | summary of one scope: `group:<id>` or `overview` (below) | summary section, benchmark-wide error |
 | `/{key}/plots?rid=&group=&benchmark=&offset=&limit=[&after=PLOT:X][&all=1]` | `{revision, total, plots: [{id, non_scaling_params, rows: [point]}], next}` | series pages inside one benchmark card; export |
 | `/{key}/points/{plot}/{x}?rid=` | `{revision, point}`: one full `data.json` point and the revision it was read at | point details opened from a summary chart |
 
@@ -362,11 +365,13 @@ Sampled charts say so ("3,000 of 212,000 comparisons shown").
 
 **Byte budget: 2 MB serialized**, well under the 6 MB buffered limit. Worst cases follow from the §3 limits, with JSON escaping at most doubling a key, name, or unit (no control characters): `benchmarks` ≤ 1,000 × 403 bytes ≈ 400 KB; `benchmark_stats` ≤ 1,000 × ≈ 110 bytes ≈ 110 KB; `groups` ≤ 16 × ≈ 830 bytes ≈ 13 KB; `series` ≤ 32 × ≈ 930 bytes ≈ 30 KB; `pairs` ≤ 16 groups × 1,024 × ≈ 12 bytes ≈ 200 KB; per-unit statistics ≤ 32 × ≈ 400 bytes ≈ 13 KB; totals and percentiles ≈ 1 KB. The exact part is therefore under 800 KB, leaving at least 1.2 MB for samples. The Function measures the complete response, including the envelope and the parameters of the sampled plots, which it reads in the same snapshot. If the response does not fit, it halves every sample limit and samples again. At limit 0 only the exact part remains, which fits by construction. If a response still exceeds 2 MB (the invariant is broken), the Function returns `500`, logs an error, and caches nothing. Sampling is deterministic and never changes the exact part.
 
+**Point progress.** `runs.progress` is written only by `open_run`, `put_points` from the one progress writer, and `finish_run` (§4), so during a run with many parallel writers it stays at its initial value. Every summary therefore carries `point_progress: {total, completed, running, failed, queued}`, counted over **all points of the run** (not only the scope's groups, so the progress card does not change with tabs) in the summary's snapshot and cached with it. A point counts once, by the observations of its benchmark's `simulator_output` series, a missing observation counting as queued: **failed** if any has a state other than `queued` or `running` (also when it has a value), else **running** if any is `running`, else **completed** if every one has a value and no state, else **queued**. Points of benchmarks without a `simulator_output` series are not counted. Producers that write a point only once it has results keep `queued` near 0 and `total` growing; a producer that pre-writes points with simulator state `queued` makes `total` the whole run. On a synthetic 456,000-point run (local Postgres 17; 2 groups, 100 benchmarks, 3,000 plots, one simulator series) the counting query takes about 0.16–0.24 s, against about 0.45 s for the summary's point read, with the §3 indexes only.
+
 ### Summary cache
 
 Rule: compute only on request, and recompute only when new data has arrived and the cached result is at least `SUMMARY_MIN_INTERVAL` old. That is one Netlify environment variable (default 60 s) set from the plan-tier answer (§8): 60 s if the tier's database egress allows it, about 10 minutes on Free. The tier gate changes this value, not the design. Nothing is computed on write; there are no background jobs and no locks.
 
-Each scope has one record in the site-wide Netlify Blobs store `getStore({name: "summaries", consistency: "strong"})` under `v1/<run id>/<scope>` (`group:<id>` or `overview`) ([Netlify Blobs](https://docs.netlify.com/build/data-and-storage/netlify-blobs/); Functions use it without configuration; keys ≤ 600 bytes, metadata ≤ 2 KB). The value is the response body; the metadata is `{key, revision, state, computed_at}`. A live response carries `ETag: "<rid>-<scope>-<revision computed at>"` and answers a matching `If-None-Match` with `304`.
+Each scope has one record in the site-wide Netlify Blobs store `getStore({name: "summaries", consistency: "strong"})` under `v1/summary<SUMMARY_FORMAT>/<run id>/<scope>` (`group:<id>` or `overview`; entries of older formats are ignored) ([Netlify Blobs](https://docs.netlify.com/build/data-and-storage/netlify-blobs/); Functions use it without configuration; keys ≤ 600 bytes, metadata ≤ 2 KB). The value is the response body; the metadata is `{key, revision, state, computed_at}`. A live response carries `ETag: "<rid>-<scope>-<revision computed at>"` and answers a matching `If-None-Match` with `304`.
 
 On each request the Function:
 
@@ -403,6 +408,11 @@ Polling, API source only:
 - Stop once the run is stale (`updated_at` more than 30 minutes old; writers heartbeat every 5 minutes) and offer a manual refresh.
 - On a new revision, refetch the visible `plots` pages.
 - After every manifest poll, including a `304`, re-request the active summary only if the manifest's revision is greater than the summary's **and** `computed_at + min_interval` has passed, so a run that only heartbeats still catches up. On observing `completed`, fetch the final summary once. On observing `failed` (at load or on a transition) with a manifest revision newer than the summary's, keep that revision as the target and arm one timer for the scope at `computed_at + min_interval` (at least 5 s away); while a response, including a `304`, is still behind the target, re-arm it at the next eligible time, and cancel it when the target is reached or the viewer leaves the run or scope. The manual refresh lets an open viewer discover a reopened run.
+
+Progress and CSV, API source only:
+
+- The progress card shows the summary's `point_progress` (§5), labelled in points, with `started_at` from the stored `progress`; it keeps the newest one seen across scopes and shows the stored `progress`, labelled in configurations, until the first summary arrives. The file source shows `data.json` `progress`, labelled in configurations. Both layouts show the unit (live caption, and the completed ratio otherwise).
+- **Download CSV** in the header pages `plots` (48 plots a page, following continuations, four (group, benchmark) pairs at a time) over the manifest's `group_order` and `plots`, and saves `<run key>.csv` (UTF-8, RFC 4180 quoting, CRLF). Columns: `benchmark`, `group`, `scaling_param`, `x`, then each non-scaling parameter name (union over benchmarks, first appearance in `benchmark_keys` then declaration order; empty where a benchmark lacks it), then for each series key (union, same order) `<series>`, `<series>_state`, `<series>_reason`. A header name (compared as written, after the formula protection below) already used by an earlier column gets the first free suffix `_2`, `_3`, … (a parameter `x` becomes `x_2`; a series `sim_state` next to series `sim` becomes `sim_state_2`, `sim_state_state`, `sim_state_reason`). Numbers print as JavaScript prints them and are never altered; a text field or header starting with `=`, `+`, `-`, `@`, tab, or CR gets a leading `'` so that spreadsheets do not evaluate it. The first failed page aborts the other requests and the export shows the error until it is retried. It contains what the plot pages return: visible plots and drawn rows only, because `all=1` is not built; points whose only states are `queued` are left out. Pages are not pinned to a revision: a live run exports a snapshot assembled from pages read at possibly different revisions; when a newly visible plot shifts the offsets, a plot that reappears yields only rows beyond the greatest `x` already exported from it, and the viewer notes the revision range (the manifest's and the pages') when it spans more than one. The CSV is built as an array of page-sized strings joined into one `Blob`, which handles about 455,000 rows in a desktop browser.
 
 Import and export mapping:
 

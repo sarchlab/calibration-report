@@ -297,9 +297,14 @@ export function valueBounds(values) {
   return values.length ? {min, max} : null;
 }
 
-// Version of every hosted API response shape and of buildSummary's output;
-// part of the API path and of summary cache keys.
+// Version of every hosted API response shape and of buildSummary's output
+// (a summary-only change bumps SUMMARY_FORMAT instead); part of the API path
+// and of summary cache keys.
 export const API_VERSION = 'v1';
+// Version of the summary response within API_VERSION, bumped when only the
+// summary changes (2: point_progress); part of the summary URL (`format=`)
+// and of its cache key, so cached old-format summaries are never served.
+export const SUMMARY_FORMAT = 2;
 
 // The row filter of indexReport: a finite value or a drawn status.
 export function isVisibleRow(point) {
