@@ -22,9 +22,9 @@ const tickPrefixes = new Map([
   [12, 'T'],
 ]);
 
-function formatTick(value) {
+function formatTick(value, number = tickNumber) {
   if (Math.abs(value) >= 0.1 && Math.abs(value) < 1)
-    return tickNumber.format(value);
+    return number.format(value);
   if (value === 0) return '0';
   let exponent = 3 * Math.floor(Math.log10(Math.abs(value)) / 3);
   let scaled = value / 10 ** exponent;
@@ -35,7 +35,7 @@ function formatTick(value) {
   const prefix = tickPrefixes.get(exponent);
   return prefix === undefined
     ? value.toExponential(2)
-    : tickNumber.format(scaled) + prefix;
+    : number.format(scaled) + prefix;
 }
 
 function linearTicks(min, max, count) {
@@ -121,10 +121,10 @@ const BAND_MINIMUM = 30;
 const TIME_UNITS = new Set(['ns', 'us', 'µs', 'ms', 's']);
 const BAND_COLORS = ['#4c6fd1', '#3a9bd0', '#36b39b', '#8cbf4d', '#e0a33a', '#d9583b'];
 
-function formatTime(value, unit) {
+function formatTime(value, unit, number) {
   return unit === 'ns'
-    ? formatTick(value / 1e9) + 's'
-    : formatTick(value) + (unit ? ' ' + unit : '');
+    ? formatTick(value / 1e9, number) + 's'
+    : formatTick(value, number) + ' ' + unit;
 }
 
 // Bands over the comparisons in the most common unit, or null when there
@@ -152,20 +152,35 @@ function bandCutoffs(pairs) {
   const timed = sameUnit ?? [];
   if (timed.length < BAND_MINIMUM) return null;
   const sorted = timed.map((pair) => pair.actual).sort((a, b) => a - b);
-  return {
-    unit,
-    values: BAND_QUANTILES.map(
-      (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))],
-    ),
+  // Interpolated quantiles, so both tail bands hold a sample at the minimum.
+  const quantile = (q) => {
+    const position = q * (sorted.length - 1);
+    const low = Math.floor(position);
+    const high = Math.min(low + 1, sorted.length - 1);
+    return sorted[low] + (sorted[high] - sorted[low]) * (position - low);
   };
+  return {unit, values: BAND_QUANTILES.map(quantile)};
 }
 
-function bandLabels({unit, cutoffs}) {
-  const t = (value) => formatTime(value, unit);
+// Labels for each band, with enough significant digits that distinct
+// cutoffs never print the same.
+export function bandLabels({unit, cutoffs}) {
+  let texts;
+  for (let digits = 3; digits <= 9; digits++) {
+    const number = new Intl.NumberFormat('en-US', {
+      maximumSignificantDigits: digits,
+      useGrouping: false,
+    });
+    texts = cutoffs.map((cutoff) => formatTime(cutoff, unit, number));
+    const distinct = cutoffs.every(
+      (cutoff, i) => i === 0 || cutoff === cutoffs[i - 1] || texts[i] !== texts[i - 1],
+    );
+    if (distinct) break;
+  }
   return [
-    '< ' + t(cutoffs[0]),
-    ...cutoffs.slice(1).map((cutoff, i) => t(cutoffs[i]) + '–' + t(cutoff)),
-    '≥ ' + t(cutoffs.at(-1)),
+    '< ' + texts[0],
+    ...texts.slice(1).map((text, i) => texts[i] + '–' + text),
+    '≥ ' + texts.at(-1),
   ];
 }
 
@@ -335,7 +350,12 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     canvas.width = 640;
     canvas.height = bands ? 372 + 2 * 44 : 372;
     canvas.setAttribute('role', 'img');
-    canvas.setAttribute('aria-label', title);
+    canvas.setAttribute(
+      'aria-label',
+      bands
+        ? title + '. Hardware time bands: ' + bandLabels(bands).join(', ') + '.'
+        : title,
+    );
     const ctx = canvas.getContext('2d');
     ctx.scale(2, 2);
     ctx.font = '10px system-ui';
@@ -370,7 +390,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       ctx.stroke();
       ctx.fillStyle = chartTheme.label;
       const count = bands.bands[i].length;
-      ctx.fillText(label + (count < 2 ? ' (too few)' : ''), left + 16, y);
+      ctx.fillText(label + (count ? '' : ' (none)'), left + 16, y);
     });
     ctx.restore();
   }
@@ -382,7 +402,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     ctx.globalAlpha = 0.55;
     ctx.lineWidth = 0.9;
     bands.bands.forEach((pairs, i) => {
-      if (pairs.length < 2) return;
+      if (!pairs.length) return;
       ctx.strokeStyle = BAND_COLORS[i];
       ctx.beginPath();
       toPoints(pairs).forEach(([px, py], j) =>
@@ -437,10 +457,13 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       drawBandCurves(chart, bands, (band) =>
         [...band]
           .sort((a, b) => a.signedError - b.signedError)
-          .map((pair, j, all) => [
-            chart.x(1 + ((end - 1) * j) / (all.length - 1)),
-            chart.y(pair.signedError),
-          ]),
+          // A single comparison spans the whole rank axis as a flat line.
+          .flatMap((pair, j, all) =>
+            (all.length === 1 ? [0, 1] : [j / (all.length - 1)]).map((share) => [
+              chart.x(1 + (end - 1) * share),
+              chart.y(pair.signedError),
+            ]),
+          ),
       );
     ranked.forEach((pair, i) => {
       const rank = pair.rank ?? i + 1;
