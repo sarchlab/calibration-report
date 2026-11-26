@@ -356,8 +356,8 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     canvas.setAttribute('role', 'img');
     canvas.setAttribute(
       'aria-label',
-      bands
-        ? title + '. Hardware time bands: ' + bandLabels(bands).join(', ') + '.'
+      legend
+        ? title + '. Hardware time bands: ' + legend.labels.join(', ') + '.'
         : title,
     );
     const ctx = canvas.getContext('2d');
