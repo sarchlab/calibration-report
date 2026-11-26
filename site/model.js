@@ -248,6 +248,85 @@ export function pairDescription(pair, extra = {}) {
   return pointDescription(pair.point, [pair], extra);
 }
 
+// The parameters that name a point's chart: its non_scaling_params, without
+// `launch` when it has a `launch_group`, so that repeated launches of one
+// group share a chart and each launch stays a separate row. The hosted API
+// applies the same rule in SQL (`chartKey` in netlify/lib/api.js).
+export function chartParams(params) {
+  if (!Object.hasOwn(params, 'launch_group')) return params;
+  const {launch: _launch, ...rest} = params;
+  return rest;
+}
+
+export const isLaunchGroup = (params) => Object.hasOwn(params, 'launch_group');
+
+// Shaded percentile bands of launch-group charts, outermost first: the
+// [low, high] quantiles and the dispatches an X needs to draw the level.
+export const launchBands = [
+  {low: 0.02, high: 0.98, minimum: 50},
+  {low: 0.1, high: 0.9, minimum: 10},
+  {low: 0.25, high: 0.75, minimum: 4},
+];
+
+// Linearly interpolated quantile of ascending values.
+export function quantile(sorted, q) {
+  const position = q * (sorted.length - 1);
+  const low = Math.floor(position);
+  const high = Math.min(low + 1, sorted.length - 1);
+  return sorted[low] + (sorted[high] - sorted[low]) * (position - low);
+}
+
+// The drawn rows of one unit's plot of a launch-group chart: one row per X of
+// `rows` (the dispatches, sorted by x) whose values are medians. `pairs` are
+// the chart's comparison pairs of that unit (comparisonPairs). A curve's
+// median and bands at an X are taken over its dispatches with a valid pair:
+// a simulated curve over the pairs with its reference, a measured curve over
+// the union of the pairs it is the reference of, so a measured-versus-
+// simulated curve pair uses one dispatch set. A curve without valid pairs at
+// that X (hardware-only, untagged, or unpaired results) uses every dispatch
+// with a finite value. `launches` keeps the dispatches and, per curve, the
+// sorted values and band ranges (null below a level's minimum).
+export function launchGroupRows(rows, curves, pairs) {
+  const pairsAt = Map.groupBy(pairs, (pair) => pair.point.x);
+  return Array.from(Map.groupBy(rows, (row) => row.x), ([x, dispatches]) => {
+    const paired = new Map();
+    const comparisons = [];
+    for (const [id, list] of Map.groupBy(pairsAt.get(x) ?? [], (pair) => pair.id)) {
+      const [reference, simulated] = JSON.parse(id);
+      comparisons.push({name: list[0].name, count: list.length});
+      paired.set(simulated, new Map(list.map((pair) => [pair.point, pair.prediction])));
+      if (!paired.has(reference)) paired.set(reference, new Map());
+      for (const pair of list) paired.get(reference).set(pair.point, pair.actual);
+    }
+    const values = {};
+    const sets = {};
+    for (const curve of curves) {
+      const sorted = (
+        paired.has(curve.id)
+          ? [...paired.get(curve.id).values()]
+          : dispatches.map((row) => row.values[curve.id]).filter(Number.isFinite)
+      ).sort((a, b) => a - b);
+      if (!sorted.length) continue;
+      values[curve.id] = quantile(sorted, 0.5);
+      sets[curve.id] = {
+        sorted,
+        bands: launchBands.map(({low, high, minimum}) =>
+          sorted.length >= minimum ? [quantile(sorted, low), quantile(sorted, high)] : null,
+        ),
+      };
+    }
+    const first = dispatches[0];
+    return {
+      group: first.group,
+      benchmark: first.benchmark,
+      x,
+      non_scaling_params: chartParams(first.non_scaling_params),
+      values,
+      launches: {rows: dispatches, comparisons, curves: sets},
+    };
+  });
+}
+
 // Build once per data revision. Off-page series keep only row/pair references;
 // their sorting, plot specifications and canvases are created when visited.
 export function indexReport(data, benchmarks) {
@@ -255,7 +334,7 @@ export function indexReport(data, benchmarks) {
   const pairs = comparisonPairs(rows, benchmarks);
   const groups = new Map();
   const parameterKey = (point) =>
-    JSON.stringify(Object.entries(point.non_scaling_params).sort());
+    JSON.stringify(Object.entries(chartParams(point.non_scaling_params)).sort());
   for (const point of rows) {
     if (!groups.has(point.group))
       groups.set(point.group, {pairs: [], benchmarks: new Map()});

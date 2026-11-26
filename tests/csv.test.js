@@ -111,7 +111,7 @@ describe('runCsv', () => {
             revision: 3,
             total: 2,
             plots: [
-              {id: 1, rows: [point(group, benchmark, 1, 1)]},
+              {id: 1, chart: 1, rows: [point(group, benchmark, 1, 1)]},
             ],
             next: '1:1',
           };
@@ -119,14 +119,14 @@ describe('runCsv', () => {
           revision: 3,
           total: 2,
           plots: [
-            {id: 1, rows: [point(group, benchmark, 1, 2)]},
-            {id: 2, rows: [point(group, benchmark, 2, 1)]},
+            {id: 1, chart: 1, rows: [point(group, benchmark, 1, 2)]},
+            {id: 2, chart: 2, rows: [point(group, benchmark, 2, 1)]},
           ],
           next: null,
         };
       }
       const id = group === 'a' ? 3 : 4;
-      return {revision: 3, total: 1, plots: [{id, rows: [point(group, benchmark, id, 1)]}], next: null};
+      return {revision: 3, total: 1, plots: [{id, chart: id, rows: [point(group, benchmark, id, 1)]}], next: null};
     };
     const progress = [];
     const {chunks, rows, revisions} = await runCsv(manifest, fetchPage, {
@@ -154,20 +154,37 @@ describe('runCsv', () => {
         return {
           revision: 3,
           total: 49,
-          plots: Array.from({length: 48}, (_, i) => ({id: i + 1, rows: [point('a', 'gemm', i + 1, 1)]})),
+          plots: Array.from({length: 48}, (_, i) => ({id: i + 1, chart: i + 1, rows: [point('a', 'gemm', i + 1, 1)]})),
           next: null,
         };
       // A plot became visible before the window: plot 48 shifts into it.
       return {
         revision: 4,
         total: 50,
-        plots: [48, 49, 50].map((id) => ({id, rows: [point('a', 'gemm', id, 1)]})),
+        plots: [48, 49, 50].map((id) => ({id, chart: id, rows: [point('a', 'gemm', id, 1)]})),
         next: null,
       };
     };
     const {rows, revisions} = await runCsv(one, fetchPage);
     expect(rows).toBe(50);
     expect(revisions).toEqual([3, 4]);
+  });
+
+  it('exports every dispatch of a launch-group chart and counts the chart once', async () => {
+    const one = {...manifest, group_order: ['a'], plots: {a: [[0, 1]]}};
+    const progress = [];
+    const {rows} = await runCsv(
+      one,
+      async () => ({
+        revision: 3,
+        total: 1,
+        plots: [7, 8, 9].map((id) => ({id, chart: 7, rows: [point('a', 'gemm', id, 1), point('a', 'gemm', id, 2)]})),
+        next: null,
+      }),
+      {onProgress: (p) => progress.push(p)},
+    );
+    expect(rows).toBe(6);
+    expect(progress).toEqual([{plots: 1, of: 1}]);
   });
 
   it('exports only the header for a run without visible plots', async () => {
@@ -184,7 +201,7 @@ describe('runCsv', () => {
     const {revisions} = await runCsv(one, async () => ({
       revision: 3,
       total: 1,
-      plots: [{id: 4, rows: [point('b', 'gemm', 4, 1)]}],
+      plots: [{id: 4, chart: 4, rows: [point('b', 'gemm', 4, 1)]}],
       next: null,
     }));
     expect(revisions).toEqual([2, 3]);
@@ -204,7 +221,7 @@ describe('runCsv', () => {
       return new Promise((resolve, reject) =>
         signal.addEventListener('abort', () => {
           // A late answer after the abort must not count.
-          resolve({revision: 3, total: 1, plots: [{id: 9, rows: []}], next: null});
+          resolve({revision: 3, total: 1, plots: [{id: 9, chart: 9, rows: []}], next: null});
           reject(signal.reason);
         }),
       );
@@ -234,14 +251,14 @@ describe('shifting windows', () => {
       const q = new URLSearchParams(query);
       const offset = Number(q.get('offset'));
       if (offset === 0 && !q.get('after')) {
-        const plots = Array.from({length: 48}, (_, i) => ({id: i + 2, rows: rowsOf(i + 2)}));
-        plots[47] = {id: 49, rows: rowsOf(49).slice(0, 1)};
+        const plots = Array.from({length: 48}, (_, i) => ({id: i + 2, chart: i + 2, rows: rowsOf(i + 2)}));
+        plots[47] = {id: 49, chart: 49, rows: rowsOf(49).slice(0, 1)};
         return {revision: 3, total: 48, plots, next: '49:1'};
       }
       shifted = true;
       if (offset === 0) // the continuation: plot 49 left the window
         return {revision: 4, total: 49, plots: [], next: null};
-      return {revision: 4, total: 49, plots: [{id: 49, rows: rowsOf(49)}], next: null};
+      return {revision: 4, total: 49, plots: [{id: 49, chart: 49, rows: rowsOf(49)}], next: null};
     };
     const {chunks, rows} = await runCsv(one, fetchPage);
     expect(shifted).toBe(true);

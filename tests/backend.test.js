@@ -9,7 +9,10 @@ import {join} from 'node:path';
 import pg from 'pg';
 import {afterAll, beforeAll, describe, expect, it} from 'vitest';
 import {handleApi} from '../netlify/lib/api.js';
+import {runCsv} from '../site/csv.js';
+import {fdtdReport} from './launch-fixture.js';
 import {
+  chartParams,
   comparisonPairs,
   errorPercentiles,
   errorStats,
@@ -821,6 +824,80 @@ describe.skipIf(!dsn)('hosted backend', () => {
       expect(body.groups.map(([, key]) => key)).toEqual(['first', 'second']);
       expect([...store.entries.keys()]).toEqual([`v1/summary${SUMMARY_FORMAT}/${manifest.id}/overview`]);
     });
+
+    it('pages launch-group charts with every dispatch row', async () => {
+      const sizes = Array.from({length: 36}, (_, i) => 16 * (i + 1));
+      const fdtd = fdtdReport(
+        {sizes, unavailable: (size, launch) => (launch % 11 === 0 ? {state: 'timeout'} : null)},
+        [200, 100],
+      );
+      const report = {...fdtd, progress: {total: fdtd.data.length, completed: 0, running: 0}};
+      const manifest = await seed('fdtd', report);
+      const index = indexReport(report.data, report.benchmarks);
+      const fileSeries = index.groups.get('gpu').benchmarks[0].series;
+      expect(fileSeries).toHaveLength(12);
+      expect(manifest.plots.gpu).toEqual([[0, 12]]);
+      const byLaunchThenX = (a, b) =>
+        a.non_scaling_params.launch - b.non_scaling_params.launch || a.x - b.x;
+      for (const offset of [0, 6]) {
+        const charts = new Map();
+        const seen = new Set();
+        let after = null,
+          chunks = 0;
+        do {
+          const {body, bytes} = await api(
+            `/fdtd/plots?rid=${manifest.id}&group=gpu&benchmark=polybench_fdtd2d` +
+              `&offset=${offset}&limit=6` +
+              (after ? '&after=' + after : ''),
+          );
+          expect(bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+          expect(body.total).toBe(12);
+          chunks++;
+          for (const plot of body.plots) {
+            if (!charts.has(plot.chart)) charts.set(plot.chart, {params: new Set(), rows: []});
+            const chart = charts.get(plot.chart);
+            chart.params.add(JSON.stringify(chartParams(plot.non_scaling_params)));
+            for (const row of plot.rows) {
+              const key = plot.id + ':' + row.x;
+              expect(seen.has(key)).toBe(false);
+              seen.add(key);
+              expect(row.non_scaling_params).toEqual(plot.non_scaling_params);
+              chart.rows.push(row);
+            }
+          }
+          after = body.next;
+        } while (after);
+        if (offset === 0) expect(chunks).toBeGreaterThanOrEqual(2);
+        const ordered = [...charts].sort(([a], [b]) => a - b).map(([, chart]) => chart);
+        expect(ordered).toHaveLength(6);
+        ordered.forEach((chart, i) => {
+          expect(chart.params.size).toBe(1);
+          const expected = fileSeries[offset + i];
+          expect(chart.rows.sort(byLaunchThenX)).toEqual([...expected.rows].sort(byLaunchThenX));
+        });
+      }
+      // Single points stay addressable by their dispatch plot.
+      const {body: page} = await api(
+        `/fdtd/plots?rid=${manifest.id}&group=gpu&benchmark=polybench_fdtd2d&limit=1`,
+      );
+      const [plot] = page.plots;
+      const {body: single} = await api(`/fdtd/points/${plot.id}/${plot.rows[0].x}?rid=${manifest.id}`);
+      expect(single.point).toEqual(plot.rows[0]);
+      // The CSV keeps one row per dispatch; progress counts charts.
+      const progress = [];
+      const csv = await runCsv(
+        manifest,
+        async (query) => (await api(`/fdtd/plots?${query}`)).body,
+        {onProgress: (p) => progress.push(p)},
+      );
+      expect(csv.rows).toBe(report.data.length);
+      expect(csv.chunks.join('').split('\r\n').length - 2).toBe(report.data.length);
+      expect(progress.at(-1)).toEqual({plots: 12, of: 12});
+      // Raw-pair statistics do not depend on charts.
+      const {body: summary} = await api(`/fdtd/summary?rid=${manifest.id}&scope=overview`);
+      expect(summary.count).toBe(index.pairs.length);
+      expect(summary.stats).toEqual(errorStats(index.pairs));
+    }, 60_000);
 
     it('keeps producer-chosen keys and first-appearance order', async () => {
       const point = (group, x) => ({

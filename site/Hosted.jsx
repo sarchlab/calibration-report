@@ -304,7 +304,8 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
     const loading = wanted.current;
     start(
       async (signal) => {
-        const plots = new Map();
+        // One series per chart: a launch-group chart gathers its plots.
+        const charts = new Map();
         let after = null;
         do {
           const body = await fetchJson(
@@ -312,13 +313,13 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
             signal,
           );
           for (const plot of body.plots) {
-            if (!plots.has(plot.id))
-              plots.set(plot.id, {parameters: String(plot.id), rows: []});
-            plots.get(plot.id).rows.push(...plot.rows);
+            if (!charts.has(plot.chart))
+              charts.set(plot.chart, {parameters: String(plot.chart), rows: []});
+            charts.get(plot.chart).rows.push(...plot.rows);
           }
           after = body.next;
         } while (after);
-        return [...plots.values()];
+        return [...charts].sort(([a], [b]) => a - b).map(([, series]) => series);
       },
       (series) => setPage({query, revision: loading, series}),
     );
