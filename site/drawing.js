@@ -128,22 +128,32 @@ function formatTime(value, unit) {
 
 // Bands over the comparisons in the most common unit, or null when there
 // are too few to split. `cutoffs[i]` separates band i from band i + 1.
-export function timeBands(pairs) {
+export function timeBands(pairs, source = pairs) {
+  const cutoffs = bandCutoffs(source);
+  if (!cutoffs) return null;
+  const {unit} = cutoffs;
+  const bands = Array.from({length: cutoffs.values.length + 1}, () => []);
+  for (const pair of pairs) {
+    if (pair.unit !== unit || !Number.isFinite(pair.actual)) continue;
+    let band = 0;
+    while (band < cutoffs.values.length && pair.actual >= cutoffs.values[band]) band++;
+    bands[band].push(pair);
+  }
+  return {unit, cutoffs: cutoffs.values, bands};
+}
+
+function bandCutoffs(pairs) {
   const byUnit = Map.groupBy(pairs, (pair) => pair.unit);
   const [unit, sameUnit] = [...byUnit].sort((a, b) => b[1].length - a[1].length)[0] ?? [];
   const timed = (sameUnit ?? []).filter((pair) => Number.isFinite(pair.actual));
   if (timed.length < BAND_MINIMUM) return null;
   const sorted = timed.map((pair) => pair.actual).sort((a, b) => a - b);
-  const cutoffs = BAND_QUANTILES.map(
-    (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))],
-  );
-  const bands = Array.from({length: cutoffs.length + 1}, () => []);
-  for (const pair of timed) {
-    let band = 0;
-    while (band < cutoffs.length && pair.actual >= cutoffs[band]) band++;
-    bands[band].push(pair);
-  }
-  return {unit, cutoffs, bands};
+  return {
+    unit,
+    values: BAND_QUANTILES.map(
+      (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))],
+    ),
+  };
 }
 
 function bandLabels({unit, cutoffs}) {
@@ -382,7 +392,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
   function summaryPoint(chart, x, y, color, description) {
     chart.ctx.fillStyle = color;
     chart.ctx.beginPath();
-    chart.ctx.arc(chart.x(x), chart.y(y), 2.15, 0, 2 * Math.PI);
+    chart.ctx.arc(chart.x(x), chart.y(y), 1.5, 0, 2 * Math.PI);
     chart.ctx.fill();
     chart.points.push({x: chart.x(x), y: chart.y(y), description});
   }
@@ -400,13 +410,13 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
   }
 
   // A sampled chart's pairs carry their `rank` among `total` comparisons.
-  function rankedErrors(pairs, colors, total = pairs.length) {
+  function rankedErrors(pairs, colors, total = pairs.length, bandSource = pairs) {
     const ranked = [...pairs].sort((a, b) => a.signedError - b.signedError);
     const end = Math.max(2, total);
     const minimum = Math.min(0, ranked[0].signedError);
     const maximum = Math.max(0, ranked[ranked.length - 1].signedError);
     const margin = Math.max(0.2, (maximum - minimum) * 0.06);
-    const bands = timeBands(pairs);
+    const bands = timeBands(pairs, bandSource);
     const chart = summaryAxes(
       'S-curve of signed relative error',
       'Case rank',
@@ -441,7 +451,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     return {hitPoints: chart.points};
   }
 
-  function absoluteErrorCDF(pairs, total = pairs.length, preferLog) {
+  function absoluteErrorCDF(pairs, total = pairs.length, preferLog, bandSource = pairs) {
     const ranked = [...pairs].sort(
       (a, b) => Math.abs(a.signedError) - Math.abs(b.signedError),
     );
@@ -452,7 +462,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     const right = log
       ? 10 ** (Math.ceil(Math.log10(maximum)) + 0.1)
       : maximum * 1.04 || 1;
-    const bands = timeBands(pairs);
+    const bands = timeBands(pairs, bandSource);
     const chart = summaryAxes(
       'Absolute error cumulative distribution',
       'Absolute error (%)' + (log ? ' · log' : ''),
@@ -553,8 +563,8 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       spec.scales,
     );
   if (spec.kind === 'ranked')
-    return rankedErrors(spec.pairs, spec.colors, spec.total);
+    return rankedErrors(spec.pairs, spec.colors, spec.total, spec.bands);
   if (spec.kind === 'cdf')
-    return absoluteErrorCDF(spec.pairs, spec.total, spec.log);
+    return absoluteErrorCDF(spec.pairs, spec.total, spec.log, spec.bands);
   return comparisonScatter(spec.pairs, spec.unit, spec.colors, spec.log);
 }
