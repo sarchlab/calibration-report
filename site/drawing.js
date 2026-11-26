@@ -165,6 +165,10 @@ function bandCutoffs(pairs) {
 // Labels for each band, with enough significant digits that distinct
 // cutoffs never print the same.
 export function bandLabels({unit, cutoffs}) {
+  const distinct = (texts) =>
+    cutoffs.every(
+      (cutoff, i) => i === 0 || cutoff === cutoffs[i - 1] || texts[i] !== texts[i - 1],
+    );
   let texts;
   for (let digits = 3; digits <= 9; digits++) {
     const number = new Intl.NumberFormat('en-US', {
@@ -172,11 +176,10 @@ export function bandLabels({unit, cutoffs}) {
       useGrouping: false,
     });
     texts = cutoffs.map((cutoff) => formatTime(cutoff, unit, number));
-    const distinct = cutoffs.every(
-      (cutoff, i) => i === 0 || cutoff === cutoffs[i - 1] || texts[i] !== texts[i - 1],
-    );
-    if (distinct) break;
+    if (distinct(texts)) break;
   }
+  // Exact values in the declared unit always tell distinct cutoffs apart.
+  if (!distinct(texts)) texts = cutoffs.map((cutoff) => String(cutoff) + ' ' + unit);
   return [
     '< ' + texts[0],
     ...texts.slice(1).map((text, i) => texts[i] + '–' + text),
@@ -348,7 +351,8 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     bands = null,
   ) {
     canvas.width = 640;
-    canvas.height = bands ? 372 + 2 * 44 : 372;
+    const legend = bands && bandLegendLayout(canvas, bands);
+    canvas.height = legend ? 372 + 2 * (18 + 13 * legend.rows) : 372;
     canvas.setAttribute('role', 'img');
     canvas.setAttribute(
       'aria-label',
@@ -367,12 +371,24 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     const y = yAxis.position;
     drawAxisTicks(ctx, xAxis, yAxis, frame);
     drawAxisTitles(ctx, xLabel, yLabel, frame, 179);
-    if (bands) drawBandLegend(ctx, bands, 196);
+    if (legend) drawBandLegend(ctx, legend, 196);
     return {canvas, ctx, x, y, points: []};
   }
 
-  function drawBandLegend(ctx, bands, top) {
-    const labels = bandLabels(bands);
+  // The most legend columns (of 3, 2, 1) whose slots fit every label.
+  function bandLegendLayout(canvas, bands) {
+    const ctx = canvas.getContext('2d');
+    ctx.font = '9px system-ui';
+    const labels = bandLabels(bands).map(
+      (label, i) => label + (bands.bands[i].length ? '' : ' (none)'),
+    );
+    const widest = Math.max(...labels.map((label) => ctx.measureText(label).width));
+    const width = 306;
+    const columns = [3, 2, 1].find((n) => 16 + widest + 6 <= width / n) ?? 1;
+    return {labels, columns, rows: Math.ceil(labels.length / columns), slot: width / columns};
+  }
+
+  function drawBandLegend(ctx, {labels, columns, slot}, top) {
     ctx.save();
     ctx.font = '9px system-ui';
     ctx.textBaseline = 'middle';
@@ -380,8 +396,8 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     ctx.textAlign = 'left';
     ctx.fillText('Hardware time bands (2 / 25 / 50 / 75 / 98th percentile cutoffs)', 12, top);
     labels.forEach((label, i) => {
-      const left = 12 + (i % 3) * 102;
-      const y = top + 14 + Math.floor(i / 3) * 13;
+      const left = 12 + (i % columns) * slot;
+      const y = top + 14 + Math.floor(i / columns) * 13;
       ctx.strokeStyle = BAND_COLORS[i];
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -389,8 +405,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       ctx.lineTo(left + 12, y);
       ctx.stroke();
       ctx.fillStyle = chartTheme.label;
-      const count = bands.bands[i].length;
-      ctx.fillText(label + (count ? '' : ' (none)'), left + 16, y);
+      ctx.fillText(label, left + 16, y);
     });
     ctx.restore();
   }

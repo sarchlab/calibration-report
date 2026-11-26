@@ -68,3 +68,10 @@ test('labels gain digits until distinct cutoffs differ', () => {
   expect(labels).toEqual(['< 1µs', '1µs–1.001µs', '1.001µs–1.002µs', '1.002µs–2µs', '2µs–3µs', '≥ 3µs']);
   expect(new Set(labels).size).toBe(6);
 });
+
+test('labels fall back to exact values when nine digits are not enough', () => {
+  const cutoffs = [1000, 1000.0000000001, 1000.0000000002, 2000, 3000];
+  const labels = bandLabels({unit: 'ns', cutoffs});
+  expect(new Set(labels).size).toBe(6);
+  expect(labels[1]).toBe('1000 ns–1000.0000000001 ns');
+});
