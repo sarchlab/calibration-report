@@ -590,7 +590,7 @@ export function Summary({
       const charts = summaryCharts(summary);
       const colors = colorsFor(charts.legend);
       // Both curves split by the same cutoffs, taken from all sampled pairs.
-      const bands = [...new Set([...charts.scurve, ...charts.cdf.pairs])];
+      const bands = charts.sampled;
       return {
         count: charts.count,
         colors,

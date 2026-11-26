@@ -577,6 +577,10 @@ export function summaryCharts(summary) {
     percentiles: summary.percentiles,
     scurve: ranked(summary.scurve),
     cdf: {log: summary.cdf.log, pairs: ranked(summary.cdf)},
+    // Every distinct sampled comparison, for statistics shared by both curves.
+    sampled: [...new Set([...summary.scurve.sample, ...summary.cdf.sample])].map(
+      (sample) => pairs[sample],
+    ),
     scatter: Object.entries(summary.scatter).map(([unit, chart]) => ({
       unit,
       log: chart.log,

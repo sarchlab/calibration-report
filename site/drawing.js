@@ -118,6 +118,7 @@ function numericAxis(
 // hardware time at these quantiles, one faint unselectable curve per band.
 const BAND_QUANTILES = [0.02, 0.25, 0.5, 0.75, 0.98];
 const BAND_MINIMUM = 30;
+const TIME_UNITS = new Set(['ns', 'us', 'µs', 'ms', 's']);
 const BAND_COLORS = ['#4c6fd1', '#3a9bd0', '#36b39b', '#8cbf4d', '#e0a33a', '#d9583b'];
 
 function formatTime(value, unit) {
@@ -143,9 +144,12 @@ export function timeBands(pairs, source = pairs) {
 }
 
 function bandCutoffs(pairs) {
-  const byUnit = Map.groupBy(pairs, (pair) => pair.unit);
+  const durations = pairs.filter(
+    (pair) => TIME_UNITS.has(pair.unit) && Number.isFinite(pair.actual),
+  );
+  const byUnit = Map.groupBy(durations, (pair) => pair.unit);
   const [unit, sameUnit] = [...byUnit].sort((a, b) => b[1].length - a[1].length)[0] ?? [];
-  const timed = (sameUnit ?? []).filter((pair) => Number.isFinite(pair.actual));
+  const timed = sameUnit ?? [];
   if (timed.length < BAND_MINIMUM) return null;
   const sorted = timed.map((pair) => pair.actual).sort((a, b) => a - b);
   return {
