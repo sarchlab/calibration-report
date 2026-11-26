@@ -36,6 +36,8 @@ const percent = (q) => 'P' + Math.round(q * 100);
 // dispatch at this X.
 function LaunchGroupDetails({launches, meta}) {
   const {rows, comparisons, curves} = launches;
+  // The dispatch table mounts only while its disclosure is open.
+  const [listed, setListed] = useState(false);
   const series = Object.entries(meta.values).filter(([id]) =>
     rows.some(
       (row) =>
@@ -100,30 +102,35 @@ function LaunchGroupDetails({launches, meta}) {
           ];
         })}
       </dl>
-      <details className="point-dispatches">
+      <details
+        className="point-dispatches"
+        onToggle={(event) => setListed(event.currentTarget.open)}
+      >
         <summary>Dispatches ({rows.length.toLocaleString('en-US')})</summary>
-        <table>
-          <thead>
-            <tr>
-              <th scope="col">Launch</th>
-              {series.map(([id, info]) => (
-                <th scope="col" key={id} title={info.name}>
-                  {info.name.replace(/ kernel time(?: \(median\))?$/i, '')}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, i) => (
-              <tr key={i}>
-                <th scope="row">{String(row.non_scaling_params.launch ?? '—')}</th>
+        {listed && (
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Launch</th>
                 {series.map(([id, info]) => (
-                  <td key={id}>{cell(row, id, info.unit)}</td>
+                  <th scope="col" key={id} title={info.name}>
+                    {info.name.replace(/ kernel time(?: \(median\))?$/i, '')}
+                  </th>
                 ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={i}>
+                  <th scope="row">{String(row.non_scaling_params.launch ?? '—')}</th>
+                  {series.map(([id, info]) => (
+                    <td key={id}>{cell(row, id, info.unit)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </details>
     </div>
   );

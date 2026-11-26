@@ -17,8 +17,8 @@ import {fdtdBenchmark, fdtdPoints, fdtdReport} from './launch-fixture.js';
 
 const benchmarks = {polybench_fdtd2d: fdtdBenchmark};
 const curves = [
-  {id: 'hw', color: '#765'},
-  {id: 'sim', color: '#375'},
+  {id: 'hw', ...fdtdBenchmark.values.hw, color: '#765'},
+  {id: 'sim', ...fdtdBenchmark.values.sim, color: '#375'},
 ];
 const median = (values) => quantile([...values].sort((a, b) => a - b), 0.5);
 const seriesOf = (data) =>
@@ -124,7 +124,13 @@ describe('medians and bands', () => {
   test('hardware-only dispatches still draw the hardware curve', () => {
     const [row] = rowsFor(dispatches(5, (i) => ({hw: 10 * (i + 1)})));
     expect(row.values).toEqual({hw: 30});
-    expect(row.launches.comparisons).toEqual([]);
+    expect(row.launches.comparisons).toEqual([
+      {
+        id: JSON.stringify(['hw', 'sim']),
+        name: 'Simulator kernel time vs. GPU kernel time',
+        count: 0,
+      },
+    ]);
     expect(row.launches.curves.hw.bands).toEqual([null, null, [20, 40]]);
   });
 
@@ -149,6 +155,17 @@ describe('medians and bands', () => {
     const unpaired = dispatches(2, (i) => (i ? {sim: 200} : {hw: 100}));
     expect(rowsFor(unpaired)[0].values).toEqual({hw: 100, sim: 200});
     expect(hitComparisons(unpaired)).toEqual([0, 0]);
+    const [row] = rowsFor(unpaired);
+    render(
+      <MantineProvider>
+        <PointDescription
+          description={{point: row, comparisons: []}}
+          benchmarks={benchmarks}
+          groups={{gpu: {name: 'GPU'}}}
+        />
+      </MantineProvider>,
+    );
+    expect(screen.getByText('Paired').nextSibling.textContent).toBe('0 of 2');
     expect(hitComparisons(dispatches(3))).toEqual([1, 1]);
   });
 
@@ -334,7 +351,12 @@ describe('file viewer', () => {
     expect(within(details).getAllByText('median of 160')).toHaveLength(2);
     for (const label of ['P2–P98', 'P10–P90', 'P25–P75', 'Range'])
       expect(within(details).getAllByText(label)).toHaveLength(2);
-    const table = details.querySelector('.point-dispatches table');
+    // The dispatch table mounts when its disclosure opens.
+    const disclosure = details.querySelector('.point-dispatches');
+    expect(disclosure.querySelector('table')).toBeNull();
+    disclosure.open = true;
+    fireEvent(disclosure, new Event('toggle'));
+    const table = disclosure.querySelector('table');
     expect(table.querySelectorAll('tbody tr')).toHaveLength(199);
     expect(within(table).getAllByText('timeout')).toHaveLength(39);
     expect(table.querySelector('tbody th').textContent).toBe('3');

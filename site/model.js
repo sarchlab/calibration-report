@@ -1,30 +1,38 @@
+// The comparisons among `series` ([id, {name, unit, role}] entries): each
+// simulator series against the one hardware series of its unit, if exactly
+// one exists.
+export function seriesComparisons(series) {
+  const hardware = series.filter(
+    ([, value]) => value.role === 'hardware_measurement',
+  );
+  const matches = [];
+  for (const [id, simulated] of series) {
+    if (simulated.role !== 'simulator_output') continue;
+    const references = hardware.filter(
+      ([, value]) => value.unit === simulated.unit,
+    );
+    if (references.length !== 1) continue;
+    const [reference, measured] = references[0];
+    matches.push({
+      reference,
+      id,
+      unit: simulated.unit,
+      pairId: JSON.stringify([reference, id]),
+      name: simulated.name + ' vs. ' + measured.name,
+    });
+  }
+  return matches;
+}
+
 export function comparisonPairs(rows, benchmarks) {
   const pairs = [];
   const comparisons = new Map();
   for (const point of rows) {
-    if (!comparisons.has(point.benchmark)) {
-      const series = Object.entries(benchmarks[point.benchmark].values);
-      const hardware = series.filter(
-        ([, value]) => value.role === 'hardware_measurement',
+    if (!comparisons.has(point.benchmark))
+      comparisons.set(
+        point.benchmark,
+        seriesComparisons(Object.entries(benchmarks[point.benchmark].values)),
       );
-      const matches = [];
-      for (const [id, simulated] of series) {
-        if (simulated.role !== 'simulator_output') continue;
-        const references = hardware.filter(
-          ([, value]) => value.unit === simulated.unit,
-        );
-        if (references.length !== 1) continue;
-        const [reference, measured] = references[0];
-        matches.push({
-          reference,
-          id,
-          unit: simulated.unit,
-          pairId: JSON.stringify([reference, id]),
-          name: simulated.name + ' vs. ' + measured.name,
-        });
-      }
-      comparisons.set(point.benchmark, matches);
-    }
     for (const {reference, id, unit, pairId, name} of comparisons.get(
       point.benchmark,
     )) {
@@ -284,17 +292,23 @@ export function quantile(sorted, q) {
 // the union of the pairs it is the reference of, so a measured-versus-
 // simulated curve pair uses one dispatch set. A curve without valid pairs at
 // that X (hardware-only, untagged, or unpaired results) uses every dispatch
-// with a finite value. `launches` keeps the dispatches, the paired count of
-// each comparison present at that X, and, per curve, the sorted values and
-// band ranges (null below a level's minimum).
+// with a finite value. `curves` carry their series metadata (name, unit,
+// role). `launches` keeps the dispatches, the paired count of every
+// comparison of `curves` at that X (0 when none paired), and, per curve, the
+// sorted values and band ranges (null below a level's minimum).
 export function launchGroupRows(rows, curves, pairs) {
   const pairsAt = Map.groupBy(pairs, (pair) => pair.point.x);
+  const configured = seriesComparisons(curves.map((curve) => [curve.id, curve]));
   return Array.from(Map.groupBy(rows, (row) => row.x), ([x, dispatches]) => {
     const paired = new Map();
-    const comparisons = [];
-    for (const [id, list] of Map.groupBy(pairsAt.get(x) ?? [], (pair) => pair.id)) {
+    const found = Map.groupBy(pairsAt.get(x) ?? [], (pair) => pair.id);
+    const comparisons = configured.map(({pairId, name}) => ({
+      id: pairId,
+      name,
+      count: found.get(pairId)?.length ?? 0,
+    }));
+    for (const [id, list] of found) {
       const [reference, simulated] = JSON.parse(id);
-      comparisons.push({id, name: list[0].name, count: list.length});
       paired.set(simulated, new Map(list.map((pair) => [pair.point, pair.prediction])));
       if (!paired.has(reference)) paired.set(reference, new Map());
       for (const pair of list) paired.get(reference).set(pair.point, pair.actual);

@@ -352,7 +352,9 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
         ctx.fill();
         // A launch-group median is compared only when both medians come
         // from the same paired dispatches.
-        const paired = row.launches?.comparisons.map((comparison) => comparison.id);
+        const paired = row.launches?.comparisons
+          .filter((comparison) => comparison.count > 0)
+          .map((comparison) => comparison.id);
         hitPoints.push({
           x: x(i),
           y: y(value),
