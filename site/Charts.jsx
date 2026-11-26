@@ -589,13 +589,15 @@ export function Summary({
     if (summary) {
       const charts = summaryCharts(summary);
       const colors = colorsFor(charts.legend);
+      // Both curves split by the same cutoffs, taken from all sampled pairs.
+      const bands = charts.sampled;
       return {
         count: charts.count,
         colors,
         stats: charts.stats,
         percentiles: charts.percentiles,
-        ranked: {kind: 'ranked', pairs: charts.scurve, colors, total: charts.count},
-        cdf: {kind: 'cdf', pairs: charts.cdf.pairs, total: charts.count, log: charts.cdf.log},
+        ranked: {kind: 'ranked', pairs: charts.scurve, colors, total: charts.count, bands},
+        cdf: {kind: 'cdf', pairs: charts.cdf.pairs, total: charts.count, log: charts.cdf.log, bands},
         scatter: charts.scatter.map((unit) => ({unit: unit.unit, pairs: unit.pairs, exact: unit})),
       };
     }
@@ -610,8 +612,8 @@ export function Summary({
       colors,
       stats: errorStats(pairs),
       percentiles: errorPercentiles(pairs),
-      ranked: {kind: 'ranked', pairs, colors},
-      cdf: {kind: 'cdf', pairs},
+      ranked: {kind: 'ranked', pairs, colors, bands: pairs},
+      cdf: {kind: 'cdf', pairs, bands: pairs},
       scatter: Array.from(
         Map.groupBy(pairs, (pair) => pair.unit),
         ([unit, values]) => ({unit, pairs: values}),

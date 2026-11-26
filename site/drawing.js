@@ -114,6 +114,61 @@ function numericAxis(
   return {position, ticks};
 }
 
+// Background bands of the summary curves: the comparisons split by measured
+// hardware time at these quantiles, one faint unselectable curve per band.
+const BAND_QUANTILES = [0.02, 0.25, 0.5, 0.75, 0.98];
+const BAND_MINIMUM = 30;
+const TIME_UNITS = new Set(['ns', 'us', 'µs', 'ms', 's']);
+const BAND_COLORS = ['#4c6fd1', '#3a9bd0', '#36b39b', '#8cbf4d', '#e0a33a', '#d9583b'];
+
+function formatTime(value, unit) {
+  return unit === 'ns'
+    ? formatTick(value / 1e9) + 's'
+    : formatTick(value) + (unit ? ' ' + unit : '');
+}
+
+// Bands over the comparisons in the most common unit, or null when there
+// are too few to split. `cutoffs[i]` separates band i from band i + 1.
+export function timeBands(pairs, source = pairs) {
+  const cutoffs = bandCutoffs(source);
+  if (!cutoffs) return null;
+  const {unit} = cutoffs;
+  const bands = Array.from({length: cutoffs.values.length + 1}, () => []);
+  for (const pair of pairs) {
+    if (pair.unit !== unit || !Number.isFinite(pair.actual)) continue;
+    let band = 0;
+    while (band < cutoffs.values.length && pair.actual >= cutoffs.values[band]) band++;
+    bands[band].push(pair);
+  }
+  return {unit, cutoffs: cutoffs.values, bands};
+}
+
+function bandCutoffs(pairs) {
+  const durations = pairs.filter(
+    (pair) => TIME_UNITS.has(pair.unit) && Number.isFinite(pair.actual),
+  );
+  const byUnit = Map.groupBy(durations, (pair) => pair.unit);
+  const [unit, sameUnit] = [...byUnit].sort((a, b) => b[1].length - a[1].length)[0] ?? [];
+  const timed = sameUnit ?? [];
+  if (timed.length < BAND_MINIMUM) return null;
+  const sorted = timed.map((pair) => pair.actual).sort((a, b) => a - b);
+  return {
+    unit,
+    values: BAND_QUANTILES.map(
+      (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))],
+    ),
+  };
+}
+
+function bandLabels({unit, cutoffs}) {
+  const t = (value) => formatTime(value, unit);
+  return [
+    '< ' + t(cutoffs[0]),
+    ...cutoffs.slice(1).map((cutoff, i) => t(cutoffs[i]) + '–' + t(cutoff)),
+    '≥ ' + t(cutoffs.at(-1)),
+  ];
+}
+
 // Drawing is imperative only inside the supplied canvas; React owns every DOM element.
 export function drawChart(canvas, spec, chartTheme, benchmarks) {
   function drawAxisTicks(ctx, x, y, {left, right, top, bottom}) {
@@ -275,9 +330,10 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     yRange,
     xOptions = {},
     yOptions = {},
+    bands = null,
   ) {
     canvas.width = 640;
-    canvas.height = 372;
+    canvas.height = bands ? 372 + 2 * 44 : 372;
     canvas.setAttribute('role', 'img');
     canvas.setAttribute('aria-label', title);
     const ctx = canvas.getContext('2d');
@@ -291,13 +347,56 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     const y = yAxis.position;
     drawAxisTicks(ctx, xAxis, yAxis, frame);
     drawAxisTitles(ctx, xLabel, yLabel, frame, 179);
+    if (bands) drawBandLegend(ctx, bands, 196);
     return {canvas, ctx, x, y, points: []};
+  }
+
+  function drawBandLegend(ctx, bands, top) {
+    const labels = bandLabels(bands);
+    ctx.save();
+    ctx.font = '9px system-ui';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = chartTheme.label;
+    ctx.textAlign = 'left';
+    ctx.fillText('Hardware time bands (2 / 25 / 50 / 75 / 98th percentile cutoffs)', 12, top);
+    labels.forEach((label, i) => {
+      const left = 12 + (i % 3) * 102;
+      const y = top + 14 + Math.floor(i / 3) * 13;
+      ctx.strokeStyle = BAND_COLORS[i];
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(left, y);
+      ctx.lineTo(left + 12, y);
+      ctx.stroke();
+      ctx.fillStyle = chartTheme.label;
+      const count = bands.bands[i].length;
+      ctx.fillText(label + (count < 2 ? ' (too few)' : ''), left + 16, y);
+    });
+    ctx.restore();
+  }
+
+  // One faint polyline per band, drawn first so the main chart stays on top.
+  function drawBandCurves(chart, bands, toPoints) {
+    const {ctx} = chart;
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 0.9;
+    bands.bands.forEach((pairs, i) => {
+      if (pairs.length < 2) return;
+      ctx.strokeStyle = BAND_COLORS[i];
+      ctx.beginPath();
+      toPoints(pairs).forEach(([px, py], j) =>
+        j ? ctx.lineTo(px, py) : ctx.moveTo(px, py),
+      );
+      ctx.stroke();
+    });
+    ctx.restore();
   }
 
   function summaryPoint(chart, x, y, color, description) {
     chart.ctx.fillStyle = color;
     chart.ctx.beginPath();
-    chart.ctx.arc(chart.x(x), chart.y(y), 2.15, 0, 2 * Math.PI);
+    chart.ctx.arc(chart.x(x), chart.y(y), 1.5, 0, 2 * Math.PI);
     chart.ctx.fill();
     chart.points.push({x: chart.x(x), y: chart.y(y), description});
   }
@@ -315,12 +414,13 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
   }
 
   // A sampled chart's pairs carry their `rank` among `total` comparisons.
-  function rankedErrors(pairs, colors, total = pairs.length) {
+  function rankedErrors(pairs, colors, total = pairs.length, bandSource = pairs) {
     const ranked = [...pairs].sort((a, b) => a.signedError - b.signedError);
     const end = Math.max(2, total);
     const minimum = Math.min(0, ranked[0].signedError);
     const maximum = Math.max(0, ranked[ranked.length - 1].signedError);
     const margin = Math.max(0.2, (maximum - minimum) * 0.06);
+    const bands = timeBands(pairs, bandSource);
     const chart = summaryAxes(
       'S-curve of signed relative error',
       'Case rank',
@@ -329,8 +429,19 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       [minimum - margin, maximum + margin],
       {count: Math.min(6, end)},
       {format: (n) => (n > 0 ? '+' : '') + formatTick(n) + '%'},
+      bands,
     );
     referenceLine(chart, 1, 0, end, 0);
+    // Each band spans the whole rank axis: its own rank, scaled to the run's.
+    if (bands)
+      drawBandCurves(chart, bands, (band) =>
+        [...band]
+          .sort((a, b) => a.signedError - b.signedError)
+          .map((pair, j, all) => [
+            chart.x(1 + ((end - 1) * j) / (all.length - 1)),
+            chart.y(pair.signedError),
+          ]),
+      );
     ranked.forEach((pair, i) => {
       const rank = pair.rank ?? i + 1;
       summaryPoint(
@@ -344,7 +455,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     return {hitPoints: chart.points};
   }
 
-  function absoluteErrorCDF(pairs, total = pairs.length, preferLog) {
+  function absoluteErrorCDF(pairs, total = pairs.length, preferLog, bandSource = pairs) {
     const ranked = [...pairs].sort(
       (a, b) => Math.abs(a.signedError) - Math.abs(b.signedError),
     );
@@ -355,6 +466,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     const right = log
       ? 10 ** (Math.ceil(Math.log10(maximum)) + 0.1)
       : maximum * 1.04 || 1;
+    const bands = timeBands(pairs, bandSource);
     const chart = summaryAxes(
       'Absolute error cumulative distribution',
       'Absolute error (%)' + (log ? ' · log' : ''),
@@ -362,8 +474,24 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       [left, right],
       [0, 1],
       {log},
+      {},
+      bands,
     );
     const {ctx, x, y} = chart;
+    // Each band's own empirical CDF, as a step line.
+    if (bands)
+      drawBandCurves(chart, bands, (band) => {
+        const sorted = band
+          .map((pair) => Math.max(left, Math.abs(pair.signedError)))
+          .sort((a, b) => a - b);
+        const steps = [[x(left), y(0)]];
+        sorted.forEach((error, j) => {
+          steps.push([x(error), y(j / sorted.length)]);
+          steps.push([x(error), y((j + 1) / sorted.length)]);
+        });
+        steps.push([x(right), y(1)]);
+        return steps;
+      });
     ctx.strokeStyle = chartTheme.palette[0];
     ctx.lineWidth = 1.7;
     ctx.beginPath();
@@ -439,8 +567,8 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       spec.scales,
     );
   if (spec.kind === 'ranked')
-    return rankedErrors(spec.pairs, spec.colors, spec.total);
+    return rankedErrors(spec.pairs, spec.colors, spec.total, spec.bands);
   if (spec.kind === 'cdf')
-    return absoluteErrorCDF(spec.pairs, spec.total, spec.log);
+    return absoluteErrorCDF(spec.pairs, spec.total, spec.log, spec.bands);
   return comparisonScatter(spec.pairs, spec.unit, spec.colors, spec.log);
 }
