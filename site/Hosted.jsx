@@ -5,7 +5,8 @@ import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {ReportHeader, RunProgress, useChartTheme} from './Layout.jsx';
 import {Benchmark, Summary} from './Charts.jsx';
 import {PointProvider} from './PointDetails.jsx';
-import {API_VERSION} from './model.js';
+import {API_VERSION, SUMMARY_FORMAT} from './model.js';
+import {runCsv} from './csv.js';
 import {PageControls, pageWindow} from './Pagination.jsx';
 
 const POLL_MS = 10_000;
@@ -226,7 +227,7 @@ function useSummary(runKey, manifest, polls, scope, onReplaced) {
     start(
       (signal) =>
         fetchJson(
-          `${runPath(runKey)}/summary?rid=${rid}&scope=${encodeURIComponent(scope)}`,
+          `${runPath(runKey)}/summary?rid=${rid}&scope=${encodeURIComponent(scope)}&format=${SUMMARY_FORMAT}`,
           signal,
         ),
       (body) => setSummary({...body, requested: scope}),
@@ -394,6 +395,75 @@ function HostedBenchmark({runKey, manifest, group, benchmark, count, wide, onRep
   );
 }
 
+// Builds the run's CSV in the browser from plot pages (§6) and saves it as
+// `<run key>.csv`. A live run exports a snapshot; if pages were read at
+// different revisions, a note says so.
+function DownloadCsv({runKey, manifest}) {
+  const [state, setState] = useState(null);
+  const controller = useRef(null);
+  useEffect(() => () => controller.current?.abort(), []);
+  // Only the latest attempt updates the state.
+  async function download() {
+    controller.current?.abort();
+    const current = new AbortController();
+    controller.current = current;
+    const latest = () => controller.current === current && !current.signal.aborted;
+    setState({progress: 0});
+    try {
+      const {chunks, revisions} = await runCsv(
+        manifest,
+        (query, signal) => fetchJson(`${runPath(runKey)}/plots?${query}`, signal),
+        {
+          signal: current.signal,
+          onProgress: ({plots, of}) => {
+            if (latest()) setState({progress: of ? plots / of : 1});
+          },
+        },
+      );
+      if (!latest()) return;
+      const url = URL.createObjectURL(
+        new Blob(chunks, {type: 'text/csv;charset=utf-8'}),
+      );
+      try {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = runKey + '.csv';
+        link.click();
+      } catch (e) {
+        URL.revokeObjectURL(url);
+        throw e;
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      setState(
+        revisions[0] !== revisions[1]
+          ? {note: `Exported while the run changed (revisions ${revisions[0]}–${revisions[1]})`}
+          : null,
+      );
+      controller.current = null;
+    } catch (e) {
+      if (!latest()) return;
+      setState({
+        error: e instanceof ReplacedRun ? 'The run was replaced; reload it' : e.message,
+      });
+      controller.current = null;
+    }
+  }
+  const busy = state?.progress !== undefined;
+  return (
+    <>
+      <Button size="compact-xs" variant="default" onClick={download} disabled={busy}>
+        {busy ? `Preparing CSV ${Math.floor(100 * state.progress)}%` : 'Download CSV'}
+      </Button>
+      {state?.error && (
+        <span role="alert" className="muted">
+          CSV failed: {state.error}
+        </span>
+      )}
+      {state?.note && <span className="muted">{state.note}</span>}
+    </>
+  );
+}
+
 export function HostedReport({runKey}) {
   const {manifest, error, polls, stale, refresh} = useManifest(runKey);
   const {scheme, theme} = useChartTheme();
@@ -431,6 +501,15 @@ export function HostedReport({runKey}) {
       ),
     [summary],
   );
+  // The newest point progress of this run seen in any scope's summary, so the
+  // progress card keeps it while another scope's summary loads.
+  const pointProgress = useRef(null);
+  if (
+    summary?.point_progress &&
+    (pointProgress.current?.rid !== summary.rid ||
+      pointProgress.current.revision <= summary.revision)
+  )
+    pointProgress.current = summary;
   useEffect(() => {
     if (manifest) document.title = manifest.report.title;
   }, [manifest]);
@@ -449,6 +528,12 @@ export function HostedReport({runKey}) {
       </main>
     );
   const {report, progress} = manifest;
+  // Derived from the run's points (§5) when a summary has it; the stored
+  // progress, which counts configurations, until then.
+  const derived =
+    pointProgress.current?.rid === manifest.id
+      ? pointProgress.current.point_progress
+      : null;
   const views = [
     {id: null, name: 'Overview'},
     ...manifest.group_order.map((id) => ({id, name: report.groups[id].name})),
@@ -470,6 +555,7 @@ export function HostedReport({runKey}) {
       <main>
         <ReportHeader
           report={report}
+          actions={<DownloadCsv key={manifest.id} runKey={runKey} manifest={manifest} />}
           status={
             error
               ? 'Update failed: ' + error
@@ -489,7 +575,22 @@ export function HostedReport({runKey}) {
             </Badge>
           )}
         </ReportHeader>
-        <RunProgress progress={progress} live={report.live === true} />
+        {derived ? (
+          <RunProgress
+            progress={{
+              total: derived.total,
+              completed: derived.completed,
+              running: derived.running,
+              queued: derived.queued,
+              unsuccessful: derived.failed,
+              started_at: progress?.started_at,
+            }}
+            live={report.live === true}
+            unit="points"
+          />
+        ) : (
+          <RunProgress progress={progress} live={report.live === true} />
+        )}
         <Tabs
           value={JSON.stringify(group)}
           onChange={(value) => setChosen(JSON.parse(value))}

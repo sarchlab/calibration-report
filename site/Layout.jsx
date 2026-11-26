@@ -44,7 +44,7 @@ export function useChartTheme() {
   }, [scheme]);
   return {scheme, theme};
 }
-export function ReportHeader({report, status, dataLink, children}) {
+export function ReportHeader({report, status, dataLink, actions, children}) {
   const {colorScheme, setColorScheme} = useMantineColorScheme();
   return (
     <header className="report-header">
@@ -86,12 +86,15 @@ export function ReportHeader({report, status, dataLink, children}) {
               Results JSON
             </Anchor>
           )}
+          {actions}
         </div>
       </div>
     </header>
   );
 }
-export function RunProgress({progress, live}) {
+// `unit` names what the counts count: data.json progress counts
+// configurations; the hosted viewer's derived progress counts points.
+export function RunProgress({progress, live, unit = 'configurations'}) {
   if (!progress) return null;
   const remaining = Math.max(
     0,
@@ -115,7 +118,9 @@ export function RunProgress({progress, live}) {
       'Completed',
       progress.completed.toLocaleString() +
         ' / ' +
-        progress.total.toLocaleString(),
+        progress.total.toLocaleString() +
+        ' ' +
+        unit,
     ],
     ['Running', progress.running.toLocaleString()],
   ];
@@ -142,7 +147,9 @@ export function RunProgress({progress, live}) {
         <div className="live-progress">
           <div className="progress-caption">
             <h2>Run progress</h2>
-            <span>{progress.total.toLocaleString()} points</span>
+            <span>
+              {progress.total.toLocaleString()} {unit}
+            </span>
           </div>
           <Progress.Root size={8} aria-hidden="true">
             {states.map(([state, , count]) => (

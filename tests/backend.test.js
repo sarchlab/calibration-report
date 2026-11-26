@@ -15,6 +15,7 @@ import {
   errorStats,
   indexReport,
   rankingStats,
+  SUMMARY_FORMAT,
 } from '../site/model.js';
 
 const dsn = process.env.CR_TEST_DSN;
@@ -562,6 +563,114 @@ describe.skipIf(!dsn)('hosted backend', () => {
     });
   });
 
+  describe('point progress', () => {
+    it('counts every point of the run by its simulator observations, in every scope', async () => {
+      const sim = (key) => ({name: 'Sim ' + key, unit: 'ns', role: 'simulator_output'});
+      const benchmarks = {
+        one: {
+          scaling_param: 'n',
+          params: {n: {unit: ''}},
+          values: {hw: {name: 'HW', unit: 'ns', role: 'hardware_measurement'}, sim: sim('sim')},
+        },
+        two: {scaling_param: 'n', params: {n: {unit: ''}}, values: {s1: sim('s1'), s2: sim('s2')}},
+        plain: {scaling_param: 'n', params: {n: {unit: ''}}, values: {other: {name: 'O', unit: ''}}},
+      };
+      const report = {
+        title: 'Progress',
+        description: '',
+        live: true,
+        groups: {a: {name: 'A'}, b: {name: 'B'}},
+      };
+      await open('progress', report, benchmarks, {total: 99, completed: 0, running: 0});
+      let x = 0;
+      const pt = (group, benchmark, values, statuses) => ({
+        group, benchmark, x: ++x, non_scaling_params: {}, values,
+        ...(statuses ? {statuses} : {}),
+      });
+      await put('progress', [
+        pt('a', 'one', {hw: 1, sim: 2}), // completed
+        pt('a', 'one', {hw: 1, sim: 2}, {sim: {state: 'timeout'}}), // failed, despite a value
+        pt('b', 'one', {sim: null}, {sim: {state: 'failed', reason: 'x'}}), // failed
+        pt('b', 'one', {hw: 1}, {sim: {state: 'running'}}), // running
+        pt('a', 'one', {hw: 1}, {sim: {state: 'queued'}}), // queued
+        pt('a', 'one', {hw: 1}), // queued: no simulator observation
+        pt('b', 'one', {sim: null}), // queued: no value
+        pt('a', 'two', {s1: 1, s2: 2}), // completed
+        pt('a', 'two', {s1: 1}), // queued: s2 missing
+        pt('b', 'two', {s1: null}, {s1: {state: 'running'}, s2: {state: 'unsupported'}}), // failed
+        pt('b', 'two', {s2: 2}, {s1: {state: 'running'}}), // running
+        pt('a', 'plain', {other: 1}), // not counted: no simulator series
+      ]);
+      const store = memoryStore();
+      const api = async (path) =>
+        (await handleApi(new Request('http://localhost/api/v1/runs' + path), {pool, store})).json();
+      const manifest = await api('/progress');
+      const expected = {total: 11, completed: 2, running: 2, failed: 3, queued: 4};
+      for (const scope of ['overview', 'group:' + manifest.group_ids.b]) {
+        const summary = await api(`/progress/summary?rid=${manifest.id}&scope=${scope}`);
+        expect(summary.point_progress, scope).toEqual(expected);
+      }
+      // The stored progress is unchanged.
+      expect(manifest.progress).toEqual({total: 99, completed: 0, running: 0});
+    });
+
+    it('rejects an unknown group scope before counting point progress', async () => {
+      const queries = [];
+      const counting = {
+        connect: async () => {
+          const client = await pool.connect();
+          return {
+            query: (text, values) => {
+              queries.push(text);
+              return client.query(text, values);
+            },
+            release: () => client.release(),
+          };
+        },
+      };
+      const manifest = (
+        await (await handleApi(new Request('http://localhost/api/v1/runs/progress'), {pool, store: memoryStore()})).json()
+      );
+      const response = await handleApi(
+        new Request(`http://localhost/api/v1/runs/progress/summary?rid=${manifest.id}&scope=group:999999`),
+        {pool: counting, store: memoryStore()},
+      );
+      expect(response.status).toBe(404);
+      expect(queries.some((text) => text.includes('per_point'))).toBe(false);
+      expect(queries.some((text) => text.includes('cr.groups'))).toBe(true);
+    });
+
+    it('never serves a cached summary of the previous format', async () => {
+      await open('format');
+      await put('format', example.data);
+      await call('finish_run', 'format', 'completed', null);
+      const store = memoryStore();
+      const api = async (path, p = pool) => {
+        const response = await handleApi(
+          new Request('http://localhost/api/v1/runs' + path),
+          {pool: p, store},
+        );
+        return {status: response.status, body: await response.json()};
+      };
+      const manifest = (await api('/format')).body;
+      const scope = 'group:' + manifest.group_ids.mi300x;
+      // A completed entry written by the previous code, without point_progress.
+      store.entries.set(`v1/${manifest.id}/${scope}`, {
+        data: {rid: manifest.id, key: 'format', scope, revision: manifest.revision, state: 'completed'},
+        metadata: {key: 'format', revision: manifest.revision, state: 'completed', computed_at: new Date().toISOString()},
+        etag: 'old',
+      });
+      const path = `/format/summary?rid=${manifest.id}&scope=${scope}&format=${SUMMARY_FORMAT}`;
+      const fresh = await api(path);
+      expect(fresh.body.point_progress).toEqual({total: 2, completed: 1, running: 0, failed: 1, queued: 0});
+      expect([...store.entries.keys()]).toContain(`v1/summary${SUMMARY_FORMAT}/${manifest.id}/${scope}`);
+      // Later reads are served from the new entry, without the database.
+      const broken = {connect: () => Promise.reject(new Error('no database'))};
+      expect((await api(path, broken)).body).toEqual(fresh.body);
+      expect((await api(`/format/summary?rid=${manifest.id}&scope=${scope}&format=1`)).status).toBe(400);
+    });
+  });
+
   describe('budgets and producer-chosen keys', () => {
     const api = async (path, {store = memoryStore(), pool: p = pool} = {}) => {
       const response = await handleApi(
@@ -680,7 +789,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
       const second = await api(path, {store, pool: counting});
       expect(connects).toBe(3); // the state query only
       expect(second.body.computed_at).toBe(first.body.computed_at);
-      expect([...store.entries.keys()]).toEqual([`v1/${manifest.id}/${first.body.scope}`]);
+      expect([...store.entries.keys()]).toEqual([`v1/summary${SUMMARY_FORMAT}/${manifest.id}/${first.body.scope}`]);
     });
 
     it('re-resolves a one-group Overview that gains a group before its snapshot', async () => {
@@ -710,7 +819,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
       expect(status).toBe(200);
       expect(body.scope).toBe('overview');
       expect(body.groups.map(([, key]) => key)).toEqual(['first', 'second']);
-      expect([...store.entries.keys()]).toEqual([`v1/${manifest.id}/overview`]);
+      expect([...store.entries.keys()]).toEqual([`v1/summary${SUMMARY_FORMAT}/${manifest.id}/overview`]);
     });
 
     it('keeps producer-chosen keys and first-appearance order', async () => {

@@ -3,6 +3,7 @@ import {fireEvent, render, screen, waitFor, within} from '@testing-library/react
 import {afterEach, expect, test, vi} from 'vitest';
 import {HostedReport, RunList} from '../site/Hosted.jsx';
 import {PointDescription} from '../site/PointDetails.jsx';
+import {RunProgress} from '../site/Layout.jsx';
 import {buildSummary, isVisibleRow, summaryLimits} from '../site/model.js';
 
 const benchmarks = {
@@ -147,6 +148,7 @@ function stubApi(state) {
         state.summaryFft,
       );
       if (state.state) body.state = state.state;
+      if (state.pointProgress) body.point_progress = state.pointProgress;
     }
     else if (path.includes('/plots')) body = plotPage(query.get('group'), state.bump);
     const text = JSON.stringify(body);
@@ -202,7 +204,7 @@ test('a hosted run shows the server summary and server-paged series', async () =
   // Parameters follow declaration order, not the API's key order.
   for (const heading of card.querySelectorAll('.series h3'))
     expect(heading.textContent).toMatch(/^launch=\d · {3}proto {2}=a · constructor=b · 10=c · 2=d$/);
-  expect(calls).toContain('api/v1/runs/demo/summary?rid=7&scope=group%3A3');
+  expect(calls).toContain('api/v1/runs/demo/summary?rid=7&scope=group%3A3&format=2');
   expect(calls.some((c) => c.includes('/plots?rid=7&group=a&benchmark=gemm&offset=0&limit=6'))).toBe(true);
 });
 
@@ -540,4 +542,126 @@ test('refreshed rows clear a pinned point; a failed refresh keeps it', async () 
   fireEvent.click(within(alert).getByRole('button', {name: 'Retry'}));
   await waitFor(() => expect(screen.queryByText(/Could not refresh/)).toBeNull());
   expect(details()).toBeNull();
+});
+
+test('the progress card shows the summary point progress, labelled in points', async () => {
+  const held = deferred();
+  stubApi({
+    revision: 1,
+    computedAt: new Date().toISOString(),
+    pointProgress: {total: 30, completed: 20, running: 3, failed: 2, queued: 5},
+    holds: [{match: 'api/v1/runs/demo/summary', promise: held.promise}],
+  });
+  mount(<HostedReport runKey="demo" />);
+  // The stored progress counts configurations until the summary arrives.
+  const card = await screen.findByRole('region', {name: 'Run progress'});
+  expect(within(card).getByText('24 configurations')).toBeTruthy();
+  held.resolve();
+  expect(await within(card).findByText('30 points')).toBeTruthy();
+  const count = (label) =>
+    within(card).getByText(label).closest('li').querySelector('strong').textContent;
+  expect([count('Completed'), count('Running'), count('Failed'), count('Not started')]).toEqual(
+    ['20', '3', '2', '5'],
+  );
+});
+
+test('Download CSV pages every plot and saves one file named after the run', async () => {
+  const calls = stubApi({revision: 1, computedAt: new Date().toISOString()});
+  const saved = [];
+  // jsdom has no object URLs.
+  URL.createObjectURL = (blob) => {
+    saved.push(blob);
+    return 'blob:csv';
+  };
+  URL.revokeObjectURL = () => {};
+  const clicks = [];
+  const click = vi
+    .spyOn(HTMLAnchorElement.prototype, 'click')
+    .mockImplementation(function () {
+      clicks.push(this.download);
+    });
+  mount(<HostedReport runKey="demo" />);
+  fireEvent.click(await screen.findByRole('button', {name: 'Download CSV'}));
+  await waitFor(() => expect(clicks).toEqual(['demo.csv']));
+  click.mockRestore();
+  delete URL.createObjectURL;
+  delete URL.revokeObjectURL;
+  const text = await saved[0].text();
+  const lines = text.split('\r\n');
+  expect(lines[0]).toBe(
+    'benchmark,group,scaling_param,x,launch,__proto__,constructor,10,2,' +
+      'hw,hw_state,hw_reason,sim,sim_state,sim_reason',
+  );
+  expect(lines.slice(1, -1)).toHaveLength(12);
+  expect(lines[1]).toBe('gemm,a,size,1,0,a,b,c,d,100,,,110,,');
+  expect(calls.filter((c) => c.includes('/plots?') && c.includes('limit=48'))).toHaveLength(2);
+  expect(screen.getByRole('button', {name: 'Download CSV'}).disabled).toBe(false);
+});
+
+test('a failed CSV download keeps its error until a retry succeeds', async () => {
+  const state = {
+    revision: 1,
+    computedAt: new Date().toISOString(),
+    failures: [{match: 'group=a&benchmark=gemm&offset=0&limit=48'}],
+  };
+  const calls = stubApi(state);
+  const saved = [];
+  URL.createObjectURL = (blob) => {
+    saved.push(blob);
+    return 'blob:csv';
+  };
+  URL.revokeObjectURL = () => {};
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  mount(<HostedReport runKey="demo" />);
+  fireEvent.click(await screen.findByRole('button', {name: 'Download CSV'}));
+  expect((await screen.findByRole('alert')).textContent).toBe('CSV failed: Server busy');
+  // The sibling worker (group b) finishing later does not clear the error.
+  await new Promise((r) => setTimeout(r, 20));
+  expect(screen.getByRole('alert').textContent).toBe('CSV failed: Server busy');
+  expect(saved).toHaveLength(0);
+  fireEvent.click(screen.getByRole('button', {name: 'Download CSV'}));
+  await waitFor(() => expect(saved).toHaveLength(1));
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect((await saved[0].text()).split('\r\n').slice(1, -1)).toHaveLength(12);
+  expect(calls.filter((c) => c.includes('/plots?') && c.includes('limit=48'))).toHaveLength(4);
+  click.mockRestore();
+  delete URL.createObjectURL;
+  delete URL.revokeObjectURL;
+});
+
+test('a failed save shows its error and a retry saves the file', async () => {
+  stubApi({revision: 1, computedAt: new Date().toISOString()});
+  const saved = [];
+  let fail = true;
+  URL.createObjectURL = (blob) => {
+    if (fail) {
+      fail = false;
+      throw new Error('Out of memory');
+    }
+    saved.push(blob);
+    return 'blob:csv';
+  };
+  URL.revokeObjectURL = () => {};
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  mount(<HostedReport runKey="demo" />);
+  fireEvent.click(await screen.findByRole('button', {name: 'Download CSV'}));
+  expect((await screen.findByRole('alert')).textContent).toBe('CSV failed: Out of memory');
+  expect(screen.getByRole('button', {name: 'Download CSV'}).disabled).toBe(false);
+  fireEvent.click(screen.getByRole('button', {name: 'Download CSV'}));
+  await waitFor(() => expect(saved).toHaveLength(1));
+  expect(screen.queryByRole('alert')).toBeNull();
+  click.mockRestore();
+  delete URL.createObjectURL;
+  delete URL.revokeObjectURL;
+});
+
+test('the non-live progress card shows the unit next to the completed ratio', () => {
+  mount(
+    <>
+      <RunProgress progress={{total: 30, completed: 28, running: 0}} live={false} unit="points" />
+      <RunProgress progress={{total: 5, completed: 5, running: 0}} live={false} />
+    </>,
+  );
+  expect(screen.getByText('28 / 30 points')).toBeTruthy();
+  expect(screen.getByText('5 / 5 configurations')).toBeTruthy();
 });
