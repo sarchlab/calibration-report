@@ -5,16 +5,17 @@
 // a log axis). Only the `allowed` axes change.
 
 // Data domain of `axis` after mapping its transformed domain through `step`,
-// or the current domain when the result is degenerate or out of range.
+// or null when the result is degenerate or out of range (a zero-width axis,
+// such as a chart with a single X, never zooms).
 function remap(axis, step) {
   const {domain, transform, inverse} = axis;
   const [low, high] = domain.map(transform).map(step);
   const next = [inverse(low), inverse(high)];
   const scale = Math.max(1, Math.abs(low), Math.abs(high));
   if (!next.every(Number.isFinite) || !(Math.abs(high - low) > 1e-12 * scale))
-    return domain;
+    return null;
   // A log axis that underflows to zero has left its range.
-  if (axis.scale === 'log' && !(next[0] > 0)) return domain;
+  if (axis.scale === 'log' && !(next[0] > 0)) return null;
   return next;
 }
 
@@ -25,30 +26,35 @@ function transformedAt(axis, px) {
   return low + ((px - start) / (end - start)) * (high - low);
 }
 
-// Scales each allowed axis by `factor` (< 1 zooms in) around the drawing
-// position `point` ({x, y}).
-export function zoomView(view, axes, allowed, point, factor) {
+// Each changed axis of `view`: an axis the step cannot change keeps its
+// current override, or stays on the default domain.
+function step(view, axes, allowed, stepOf) {
   const next = {...view};
   for (const name of allowed) {
     const axis = axes[name];
-    if (!axis) continue;
-    const center = transformedAt(axis, point[name]);
-    next[name] = remap(axis, (t) => center + (t - center) * factor);
+    const domain = axis && remap(axis, stepOf(axis, name));
+    if (domain) next[name] = domain;
   }
   return next;
+}
+
+// Scales each allowed axis by `factor` (< 1 zooms in) around the drawing
+// position `point` ({x, y}).
+export function zoomView(view, axes, allowed, point, factor) {
+  return step(view, axes, allowed, (axis, name) => {
+    const center = transformedAt(axis, point[name]);
+    return (t) => center + (t - center) * factor;
+  });
 }
 
 // Moves each allowed axis so its content follows a drag by `delta` ({x, y},
 // drawing units).
 export function panView(view, axes, allowed, delta) {
-  const next = {...view};
-  for (const name of allowed) {
-    const axis = axes[name];
-    if (!axis) continue;
-    const shift = transformedAt(axis, axis.range[0]) - transformedAt(axis, axis.range[0] + delta[name]);
-    next[name] = remap(axis, (t) => t + shift);
-  }
-  return next;
+  return step(view, axes, allowed, (axis, name) => {
+    const shift =
+      transformedAt(axis, axis.range[0]) - transformedAt(axis, axis.range[0] + delta[name]);
+    return (t) => t + shift;
+  });
 }
 
 // Wheel delta in pixels to a zoom factor: one notch (100px) is about 1.2×.

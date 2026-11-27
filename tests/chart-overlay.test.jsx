@@ -188,11 +188,38 @@ describe('zoom math', () => {
     expect(cdf.x).toEqual([-10, 90]);
   });
 
-  test('degenerate or out-of-range zooms keep the current domain', () => {
-    expect(zoomView(null, {x: linear}, ['x'], {x: 0, y: 0}, 0).x).toEqual([0, 100]);
-    expect(zoomView(null, {y: log}, ['y'], {x: 0, y: 0}, 1e6).y).toEqual([1, 1e4]);
+  test('degenerate or out-of-range zooms store no override and keep existing ones', () => {
+    expect(zoomView(null, {x: linear}, ['x'], {x: 0, y: 0}, 0).x).toBeUndefined();
+    expect(zoomView(null, {y: log}, ['y'], {x: 0, y: 0}, 1e6).y).toBeUndefined();
+    expect(zoomView({x: [3, 7]}, {x: linear}, ['x'], {x: 0, y: 0}, 0).x).toEqual([3, 7]);
     expect(wheelFactor({deltaY: -100, deltaMode: 0})).toBeLessThan(1);
     expect(wheelFactor({deltaY: 3, deltaMode: 1})).toBeGreaterThan(1);
+  });
+
+  test('a single-X chart zooms Y only, so a refresh with a second X spreads out', () => {
+    const curve = (data) => ({
+      kind: 'curve',
+      rows: data,
+      curves: [{id: 'hw', color: '#333'}],
+      series: [],
+      xLabel: 'Size',
+      unit: 'ns',
+      bounds: {min: 1e6, max: 2e6},
+      scales: {x: false, y: false},
+    });
+    const canvas = document.createElement('canvas');
+    const single = drawChart(canvas, curve(rows.slice(0, 1)), theme, benchmarks);
+    const zoomed = zoomView(null, single.axes, zoomAxes.curve, {x: 100, y: 60}, 0.5);
+    const panned = panView(zoomed, single.axes, zoomAxes.curve, {x: 30, y: 10});
+    expect(zoomed.x).toBeUndefined();
+    expect(panned.x).toBeUndefined();
+    expect(panned.y).toBeDefined();
+    const refreshed = drawChart(canvas, curve(rows.slice(0, 2)), theme, benchmarks, {
+      view: panned,
+    });
+    const [first, second] = refreshed.hitPoints;
+    expect(second.x - first.x).toBeGreaterThan(100);
+    expect(refreshed.axes.y.domain).toEqual(panned.y);
   });
 
   test('a view clips hit points to the plot and moves the rest', () => {
