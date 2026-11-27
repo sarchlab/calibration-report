@@ -106,6 +106,24 @@ function plotPage(group, bump = 0, launchGroup = false) {
   return {revision: 1, total: 2, plots, next: null};
 }
 
+// A launch-ordinal page: one chart per x, whose launch count grows with x;
+// plot 100 (launch #1) spans all three charts.
+function ordinalPage(group) {
+  const labels = ['#1 k1', '#2 k2', '#3 k1'];
+  const plots = [1, 2, 4].flatMap((x, chart) =>
+    labels.slice(0, chart + 1).map((launch, i) => ({
+      id: 100 + i,
+      chart: 200 + chart,
+      non_scaling_params: {launch},
+      rows: [{
+        group, benchmark: 'gemm', x, non_scaling_params: {launch},
+        values: {hw: 100 * x + i, sim: 110 * x + i},
+      }],
+    })),
+  );
+  return {revision: 1, total: 3, launch_ordinal: true, plots, next: null};
+}
+
 // `updatedAt` changes only when a test simulates a write or heartbeat.
 function stubApi(state) {
   state.updatedAt ??= new Date().toISOString();
@@ -143,6 +161,7 @@ function stubApi(state) {
         body.param_keys = [[...paramKeys[0], 'launch_group']];
         body.plots = {a: [[0, 1]], b: [[0, 1]]};
       }
+      if (state.launchOrdinal) body.plots = {a: [[0, 3]], b: [[0, 3]]};
       if (state.manifestFft) {
         body.benchmarks = {...body.benchmarks, fft: fftMeta};
         body.benchmark_keys = [...body.benchmark_keys, 'fft'];
@@ -159,6 +178,7 @@ function stubApi(state) {
       if (state.state) body.state = state.state;
       if (state.pointProgress) body.point_progress = state.pointProgress;
     }
+    else if (path.includes('/plots') && state.launchOrdinal) body = ordinalPage(query.get('group'));
     else if (path.includes('/plots')) {
       body = plotPage(query.get('group'), state.bump, state.launchGroup);
       // With `plotRevisions`, a page comes in two chunks, each answered at
@@ -224,7 +244,7 @@ test('a hosted run shows the server summary and server-paged series', async () =
   for (const heading of card.querySelectorAll('.series h3'))
     expect(heading.textContent).toMatch(/^launch=\d · {3}proto {2}=a · constructor=b · 10=c · 2=d$/);
   expect(calls).toContain('api/v1/runs/demo/summary?rid=7&scope=group%3A3&format=2');
-  expect(calls.some((c) => c.includes('/plots?rid=7&group=a&benchmark=gemm&offset=0&limit=6&format=2'))).toBe(true);
+  expect(calls.some((c) => c.includes('/plots?rid=7&group=a&benchmark=gemm&offset=0&limit=6&format=3'))).toBe(true);
 });
 
 test('a hosted launch group gathers its plots into one median chart', async () => {
@@ -247,6 +267,30 @@ test('a hosted launch group gathers its plots into one median chart', async () =
   const details = document.querySelector('.point-detail-pinned');
   expect(within(details).getByText('Dispatches at this X').nextSibling.textContent).toBe('2');
   expect(within(details).getAllByText('median of 2')).toHaveLength(2);
+});
+
+test('a hosted launch-ordinal chart gathers its plots at one x over the launch ordinal', async () => {
+  const calls = stubApi({revision: 1, computedAt: new Date().toISOString(), launchOrdinal: true});
+  mount(<HostedReport runKey="demo" />);
+  expect(await screen.findByText('Overview · Accuracy summary')).toBeTruthy();
+  fireEvent.click(screen.getByRole('tab', {name: 'Device A'}));
+  await screen.findByText('Benchmark-wide error');
+  expect(calls.some((c) => c.includes('&format=3'))).toBe(true);
+  const card = screen.getByRole('article');
+  expect([...card.querySelectorAll('.series h3')].map((h) => h.textContent)).toEqual([
+    'size=1',
+    'size=2',
+    'size=4',
+  ]);
+  const canvas = within(card.querySelectorAll('.series')[2]).getByRole('img');
+  expect(canvas.getAttribute('aria-label')).toMatch(/^Comparison by launch, linear X axis/);
+  canvas.focus();
+  fireEvent.keyDown(canvas, {key: 'End'});
+  expect(screen.getByText('6 / 6')).toBeTruthy();
+  // Details show the raw point: its launch label and its size.
+  const details = document.querySelector('.point-detail-pinned');
+  expect(details.querySelector('.point-kernel').textContent).toBe('#3 k1');
+  expect(within(details).getByText('Size').nextSibling.textContent).toBe('4');
 });
 
 test('a plot page whose chunks span revisions is read again', async () => {

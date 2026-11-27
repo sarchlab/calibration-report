@@ -21,6 +21,8 @@ const MAX_PLOTS_PER_PAGE = 48;
 // params name a `launch_group` share a chart across `launch` values; any
 // other plot is its own chart.
 const chartKey = `CASE WHEN params ? 'launch_group' THEN params - 'launch' ELSE params END`;
+// parseLaunch (site/model.js) in SQL: `.` matches any character.
+const launchLabel = `'^#[0-9]+ .+$'`;
 const drawnStates = [
   'failed',
   'verification_failed',
@@ -29,6 +31,42 @@ const drawnStates = [
   'unsupported',
   'running',
 ];
+// The indexReport row filter: a value or a drawn status.
+const drawnPoint = `EXISTS (SELECT 1 FROM cr.observations o WHERE o.point_id = p.id
+  AND (o.value IS NOT NULL OR o.state = ANY ($DRAWN::text[])))`;
+
+// Launch-ordinal benchmarks (launchOrdinalBenchmarks in site/model.js) among
+// the visible plots matching `scope` (SQL over cr.plots with parameters from
+// `values`), with their chart counts, keyed `group_id:benchmark_id`. A
+// candidate's visible plots all have an ordinal `launch` and no
+// `launch_group`; it is launch-ordinal when, for some params - 'launch', its
+// launch counts (drawn points) differ between x values. Each
+// (params - 'launch', x) is one chart.
+async function launchOrdinalCharts(client, scope, values) {
+  const drawn = drawnPoint.replace('$DRAWN', '$' + (values.length + 1));
+  const found = await rows(
+    client,
+    `WITH candidates AS (
+       SELECT group_id, benchmark_id FROM cr.plots WHERE ${scope} AND visible
+       GROUP BY group_id, benchmark_id
+       HAVING bool_and(coalesce(params->>'launch' ~ ${launchLabel}, false)
+                       AND NOT params ? 'launch_group')),
+     charts AS (
+       SELECT pl.group_id, pl.benchmark_id, pl.params - 'launch' AS rest, count(*) AS launches
+       FROM candidates c
+       JOIN cr.plots pl USING (group_id, benchmark_id)
+       JOIN cr.points p ON p.plot_id = pl.id
+       WHERE pl.visible AND ${drawn}
+       GROUP BY pl.group_id, pl.benchmark_id, pl.params - 'launch', p.x),
+     varying AS (
+       SELECT group_id, benchmark_id, min(launches) <> max(launches) AS varies, count(*) AS n
+       FROM charts GROUP BY group_id, benchmark_id, rest)
+     SELECT group_id, benchmark_id, sum(n)::int AS charts FROM varying
+     GROUP BY group_id, benchmark_id HAVING bool_or(varies)`,
+    [...values, drawnStates],
+  );
+  return new Map(found.map((r) => [r.group_id + ':' + r.benchmark_id, r.charts]));
+}
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -138,6 +176,7 @@ async function manifest(pool, key) {
          GROUP BY group_id, benchmark_id ORDER BY first`,
         [run.id],
       );
+      const ordinal = await launchOrdinalCharts(client, 'run_id = $1', [run.id]);
       // Keys are producer-chosen (`constructor`, `__proto__`, "10"): build
       // objects without a prototype and carry order in arrays.
       const record = () => Object.create(null);
@@ -173,7 +212,7 @@ async function manifest(pool, key) {
         }
         plots[group].push([
           benchmarkById.get(String(count.benchmark_id)).index,
-          count.plots,
+          ordinal.get(count.group_id + ':' + count.benchmark_id) ?? count.plots,
         ]);
       }
       const reportGroups = record();
@@ -274,23 +313,45 @@ async function plotPage(pool, key, query) {
         [run.id, groupKey, benchmarkKey],
       );
       if (!ids) throw new HttpError(404, 'Unknown group or benchmark');
+      const ordinal =
+        (
+          await launchOrdinalCharts(client, 'group_id = $1 AND benchmark_id = $2', [
+            ids.group_id,
+            ids.benchmark_id,
+          ])
+        ).size > 0;
       // Charts are paged; each is named by its first plot id and lists its
-      // plots, which page together.
-      const visible = `SELECT id, params, min(id) OVER (PARTITION BY ${chartKey}) AS chart
-         FROM cr.plots WHERE group_id = $1 AND benchmark_id = $2 AND visible`;
+      // plots, which page together. A launch-ordinal chart is one
+      // (params - 'launch', x), named by its first drawn point id, and lists
+      // each of its plots at that x, so a plot spans the charts of its xs.
+      const scope = [ids.group_id, ids.benchmark_id];
+      const visible = ordinal
+        ? `SELECT pl.id, pl.params, p.x,
+                  min(p.id) OVER (PARTITION BY pl.params - 'launch', p.x) AS chart
+           FROM cr.plots pl JOIN cr.points p ON p.plot_id = pl.id
+           WHERE pl.group_id = $1 AND pl.benchmark_id = $2 AND pl.visible
+             AND ${drawnPoint.replace('$DRAWN', '$3')}`
+        : `SELECT id, params, NULL::float8 AS x,
+                  min(id) OVER (PARTITION BY ${chartKey}) AS chart
+           FROM cr.plots WHERE group_id = $1 AND benchmark_id = $2 AND visible`;
+      if (ordinal) scope.push(drawnStates);
       const [{total}] = await rows(
         client,
         `SELECT count(DISTINCT chart)::int AS total FROM (${visible}) v`,
-        [ids.group_id, ids.benchmark_id],
+        scope,
       );
       const plots = await rows(
         client,
         `WITH v AS (${visible}),
-              page AS (SELECT DISTINCT chart FROM v ORDER BY chart OFFSET $3 LIMIT $4)
-         SELECT v.id, v.params, v.chart FROM v JOIN page USING (chart) ORDER BY v.id`,
-        [ids.group_id, ids.benchmark_id, offset, limit],
+              page AS (SELECT DISTINCT chart FROM v ORDER BY chart
+                       OFFSET $${scope.length + 1} LIMIT $${scope.length + 2})
+         SELECT v.id, v.params, v.x, v.chart FROM v JOIN page USING (chart)
+         ORDER BY v.id, v.x`,
+        [...scope, offset, limit],
       );
-      const byId = new Map(plots.map((p) => [String(p.id), p]));
+      // The chart entry of a row: its plot, or its plot at its x.
+      const entryKey = (id, x) => (ordinal ? id + ':' + x : id);
+      const entryOf = new Map(plots.map((p) => [entryKey(String(p.id), p.x), p]));
       const byPlot = new Map();
       // The envelope counts against the budget: the longest cursor, and each
       // plot of the response with its parameters once it has a row.
@@ -298,6 +359,7 @@ async function plotPage(pool, key, query) {
         JSON.stringify({
           revision: run.revision,
           total,
+          ...(ordinal && {launch_ordinal: true}),
           plots: [],
           next: '9'.repeat(20) + ':' + '-1.0000000000000000e+308',
         }),
@@ -320,27 +382,36 @@ async function plotPage(pool, key, query) {
           client,
           `SELECT ${pointColumns} ${pointJoins}
            WHERE p.plot_id = ANY ($1::bigint[])
+             AND ($5::float8[] IS NULL
+                  OR (p.plot_id, p.x) IN (SELECT * FROM unnest($1::bigint[], $5::float8[])))
              AND ($2::bigint IS NULL OR (p.plot_id, p.x) > ($2::bigint, $3::float8))
            GROUP BY p.id
            HAVING bool_or(o.value IS NOT NULL OR o.state = ANY ($4::text[]))
            ORDER BY p.plot_id, p.x
            LIMIT ${PAGE_BATCH}`,
-          [plots.map((p) => p.id), position?.plot ?? null, position?.x ?? 0, drawnStates],
+          [
+            plots.map((p) => p.id),
+            position?.plot ?? null,
+            position?.x ?? 0,
+            drawnStates,
+            ordinal ? plots.map((p) => p.x) : null,
+          ],
         );
         for (const row of batch) {
           const id = String(row.plot_id);
-          const plot = byId.get(id);
+          const key = entryKey(id, row.x);
+          const plot = entryOf.get(key);
           const point = toPoint(row, groupKey, benchmarkKey, plot.params);
           let size = encoder.encode(JSON.stringify(point)).length + 1; // comma
-          if (!byPlot.has(id))
+          if (!byPlot.has(key))
             size += encoder.encode(JSON.stringify(plotEntry(plot, []))).length + 1;
           if (emitted === PAGE_ROWS || (emitted > 0 && bytes + size > PAGE_BYTES)) {
             next = position.plot + ':' + position.x;
             done = true;
             break;
           }
-          if (!byPlot.has(id)) byPlot.set(id, []);
-          byPlot.get(id).push(point);
+          if (!byPlot.has(key)) byPlot.set(key, []);
+          byPlot.get(key).push(point);
           bytes += size;
           emitted++;
           position = {plot: id, x: row.x};
@@ -351,7 +422,8 @@ async function plotPage(pool, key, query) {
         {
           revision: run.revision,
           total,
-          plots: [...byPlot].map(([id, pagePoints]) => plotEntry(byId.get(id), pagePoints)),
+          ...(ordinal && {launch_ordinal: true}),
+          plots: [...byPlot].map(([key, pagePoints]) => plotEntry(entryOf.get(key), pagePoints)),
           next,
         },
         {immutable: run.state === 'completed'},

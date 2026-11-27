@@ -268,6 +268,54 @@ export function chartParams(params) {
 
 export const isLaunchGroup = (params) => Object.hasOwn(params, 'launch_group');
 
+// A `launch` label that names a global launch ordinal and a kernel, like
+// "#912 nw_kernel2": {ordinal, kernel}, else null. `s`: `.` matches any
+// character, as in the SQL regex (`launchLabel` in netlify/lib/api.js).
+export function parseLaunch(params) {
+  const match =
+    typeof params.launch === 'string' && /^#([0-9]+) (.+)$/s.exec(params.launch);
+  return match ? {ordinal: Number(match[1]), kernel: match[2]} : null;
+}
+
+// The group × benchmark pairs, as JSON([group, benchmark]), whose charts are
+// launch-ordinal: every row has an ordinal `launch` label and no
+// `launch_group`, and for some combination of the other parameters the
+// number of launches differs between x values: the launch count varies with
+// the scaling value (a count that depends only on other parameters, like
+// SRAD's iterations, does not). Such a benchmark gets one chart per
+// (parameters without `launch`, x), drawn over the launch ordinal. `rows`
+// are visible rows. The hosted API applies the same rule in SQL (`launchOrdinalCharts`).
+export function launchOrdinalBenchmarks(rows) {
+  const benchmarks = new Map();
+  for (const row of rows) {
+    const id = JSON.stringify([row.group, row.benchmark]);
+    if (!benchmarks.has(id)) benchmarks.set(id, {ordinal: true, launches: new Map()});
+    const benchmark = benchmarks.get(id);
+    const params = row.non_scaling_params;
+    if (!benchmark.ordinal) continue;
+    if (isLaunchGroup(params) || !parseLaunch(params)) {
+      benchmark.ordinal = false;
+      continue;
+    }
+    const {launch, ...rest} = params;
+    const key = JSON.stringify(Object.entries(rest).sort());
+    if (!benchmark.launches.has(key)) benchmark.launches.set(key, new Map());
+    const perX = benchmark.launches.get(key);
+    if (!perX.has(row.x)) perX.set(row.x, new Set());
+    perX.get(row.x).add(launch);
+  }
+  const ordinal = new Set();
+  for (const [id, {ordinal: candidate, launches}] of benchmarks)
+    if (
+      candidate &&
+      [...launches.values()].some(
+        (perX) => new Set([...perX.values()].map((set) => set.size)).size > 1,
+      )
+    )
+      ordinal.add(id);
+  return ordinal;
+}
+
 // Shaded percentile bands of launch-group charts, outermost first: the
 // [low, high] quantiles and the dispatches an X needs to draw the level.
 export const launchBands = [
@@ -349,8 +397,15 @@ export function indexReport(data, benchmarks) {
   const rows = data.filter(isVisibleRow);
   const pairs = comparisonPairs(rows, benchmarks);
   const groups = new Map();
-  const parameterKey = (point) =>
-    JSON.stringify(Object.entries(chartParams(point.non_scaling_params)).sort());
+  const ordinal = launchOrdinalBenchmarks(rows);
+  const isOrdinal = (point) => ordinal.has(JSON.stringify([point.group, point.benchmark]));
+  // A launch-ordinal chart is one (parameters without `launch`, x).
+  const parameterKey = (point) => {
+    if (!isOrdinal(point))
+      return JSON.stringify(Object.entries(chartParams(point.non_scaling_params)).sort());
+    const {launch: _launch, ...rest} = point.non_scaling_params;
+    return JSON.stringify([Object.entries(rest).sort(), point.x]);
+  };
   for (const point of rows) {
     if (!groups.has(point.group))
       groups.set(point.group, {pairs: [], benchmarks: new Map()});
@@ -364,7 +419,12 @@ export function indexReport(data, benchmarks) {
     const benchmark = group.benchmarks.get(point.benchmark);
     const key = parameterKey(point);
     if (!benchmark.series.has(key))
-      benchmark.series.set(key, {parameters: key, rows: [], pairs: []});
+      benchmark.series.set(
+        key,
+        isOrdinal(point)
+          ? {parameters: key, rows: [], pairs: [], launchOrdinal: true}
+          : {parameters: key, rows: [], pairs: []},
+      );
     benchmark.series.get(key).rows.push(point);
   }
   for (const pair of pairs) {
@@ -401,10 +461,11 @@ export const API_VERSION = 'v1';
 // and of its cache key, so cached old-format summaries are never served.
 export const SUMMARY_FORMAT = 2;
 // Version of the plots response within API_VERSION (2: pages charts, plots
-// carry `chart`); the viewer sends it as `format=` on every plots request, so
-// a cached immutable response of an older format is never reused, and the
-// Function rejects any other format.
-export const PLOTS_FORMAT = 2;
+// carry `chart`; 3: launch-ordinal charts split plots by x and the response
+// says `launch_ordinal`); the viewer sends it as `format=` on every plots
+// request, so a cached immutable response of an older format is never
+// reused, and the Function rejects any other format.
+export const PLOTS_FORMAT = 3;
 
 // The row filter of indexReport: a finite value or a drawn status.
 export function isVisibleRow(point) {

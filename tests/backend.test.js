@@ -10,7 +10,13 @@ import pg from 'pg';
 import {afterAll, beforeAll, describe, expect, it} from 'vitest';
 import {handleApi} from '../netlify/lib/api.js';
 import {runCsv} from '../site/csv.js';
-import {fdtdReport} from './launch-fixture.js';
+import {
+  fdtdReport,
+  gaussianPoints,
+  launchOrdinalReport,
+  nwPoints,
+  sradPoints,
+} from './launch-fixture.js';
 import {
   chartParams,
   comparisonPairs,
@@ -440,7 +446,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
       const view = index.groups.get('a').benchmarks.find((b) => b.id === 'gemm');
       const rid = manifest.id;
       const {body, headers} = await api(
-        `/synthetic/plots?format=2&rid=${rid}&group=a&benchmark=gemm&offset=1&limit=2`,
+        `/synthetic/plots?format=3&rid=${rid}&group=a&benchmark=gemm&offset=1&limit=2`,
       );
       expect(headers.get('cache-control')).toContain('immutable');
       expect(body.total).toBe(view.series.length);
@@ -452,25 +458,25 @@ describe.skipIf(!dsn)('hosted backend', () => {
       // A continuation cursor resumes after the given row.
       const first = body.plots[0];
       const rest = await api(
-        `/synthetic/plots?format=2&rid=${rid}&group=a&benchmark=gemm&offset=1&limit=2&after=${first.id}:${first.rows[0].x}`,
+        `/synthetic/plots?format=3&rid=${rid}&group=a&benchmark=gemm&offset=1&limit=2&after=${first.id}:${first.rows[0].x}`,
       );
       expect(rest.body.plots[0].rows).toEqual(first.rows.slice(1));
     });
 
     it('returns single points and rejects replaced run ids', async () => {
-      const {body: page} = await api(`/synthetic/plots?format=2&rid=${manifest.id}&group=b&benchmark=gemm`);
+      const {body: page} = await api(`/synthetic/plots?format=3&rid=${manifest.id}&group=b&benchmark=gemm`);
       const plot = page.plots[0];
       const {body} = await api(`/synthetic/points/${plot.id}/${plot.rows[0].x}?rid=${manifest.id}`);
       expect(body.point).toEqual(plot.rows[0]);
-      expect((await api(`/synthetic/plots?format=2&rid=999999&group=a&benchmark=gemm`)).status).toBe(409);
+      expect((await api(`/synthetic/plots?format=3&rid=999999&group=a&benchmark=gemm`)).status).toBe(409);
       expect((await api(`/unknown`)).status).toBe(404);
     });
 
     it('rejects plot pages of a missing or older format', async () => {
       const path = `/synthetic/plots?rid=${manifest.id}&group=a&benchmark=gemm`;
-      for (const format of ['', '&format=1'])
+      for (const format of ['', '&format=1', '&format=2'])
         expect((await api(path + format)).status).toBe(400);
-      expect((await api(path + '&format=2')).status).toBe(200);
+      expect((await api(path + '&format=3')).status).toBe(200);
     });
 
     it('computes exact summary statistics equal to the file viewer', async () => {
@@ -552,7 +558,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
       await put('live', report.data.slice(150));
       manifest = await api('/live');
       expect(manifest.revision).toBeGreaterThan(first.revision);
-      const page = await api(`/live/plots?format=2&rid=${manifest.id}&group=a&benchmark=fft&limit=48`);
+      const page = await api(`/live/plots?format=3&rid=${manifest.id}&group=a&benchmark=fft&limit=48`);
       expect(page.plots.flatMap((p) => p.rows).length).toBe(
         report.data.filter((p) => p.group === 'a' && p.benchmark === 'fft').length,
       );
@@ -766,7 +772,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
         chunks = 0;
       do {
         const {body, bytes} = await api(
-          `/wide-points/plots?format=2&rid=${manifest.id}&group=g&benchmark=b` +
+          `/wide-points/plots?format=3&rid=${manifest.id}&group=g&benchmark=b` +
             (after ? '&after=' + after : ''),
         );
         expect(bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
@@ -853,7 +859,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
           chunks = 0;
         do {
           const {body, bytes} = await api(
-            `/fdtd/plots?format=2&rid=${manifest.id}&group=gpu&benchmark=polybench_fdtd2d` +
+            `/fdtd/plots?format=3&rid=${manifest.id}&group=gpu&benchmark=polybench_fdtd2d` +
               `&offset=${offset}&limit=6` +
               (after ? '&after=' + after : ''),
           );
@@ -885,7 +891,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
       }
       // Single points stay addressable by their dispatch plot.
       const {body: page} = await api(
-        `/fdtd/plots?format=2&rid=${manifest.id}&group=gpu&benchmark=polybench_fdtd2d&limit=1`,
+        `/fdtd/plots?format=3&rid=${manifest.id}&group=gpu&benchmark=polybench_fdtd2d&limit=1`,
       );
       const [plot] = page.plots;
       const {body: single} = await api(`/fdtd/points/${plot.id}/${plot.rows[0].x}?rid=${manifest.id}`);
@@ -904,6 +910,115 @@ describe.skipIf(!dsn)('hosted backend', () => {
       const {body: summary} = await api(`/fdtd/summary?rid=${manifest.id}&scope=overview`);
       expect(summary.count).toBe(index.pairs.length);
       expect(summary.stats).toEqual(errorStats(index.pairs));
+    }, 60_000);
+
+    it('pages launch-ordinal charts, each plot split by x, like the file viewer', async () => {
+      const sizes = Array.from({length: 32}, (_, i) => 16 * (200 + i));
+      // A chart whose points are all queued is not drawn, nor counted.
+      const queued = (point) =>
+        point.non_scaling_params.penalty === 10 && point.x === sizes[3]
+          ? {...point, values: {hw: null, sim: null}, statuses: {sim: {state: 'queued'}}}
+          : point;
+      const data = [
+        ...nwPoints({sizes, penalties: [1, 10]}).map(queued),
+        ...sradPoints({iterations: [1, 2]}),
+        ...gaussianPoints(),
+      ];
+      const report = {
+        ...launchOrdinalReport(data),
+        progress: {total: data.length, completed: 0, running: 0},
+      };
+      const manifest = await seed('ordinal', report);
+      const index = indexReport(report.data, report.benchmarks);
+      const fileBenchmarks = index.groups.get('gpu').benchmarks;
+      const fileSeries = fileBenchmarks[0].series;
+      expect(fileSeries).toHaveLength(63);
+      expect(manifest.plots.gpu).toEqual(
+        fileBenchmarks.map((b) => [manifest.benchmark_keys.indexOf(b.id), b.series.length]),
+      );
+      expect(manifest.plots.gpu.map(([, count]) => count)).toEqual([63, 6, 2]);
+      const ordinalOf = (row) => Number(row.non_scaling_params.launch.split(' ')[0].slice(1));
+      const byOrdinal = (a, b) => ordinalOf(a) - ordinalOf(b);
+      const pages = new Map();
+      for (const offset of [0, 48]) {
+        const charts = new Map();
+        const entries = new Set();
+        let after = null,
+          chunks = 0;
+        do {
+          const {body, bytes} = await api(
+            `/ordinal/plots?format=3&rid=${manifest.id}&group=gpu&benchmark=rodinia_nw` +
+              `&offset=${offset}&limit=48` +
+              (after ? '&after=' + after : ''),
+          );
+          expect(bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+          expect(body.total).toBe(63);
+          expect(body.launch_ordinal).toBe(true);
+          chunks++;
+          for (const plot of body.plots) {
+            // One entry per plot and chart, with only that chart's rows.
+            const entry = plot.id + ':' + plot.chart;
+            expect(entries.has(entry)).toBe(false);
+            entries.add(entry);
+            expect(new Set(plot.rows.map((row) => row.x)).size).toBe(1);
+            if (!charts.has(plot.chart)) charts.set(plot.chart, []);
+            for (const row of plot.rows) {
+              expect(row.non_scaling_params).toEqual(plot.non_scaling_params);
+              charts.get(plot.chart).push({plot: plot.id, row});
+            }
+          }
+          after = body.next;
+        } while (after);
+        // Over 20,000 rows: the cursor continues inside a plot's charts.
+        if (offset === 0) expect(chunks).toBeGreaterThanOrEqual(2);
+        const ordered = [...charts].sort(([a], [b]) => a - b).map(([, chart]) => chart);
+        expect(ordered).toHaveLength(offset === 0 ? 48 : 15);
+        ordered.forEach((chart, i) => {
+          const rows = chart.map(({row}) => row);
+          expect(rows.sort(byOrdinal)).toEqual([...fileSeries[offset + i].rows].sort(byOrdinal));
+        });
+        pages.set(offset, ordered);
+      }
+      // The first launch's plot spans charts on both pages.
+      const plotsOf = (offset) => new Set(pages.get(offset).flat().map(({plot}) => plot));
+      const shared = [...plotsOf(0)].filter((plot) => plotsOf(48).has(plot));
+      expect(shared.length).toBeGreaterThan(0);
+      // Point details stay raw.
+      const [{plot, row}] = pages.get(48)[0];
+      const {body: single} = await api(`/ordinal/points/${plot}/${row.x}?rid=${manifest.id}`);
+      expect(single.point).toEqual(row);
+      // A fixed launch count keeps one chart per plot, as before.
+      const {body: srad} = await api(
+        `/ordinal/plots?format=3&rid=${manifest.id}&group=gpu&benchmark=rodinia_srad`,
+      );
+      expect('launch_ordinal' in srad).toBe(false);
+      expect(srad.plots.map((p) => p.chart)).toEqual(srad.plots.map((p) => p.id));
+      expect(srad.plots.map((p) => p.rows.length)).toEqual([3, 3, 3, 3, 3, 3]);
+      const {body: gaussian} = await api(
+        `/ordinal/plots?format=3&rid=${manifest.id}&group=gpu&benchmark=rodinia_gaussian`,
+      );
+      expect(gaussian.launch_ordinal).toBe(true);
+      expect(new Set(gaussian.plots.map((p) => p.chart)).size).toBe(2);
+      // The CSV keeps one row per point, in plot and x order as before.
+      const csv = await runCsv(manifest, async (query) => (await api(`/ordinal/plots?${query}`)).body);
+      const visible = index.groups.get('gpu').benchmarks.flatMap((b) => b.series.flatMap((s) => s.rows));
+      expect(csv.rows).toBe(visible.length);
+      const lines = csv.chunks.join('').split('\r\n').slice(1, -1);
+      const nwLines = lines.filter((line) => line.startsWith('rodinia_nw,'));
+      // Plot ids as the pages named them.
+      const paged = [...pages.values()].flat(2);
+      const expected = paged
+        .sort((a, b) => a.plot - b.plot || a.row.x - b.row.x)
+        .map(({row}) => row.x + ',' + row.non_scaling_params.penalty + ',' + row.non_scaling_params.launch);
+      expect(expected).toHaveLength(fileSeries.reduce((n, series) => n + series.rows.length, 0));
+      const columns = csv.chunks[0].split('\r\n')[0].split(',');
+      const at = (name) => columns.indexOf(name);
+      expect(
+        nwLines.map((line) => {
+          const cells = line.split(',');
+          return [cells[3], cells[at('penalty')], cells[at('launch')]].join(',');
+        }),
+      ).toEqual(expected);
     }, 60_000);
 
     it('keeps producer-chosen keys and first-appearance order', async () => {

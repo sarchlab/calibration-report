@@ -4,6 +4,8 @@ import {PLOTS_FORMAT} from './model.js';
 
 const PLOTS_PER_PAGE = 48;
 const CONCURRENCY = 4;
+// Passes over one benchmark before giving up on a layout that keeps changing.
+const LAYOUT_ATTEMPTS = 3;
 
 // RFC 4180: a field with a comma, quote, CR, or LF is quoted, and quotes are
 // doubled. null and undefined are empty; numbers print as JavaScript does.
@@ -113,12 +115,33 @@ export async function runCsv(manifest, fetchPage, {onProgress, signal} = {}) {
     low = manifest.revision,
     high = manifest.revision;
   async function exportTask(task, chunks) {
+    for (let attempt = 0; attempt < LAYOUT_ATTEMPTS; attempt++)
+      if (await exportLayout(task, chunks)) return;
+    throw new Error(
+      'The charts of ' + task.benchmark + ' kept changing during the export; retry',
+    );
+  }
+  // One pass over a benchmark's pages; false, with its rows and progress
+  // taken back, when a page's layout (launch_ordinal) differs from the first
+  // page's, because offsets of the two layouts count different charts.
+  async function exportLayout(task, chunks) {
     // The greatest x emitted per plot: rows arrive in x order, so a plot that
     // a shifted window returns again yields only rows beyond it. Progress
-    // counts charts, as the manifest does.
+    // counts charts, as the manifest does. A launch-ordinal benchmark splits
+    // each plot across charts (one per x) in chart order, so its rows are
+    // kept once per (plot, x) and written in plot and x order at the end.
     const emitted = new Map();
     const charts = new Set();
-    let counted = 0;
+    const ordinal = new Map();
+    let counted = 0,
+      written = 0,
+      layout = null;
+    const restart = () => {
+      chunks.length = 0;
+      rows -= written;
+      done -= counted;
+      return false;
+    };
     for (let offset = 0, total = task.count; offset < total; offset += PLOTS_PER_PAGE) {
       let after = null;
       do {
@@ -135,9 +158,16 @@ export async function runCsv(manifest, fetchPage, {onProgress, signal} = {}) {
         controller.signal.throwIfAborted();
         low = Math.min(low, body.revision);
         high = Math.max(high, body.revision);
+        layout ??= body.launch_ordinal === true;
+        if (layout !== (body.launch_ordinal === true)) return restart();
         total = body.total;
         const points = body.plots.flatMap((plot) => {
           charts.add(plot.chart);
+          if (layout) {
+            for (const row of plot.rows)
+              ordinal.set(JSON.stringify([plot.id, row.x]), [plot.id, row]);
+            return [];
+          }
           const last = emitted.get(plot.id) ?? -Infinity;
           const fresh = plot.rows.filter((row) => row.x > last);
           emitted.set(plot.id, fresh.length ? fresh.at(-1).x : last);
@@ -145,12 +175,20 @@ export async function runCsv(manifest, fetchPage, {onProgress, signal} = {}) {
         });
         chunks.push(csvRows(columns, manifest, points));
         rows += points.length;
+        written += points.length;
         after = body.next;
       } while (after);
       done += charts.size - counted;
       counted = charts.size;
       onProgress?.({plots: Math.min(done, plots), of: plots});
     }
+    if (ordinal.size) {
+      const sorted = [...ordinal.values()].sort(([a, r], [b, s]) => a - b || r.x - s.x);
+      const points = sorted.map(([, row]) => row);
+      chunks.push(csvRows(columns, manifest, points));
+      rows += points.length;
+    }
+    return true;
   }
   let next = 0;
   try {
