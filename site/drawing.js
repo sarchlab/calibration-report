@@ -130,6 +130,7 @@ const FACTOR_STEPS = [1.001, 1.002, 1.005, 1.01, 1.02, 1.05, 1.1, 1.2, 1.5, 2, 3
 export function factorTicks(min, max, count) {
   const low = logFactor(min),
     high = logFactor(max);
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return [];
   if (!(high > low)) return [min];
   const gap = (high - low) / (count + 1);
   const chosen = [];
@@ -670,7 +671,10 @@ export function drawChart(
       'Case rank',
       factor ? 'Sim / hardware (log)' : 'Signed error (%)',
       [1, end],
-      [inverse(minimum - margin), inverse(maximum + margin)],
+      // An extreme log factor's padded end may overflow: keep it unpadded.
+      [inverse(minimum - margin), inverse(maximum + margin)].map((end, i) =>
+        Number.isFinite(end) ? end : inverse(i ? maximum : minimum),
+      ),
       {maxCount: end},
       factor
         ? {factor: true}

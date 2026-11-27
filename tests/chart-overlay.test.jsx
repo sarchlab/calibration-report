@@ -189,8 +189,8 @@ describe('zoom math', () => {
   });
 
   test('degenerate or out-of-range zooms store no override and keep existing ones', () => {
-    expect(zoomView(null, {x: linear}, ['x'], {x: 0, y: 0}, 0).x).toBeUndefined();
-    expect(zoomView(null, {y: log}, ['y'], {x: 0, y: 0}, 1e6).y).toBeUndefined();
+    expect(zoomView(null, {x: linear}, ['x'], {x: 0, y: 0}, 0)).toBeNull();
+    expect(zoomView(null, {y: log}, ['y'], {x: 0, y: 0}, 1e6)).toBeNull();
     expect(zoomView({x: [3, 7]}, {x: linear}, ['x'], {x: 0, y: 0}, 0).x).toEqual([3, 7]);
     expect(wheelFactor({deltaY: -100, deltaMode: 0})).toBeLessThan(1);
     expect(wheelFactor({deltaY: 3, deltaMode: 1})).toBeGreaterThan(1);
@@ -220,6 +220,54 @@ describe('zoom math', () => {
     const [first, second] = refreshed.hitPoints;
     expect(second.x - first.x).toBeGreaterThan(100);
     expect(refreshed.axes.y.domain).toEqual(panned.y);
+  });
+
+  test('an axis the gesture does not move stays on automatic bounds', () => {
+    const curve = (data, max) => ({
+      kind: 'curve',
+      rows: data,
+      curves: [{id: 'hw', color: '#333'}],
+      series: [],
+      xLabel: 'Size',
+      unit: 'ns',
+      bounds: {min: 1e6, max},
+      scales: {x: false, y: false},
+    });
+    const canvas = document.createElement('canvas');
+    const drawn = drawChart(canvas, curve(rows.slice(0, 4), 4e6), theme, benchmarks);
+    const panned = panView(null, drawn.axes, zoomAxes.curve, {x: 30, y: 0});
+    expect(panned.x).toBeDefined();
+    expect(panned.y).toBeUndefined();
+    // A live revision with larger values keeps Y automatic: nothing clipped.
+    const grown = rows.slice(0, 4).map((row, i) =>
+      i === 3 ? {...row, values: {...row.values, hw: 9e6}} : row,
+    );
+    const refreshed = drawChart(canvas, curve(grown, 9e6), theme, benchmarks, {view: panned});
+    expect(refreshed.axes.y.domain[1]).toBeGreaterThan(9e6);
+    // No moved axis at all leaves the view itself.
+    expect(panView(null, drawn.axes, zoomAxes.ranked, {x: 30, y: 0})).toBeNull();
+    expect(zoomView(panned, drawn.axes, zoomAxes.curve, {x: 100, y: 50}, 1)).toBe(panned);
+  });
+
+  test('an extreme log factor gives a finite axis and finite ticks', () => {
+    const extreme = comparisonPairs(
+      [...rows, {...rows[0], x: 1, values: {hw: 1, sim: 1e298}}],
+      benchmarks,
+    );
+    const largest = Math.max(...extreme.map((pair) => pair.signedError));
+    expect(largest).toBeGreaterThan(1e299);
+    const drawn = drawChart(
+      document.createElement('canvas'),
+      {kind: 'ranked', pairs: extreme, colors, factor: true},
+      theme,
+      benchmarks,
+    );
+    const {domain, ticks} = drawn.axes.y;
+    expect(domain.every(Number.isFinite)).toBe(true);
+    expect(domain[1]).toBeGreaterThanOrEqual(largest);
+    expect(ticks.length).toBeGreaterThan(1);
+    expect(ticks.every((tick) => Number.isFinite(tick.position))).toBe(true);
+    expect(factorTicks(-50, Infinity, 5)).toEqual([]);
   });
 
   test('a view clips hit points to the plot and moves the rest', () => {
@@ -374,5 +422,39 @@ describe('overlay', () => {
     expect(screen.getByText(/Negative values are underestimates/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', {name: 'Y log factor'}));
     expect(screen.getByText(/Above 1× the simulator is slower than hardware/)).toBeTruthy();
+  });
+
+  test('a drag along the S-curve rank axis changes nothing and keeps details', () => {
+    mount();
+    fireEvent.click(screen.getByRole('button', {name: 'Expand S-curve'}));
+    const canvas = within(dialog()).getByRole('img');
+    canvas.focus();
+    fireEvent.keyDown(canvas, {key: 'Home'});
+    fireEvent.pointerDown(canvas, {pointerType: 'mouse', button: 0, clientX: 100, clientY: 80});
+    fireEvent.pointerMove(canvas, {pointerType: 'mouse', clientX: 160, clientY: 80});
+    fireEvent.pointerUp(canvas, {pointerType: 'mouse'});
+    fireEvent.click(canvas, {clientX: 160, clientY: 80});
+    expect(within(dialog()).getByRole('button', {name: 'Reset zoom'}).disabled).toBe(true);
+    expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
+  });
+
+  test('a revision that flips the CDF scale discards its zoom', () => {
+    // Evenly spaced errors draw linear; geometrically spaced ones, log.
+    const withErrors = (errors) =>
+      rows.map((row, i) => ({
+        ...row,
+        values: {hw: row.values.hw, sim: row.values.hw * (1 + errors[i] / 100)},
+      }));
+    const linear = withErrors(rows.map((_, i) => 10 * (i + 1)));
+    const log = withErrors(rows.map((_, i) => 2 ** i / 10));
+    const view = render(report(linear));
+    fireEvent.click(screen.getByRole('button', {name: 'Expand Absolute error distribution (CDF)'}));
+    expect(within(dialog()).getByRole('img').getAttribute('aria-label')).toBe(
+      'Absolute error cumulative distribution',
+    );
+    fireEvent.wheel(within(dialog()).getByRole('img'), {deltaY: -200, clientX: 150, clientY: 80});
+    expect(within(dialog()).getByRole('button', {name: 'Reset zoom'}).disabled).toBe(false);
+    view.rerender(report(log, 1));
+    expect(within(dialog()).getByRole('button', {name: 'Reset zoom'}).disabled).toBe(true);
   });
 });

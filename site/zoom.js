@@ -26,14 +26,18 @@ function transformedAt(axis, px) {
   return low + ((px - start) / (end - start)) * (high - low);
 }
 
-// Each changed axis of `view`: an axis the step cannot change keeps its
-// current override, or stays on the default domain.
+// `view` with each allowed axis the gesture moves remapped. `stepOf` gives
+// an axis's step, or null when the gesture leaves that axis alone. An axis
+// left alone, or one the step cannot change, keeps its current override or
+// stays on automatic bounds. With no axis changed, `view` itself (possibly
+// null) is returned.
 function step(view, axes, allowed, stepOf) {
-  const next = {...view};
+  let next = view;
   for (const name of allowed) {
     const axis = axes[name];
-    const domain = axis && remap(axis, stepOf(axis, name));
-    if (domain) next[name] = domain;
+    const stepped = axis && stepOf(axis, name);
+    const domain = stepped && remap(axis, stepped);
+    if (domain) next = {...next, [name]: domain};
   }
   return next;
 }
@@ -41,6 +45,7 @@ function step(view, axes, allowed, stepOf) {
 // Scales each allowed axis by `factor` (< 1 zooms in) around the drawing
 // position `point` ({x, y}).
 export function zoomView(view, axes, allowed, point, factor) {
+  if (factor === 1) return view;
   return step(view, axes, allowed, (axis, name) => {
     const center = transformedAt(axis, point[name]);
     return (t) => center + (t - center) * factor;
@@ -51,6 +56,7 @@ export function zoomView(view, axes, allowed, point, factor) {
 // drawing units).
 export function panView(view, axes, allowed, delta) {
   return step(view, axes, allowed, (axis, name) => {
+    if (!delta[name]) return null;
     const shift =
       transformedAt(axis, axis.range[0]) - transformedAt(axis, axis.range[0] + delta[name]);
     return (t) => t + shift;

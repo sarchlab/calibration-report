@@ -311,7 +311,8 @@ export function PlotCanvas({
         x: (event.clientX - rect.left) * x,
         y: (event.clientY - rect.top) * y,
       };
-      onViewChange(zoomView(view, drawing.axes, allowed, point, wheelFactor(event)));
+      const next = zoomView(view, drawing.axes, allowed, point, wheelFactor(event));
+      if (next !== view) onViewChange(next);
     };
     node.addEventListener('wheel', wheel, {passive: false});
     return () => node.removeEventListener('wheel', wheel);
@@ -407,9 +408,12 @@ export function PlotCanvas({
               if (!dragged.current && Math.hypot(dx, dy) < 3) return;
               dragged.current = true;
               const {x, y} = drawingScale(canvas.current, start.drawing);
-              onViewChange(
-                panView(start.view, start.drawing.axes, allowed, {x: dx * x, y: dy * y}),
-              );
+              const next = panView(start.view, start.drawing.axes, allowed, {
+                x: dx * x,
+                y: dy * y,
+              });
+              // A drag along locked axes only changes nothing.
+              if (next !== latest.current.view) onViewChange(next);
               return;
             }
             if (event.pointerType !== 'mouse' || pinned || selection) return;
@@ -923,7 +927,13 @@ export function Summary({
       stats: errorStats(pairs),
       percentiles: errorPercentiles(pairs),
       ranked: {kind: 'ranked', pairs, colors, bands: pairs},
-      cdf: {kind: 'cdf', pairs, bands: pairs},
+      // The scale is resolved here, so the overlay sees when data flips it.
+      cdf: {
+        kind: 'cdf',
+        pairs,
+        bands: pairs,
+        log: preferLogScale(pairs.map((pair) => Math.abs(pair.signedError))),
+      },
       scatter: Array.from(
         Map.groupBy(pairs, (pair) => pair.unit),
         ([unit, values]) => ({unit, pairs: values}),
