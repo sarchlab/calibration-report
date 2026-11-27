@@ -22,8 +22,11 @@ import {
   comparisonPairs,
   errorPercentiles,
   errorStats,
+  decodeSamples,
   indexReport,
+  PAIRS_FORMAT,
   rankingStats,
+  relabelPairs,
   SUMMARY_FORMAT,
 } from '../site/model.js';
 
@@ -516,6 +519,51 @@ describe.skipIf(!dsn)('hosted backend', () => {
       expect(body.state).toBe('completed');
     });
 
+    it('pages every comparison of a scope, paired as in the summary', async () => {
+      const groupIds = manifest.group_ids;
+      const key = (pair) =>
+        JSON.stringify([pair.point.group, pair.point.benchmark, pair.point.x,
+          pair.point.non_scaling_params, pair.id, pair.actual, pair.prediction]);
+      for (const [scope, pairs, overview] of [
+        ['overview', index.pairs, true],
+        ['group:' + groupIds.a, index.groups.get('a').pairs, false],
+      ]) {
+        const path = `/synthetic/pairs?rid=${manifest.id}&scope=${scope}&format=${PAIRS_FORMAT}`;
+        const {status, body, headers} = await api(path);
+        expect(status).toBe(200);
+        expect(headers.get('cache-control')).toContain('immutable');
+        const {body: summary} = await api(`/synthetic/summary?rid=${manifest.id}&scope=${scope}`);
+        expect(body.count).toBe(summary.count);
+        expect([body.scope, body.revision, body.offset, body.next]).toEqual([
+          scope, summary.revision, 0, null,
+        ]);
+        // The same comparisons, labels and parameters as the file viewer's.
+        const expected = relabelPairs(pairs, overview, (g) => report.report.groups[g].name);
+        expect(decodeSamples(body).pairs.map(key).sort()).toEqual(expected.map(key).sort());
+        // Cached under the run id and scope like the summary: later reads
+        // and continuations of a completed run need no database.
+        expect(store.entries.get(`v1/pairs${PAIRS_FORMAT}/${manifest.id}/${scope}`).metadata)
+          .toMatchObject({key: 'synthetic', revision: summary.revision, state: 'completed'});
+        const broken = {connect: () => Promise.reject(new Error('no database'))};
+        expect((await api(path, {pool: broken})).body).toEqual(body);
+        expect((await api(path + `&offset=0&revision=${body.revision}`, {pool: broken})).body).toEqual(body);
+      }
+    });
+
+    it('rejects pairs requests of a replaced run, another format or a moved revision', async () => {
+      const scope = 'group:' + manifest.group_ids.b;
+      const path = (query) => `/synthetic/pairs?scope=${scope}&${query}`;
+      expect((await api(path(`rid=999999&format=${PAIRS_FORMAT}`))).status).toBe(409);
+      expect((await api(path(`rid=${manifest.id}`))).status).toBe(400);
+      expect((await api(path(`rid=${manifest.id}&format=2`))).status).toBe(400);
+      expect((await api(path(`rid=${manifest.id}&format=${PAIRS_FORMAT}&offset=5`))).status).toBe(400);
+      const {body} = await api(path(`rid=${manifest.id}&format=${PAIRS_FORMAT}`));
+      const stale = await api(path(`rid=${manifest.id}&format=${PAIRS_FORMAT}&offset=0&revision=${body.revision - 1}`));
+      expect(stale.status).toBe(503);
+      const unknown = await api(path(`rid=${manifest.id}&format=${PAIRS_FORMAT}&offset=7&revision=${body.revision}`));
+      expect(unknown.status).toBe(400);
+    });
+
     it('rejects malformed paths', async () => {
       const response = await handleApi(new Request('http://localhost/api/v1/runs/%E0%A4%A'), {pool, store});
       expect(response.status).toBe(400);
@@ -576,6 +624,36 @@ describe.skipIf(!dsn)('hosted backend', () => {
       const final = await api(`/live/summary?rid=${manifest.id}&scope=${scope}`);
       expect(final.state).toBe('completed');
       expect(final.revision).toBe(refreshed.revision + 1);
+    });
+  });
+
+  describe('live pairs', () => {
+    it('follows the summary interval and restarts continuations after a newer revision', async () => {
+      const report = syntheticReport(300);
+      const store = memoryStore();
+      let now = Date.parse('2026-11-25T12:00:00Z');
+      const api = async (path) => {
+        const response = await handleApi(
+          new Request('http://localhost/api/v1/runs' + path),
+          {pool, store, env: {SUMMARY_MIN_INTERVAL: '60'}, now: () => now},
+        );
+        return {status: response.status, cache: response.headers.get('cache-control'), body: await response.json()};
+      };
+      importReport({...report, data: report.data.slice(0, 150)}, 'livepairs', true);
+      const manifest = (await api('/livepairs')).body;
+      const path = `/livepairs/pairs?rid=${manifest.id}&scope=overview&format=${PAIRS_FORMAT}`;
+      const first = await api(path);
+      expect(first.cache).toBe('no-cache');
+      await put('livepairs', report.data.slice(150));
+      now += 30_000;
+      expect((await api(path)).body.revision).toBe(first.body.revision);
+      now += 31_000;
+      const refreshed = await api(path);
+      expect(refreshed.body.revision).toBeGreaterThan(first.body.revision);
+      expect(refreshed.body.count).toBe(comparisonPairs(report.data, report.benchmarks).length);
+      // A continuation of the replaced record starts over.
+      const continuation = await api(path + `&offset=0&revision=${first.body.revision}`);
+      expect(continuation.status).toBe(503);
     });
   });
 

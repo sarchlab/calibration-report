@@ -1,10 +1,11 @@
 import {MantineProvider} from '@mantine/core';
 import {fireEvent, render, screen, waitFor, within} from '@testing-library/react';
-import {afterEach, expect, test, vi} from 'vitest';
+import {afterEach, describe, expect, test, vi} from 'vitest';
 import {HostedReport, RunList} from '../site/Hosted.jsx';
 import {PointDescription} from '../site/PointDetails.jsx';
 import {RunProgress} from '../site/Layout.jsx';
-import {buildSummary, isVisibleRow, summaryLimits} from '../site/model.js';
+import {buildPairs, buildSummary, isVisibleRow, summaryLimits} from '../site/model.js';
+import {pairPages} from '../netlify/lib/api.js';
 
 const benchmarks = {
   gemm: {
@@ -177,6 +178,23 @@ function stubApi(state) {
       );
       if (state.state) body.state = state.state;
       if (state.pointProgress) body.point_progress = state.pointProgress;
+    }
+    else if (path.includes('/pairs')) {
+      // Every pair of the scope; with `pairsLimit`, in pages of that size.
+      const scope = query.get('scope');
+      const scoped = scope === 'overview' ? groups : groups.filter(([id]) => scope === 'group:' + id);
+      const keys = scoped.map(([, key]) => key);
+      const pages = pairPages(
+        buildPairs({
+          rows: rows.filter((row) => keys.includes(row.group)),
+          benchmarks,
+          groups: scoped,
+          overview: scope === 'overview',
+        }),
+        {rid: 7, key: 'demo', scope, revision: state.pairsRevision ?? state.revision, state: 'running'},
+        state.pairsLimit,
+      );
+      body = pages.find((page) => page.offset === Number(query.get('offset') ?? 0));
     }
     else if (path.includes('/plots') && state.launchOrdinal) body = ordinalPage(query.get('group'));
     else if (path.includes('/plots')) {
@@ -774,4 +792,91 @@ test('the non-live progress card shows the unit next to the completed ratio', ()
   );
   expect(screen.getByText('28 / 30 points')).toBeTruthy();
   expect(screen.getByText('5 / 5 configurations')).toBeTruthy();
+});
+
+describe('expanded summary charts', () => {
+  const testMount = (element) => render(<MantineProvider env="test">{element}</MantineProvider>);
+  const overlay = async (name) => {
+    fireEvent.click(await screen.findByRole('button', {name: new RegExp('^Expand ' + name)}));
+    return within(screen.getByRole('dialog')).getByRole('img');
+  };
+  const pairsCalls = (calls) => calls.filter((path) => path.includes('/pairs'));
+  // The pinned details' "index / count" of the overlay's last drawn point.
+  const lastPoint = (canvas) => {
+    fireEvent.keyDown(canvas, {key: 'End'});
+    return within(screen.getByRole('dialog')).getByRole('group', {name: 'Point details'});
+  };
+
+  test('load every pair once, on the first zoom, and draw zoomed views from it', async () => {
+    // A two-point sample of twelve comparisons.
+    const limits = {scurve: 2, cdf: 2, scatter: 2};
+    const calls = stubApi({revision: 1, computedAt: new Date().toISOString(), limits, pairsLimit: 640});
+    testMount(<HostedReport runKey="demo" />);
+    const canvas = await overlay('S-curve');
+    expect(pairsCalls(calls)).toEqual([]);
+    expect(lastPoint(canvas).textContent).toContain('2 / 2');
+    fireEvent.wheel(canvas, {deltaY: -10, clientX: 170, clientY: 90});
+    expect(screen.getByText('Loading full data…').getAttribute('role')).toBe('status');
+    await waitFor(() => expect(screen.queryByText('Loading full data…')).toBeNull());
+    // Paged: continuations name the canonical scope and the first page's revision.
+    const pages = pairsCalls(calls);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages[0]).toBe('api/v1/runs/demo/pairs?rid=7&scope=overview&format=1');
+    expect(pages[1]).toMatch(/scope=overview&format=1&offset=\d+&revision=1$/);
+    // The zoomed view draws all twelve, ranked among all twelve.
+    const details = lastPoint(canvas);
+    expect(details.textContent).toContain('12 / 12');
+    expect(details.textContent).toContain('Case rank12');
+    // Later gestures, and the other charts of the same summary, reuse it.
+    fireEvent.wheel(canvas, {deltaY: -10, clientX: 170, clientY: 90});
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Close expanded chart'}));
+    const scatter = await overlay('Measured vs. simulated');
+    fireEvent.wheel(scatter, {deltaY: -10, clientX: 170, clientY: 90});
+    await waitFor(() => expect(lastPoint(scatter).textContent).toMatch(/\b(1[0-2]|[3-9]) \/ /));
+    expect(pairsCalls(calls)).toHaveLength(pages.length);
+    // Reset returns to the sample.
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Reset zoom'}));
+    expect(lastPoint(scatter).textContent).toContain('2 / 2');
+  });
+
+  test('keep drawing the sample when the pairs fail to load', async () => {
+    const limits = {scurve: 2, cdf: 2, scatter: 2};
+    const calls = stubApi({
+      revision: 1,
+      computedAt: new Date().toISOString(),
+      limits,
+      failures: [{match: '/pairs'}],
+    });
+    testMount(<HostedReport runKey="demo" />);
+    const canvas = await overlay('Absolute error distribution \\(CDF\\)');
+    fireEvent.wheel(canvas, {deltaY: -10, clientX: 170, clientY: 90});
+    expect(await screen.findByText('Full data unavailable; showing the sample')).toBeTruthy();
+    expect(pairsCalls(calls)).toHaveLength(1);
+    expect(lastPoint(canvas).textContent).toMatch(/[12] \/ [12]/);
+  });
+
+  test('restart paging when the cached pairs move to a newer revision', async () => {
+    const limits = {scurve: 2, cdf: 2, scatter: 2};
+    const state = {revision: 1, computedAt: new Date().toISOString(), limits, pairsLimit: 640};
+    const calls = stubApi(state);
+    const fetchStub = globalThis.fetch;
+    let moved = false;
+    vi.stubGlobal('fetch', async (url) => {
+      // The first continuation finds the record moved on.
+      if (String(url).includes('revision=') && !moved) {
+        moved = true;
+        calls.push(String(url));
+        return {ok: false, status: 503, json: async () => ({error: 'The run changed; start over'})};
+      }
+      return fetchStub(url);
+    });
+    testMount(<HostedReport runKey="demo" />);
+    const canvas = await overlay('S-curve');
+    fireEvent.wheel(canvas, {deltaY: -10, clientX: 170, clientY: 90});
+    await waitFor(() => expect(screen.queryByText('Loading full data…')).toBeNull());
+    expect(screen.queryByText('Full data unavailable; showing the sample')).toBeNull();
+    const first = pairsCalls(calls).filter((path) => !path.includes('offset='));
+    expect(first).toHaveLength(2);
+    expect(lastPoint(canvas).textContent).toContain('12 / 12');
+  });
 });

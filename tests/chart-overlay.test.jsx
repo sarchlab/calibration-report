@@ -787,3 +787,35 @@ describe('CDF log toggle', () => {
     expect(screen.getAllByRole('button', {name: 'X log'}).map(pressed)).toEqual(['true', 'true']);
   });
 });
+
+describe('zoomed sample density', () => {
+  test('a file-mode overlay zooms without any request: it draws every pair already', () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    mount();
+    for (const name of ['S-curve', 'Measured vs. simulated · ms']) {
+      fireEvent.click(screen.getByRole('button', {name: 'Expand ' + name}));
+      fireEvent.wheel(within(dialog()).getByRole('img'), {deltaY: -200, clientX: 150, clientY: 80});
+      expect(screen.queryByRole('status')).toBeNull();
+      fireEvent.click(within(dialog()).getByRole('button', {name: 'Close expanded chart'}));
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test('`shown` pairs are drawn over axes and bands taken from `pairs`', () => {
+    const draw = (spec) =>
+      drawChart(document.createElement('canvas'), spec, theme, benchmarks);
+    for (const kind of ['ranked', 'cdf', 'scatter']) {
+      const spec = {kind, pairs, colors, unit: 'ns', log: false};
+      const shown = pairs.slice(2, 5).map((pair, i) => ({...pair, rank: 3 + i}));
+      const plain = draw(spec);
+      const dense = draw({...spec, shown});
+      expect(dense.axes.x.domain).toEqual(plain.axes.x.domain);
+      expect(dense.axes.y.domain).toEqual(plain.axes.y.domain);
+      expect(dense.hitPoints.map((p) => p.description.comparisons[0])).toEqual(
+        expect.arrayContaining(shown.map((pair) => expect.objectContaining({actual: pair.actual}))),
+      );
+      expect(dense.hitPoints).toHaveLength(3);
+    }
+  });
+});

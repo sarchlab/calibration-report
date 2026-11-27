@@ -700,7 +700,9 @@ export function drawChart(
 
   // A sampled chart's pairs carry their `rank` among `total` comparisons.
   // With `factor`, the error axis is the signed log factor (sim / hw).
-  function rankedErrors(pairs, colors, total = pairs.length, bandSource = pairs, factor = false) {
+  // `shown` (default `pairs`) are the points drawn; axes and bands always
+  // come from `pairs`, so a denser zoomed sample magnifies the same chart.
+  function rankedErrors(pairs, colors, total = pairs.length, bandSource = pairs, factor = false, shown = pairs) {
     const ranked = [...pairs].sort((a, b) => a.signedError - b.signedError);
     const end = Math.max(2, total);
     // Margins are a share of the axis in its own (transformed) space.
@@ -739,7 +741,7 @@ export function drawChart(
             ]),
           ),
       );
-    ranked.forEach((pair, i) => {
+    [...shown].sort((a, b) => a.signedError - b.signedError).forEach((pair, i) => {
       const rank = pair.rank ?? i + 1;
       summaryPoint(
         chart,
@@ -752,11 +754,10 @@ export function drawChart(
     return finish(chart);
   }
 
-  function absoluteErrorCDF(pairs, total = pairs.length, preferLog, bandSource = pairs) {
-    const ranked = [...pairs].sort(
-      (a, b) => Math.abs(a.signedError) - Math.abs(b.signedError),
-    );
-    const errors = ranked.map((pair) => Math.abs(pair.signedError));
+  function absoluteErrorCDF(pairs, total = pairs.length, preferLog, bandSource = pairs, shown = pairs) {
+    const byAbsolute = (list) =>
+      [...list].sort((a, b) => Math.abs(a.signedError) - Math.abs(b.signedError));
+    const errors = byAbsolute(pairs).map((pair) => Math.abs(pair.signedError));
     const log = preferLog ?? preferLogScale(errors);
     // A log axis starts at the decade of the smallest nonzero error; exact
     // matches sit at its left edge.
@@ -799,8 +800,10 @@ export function drawChart(
     ctx.beginPath();
     ctx.moveTo(x(left), y(0));
     let fraction = 0;
-    for (let i = 0; i < errors.length; i++) {
-      const px = x(Math.max(left, errors[i]));
+    const ranked = byAbsolute(shown);
+    for (let i = 0; i < ranked.length; i++) {
+      const error = Math.abs(ranked[i].signedError);
+      const px = x(Math.max(left, error));
       ctx.lineTo(px, y(fraction));
       fraction = (ranked[i].rank ?? i + 1) / total;
       ctx.lineTo(px, y(fraction));
@@ -809,7 +812,7 @@ export function drawChart(
         x: px,
         y: y(fraction),
         description: pairDescription(ranked[i], {
-          'Absolute error': errors[i].toFixed(2) + '%',
+          'Absolute error': error.toFixed(2) + '%',
           'CDF percentile': (fraction * 100).toFixed(2) + '%',
         }),
       });
@@ -819,7 +822,7 @@ export function drawChart(
     return finish(chart);
   }
 
-  function comparisonScatter(pairs, unit, colors, log) {
+  function comparisonScatter(pairs, unit, colors, log, shown = pairs) {
     let minimum = Infinity,
       maximum = -Infinity;
     for (const pair of pairs) {
@@ -848,7 +851,7 @@ export function drawChart(
       {log, unit},
     );
     referenceLine(chart, range[0], range[0], range[1], range[1]);
-    for (const pair of pairs) {
+    for (const pair of shown) {
       summaryPoint(
         chart,
         pair.actual,
@@ -872,8 +875,8 @@ export function drawChart(
       spec.lineOf,
     );
   if (spec.kind === 'ranked')
-    return rankedErrors(spec.pairs, spec.colors, spec.total, spec.bands, spec.factor);
+    return rankedErrors(spec.pairs, spec.colors, spec.total, spec.bands, spec.factor, spec.shown);
   if (spec.kind === 'cdf')
-    return absoluteErrorCDF(spec.pairs, spec.total, spec.log, spec.bands);
-  return comparisonScatter(spec.pairs, spec.unit, spec.colors, spec.log);
+    return absoluteErrorCDF(spec.pairs, spec.total, spec.log, spec.bands, spec.shown);
+  return comparisonScatter(spec.pairs, spec.unit, spec.colors, spec.log, spec.shown);
 }

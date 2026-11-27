@@ -304,6 +304,7 @@ html:has(.chart-overlay-content) { overflow: hidden; }
 .chart-overlay-controls { flex-wrap: wrap; }
 .chart-overlay-controls > *:not(.zoom-hint) { flex: none; }
 .zoom-hint { flex: 1 1 180px; margin: 0; font-size: 11px; color: var(--muted); }
+.zoom-status { font-size: 11px; color: var(--muted); }
 .curve[data-zoomable] { cursor: grab; }
 .curve[data-zoomable]:active { cursor: grabbing; }
 /* The hover preview never blocks the chart beneath it. */
