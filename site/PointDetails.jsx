@@ -316,6 +316,11 @@ export function PointProvider({
   const [shownResetKey, setShownResetKey] = useState(resetKey);
   if (shownResetKey !== resetKey) {
     setShownResetKey(resetKey);
+    // Focus inside an expanded chart's details returns to its canvas, so it
+    // stays within the chart's dialog once the details close.
+    const current = selectedRef.current;
+    if (current?.detailsTarget && panelRef.current?.contains(document.activeElement))
+      pendingFocus.current = current.canvas.current;
     selectedRef.current = null;
     setSelection(null);
     setHover(null);

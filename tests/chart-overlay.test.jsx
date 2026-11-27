@@ -457,4 +457,17 @@ describe('overlay', () => {
     view.rerender(report(log, 1));
     expect(within(dialog()).getByRole('button', {name: 'Reset zoom'}).disabled).toBe(true);
   });
+
+  test('a revision that clears overlay details keeps focus in the dialog', () => {
+    const view = mount();
+    fireEvent.click(screen.getByRole('button', {name: 'Expand Measured vs. simulated · ms'}));
+    const canvas = within(dialog()).getByRole('img');
+    canvas.focus();
+    fireEvent.keyDown(canvas, {key: 'Home'});
+    screen.getByRole('button', {name: 'Next point'}).focus();
+    expect(screen.getByRole('group', {name: 'Point details'}).contains(document.activeElement)).toBe(true);
+    view.rerender(report(rows.slice(0, 11), 1));
+    expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+    expect(document.activeElement).toBe(within(dialog()).getByRole('img'));
+  });
 });
