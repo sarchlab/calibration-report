@@ -66,14 +66,11 @@ export function fullCharts(pages) {
     if (!units.has(unitOf[i])) units.set(unitOf[i], []);
     units.get(unitOf[i]).push(i);
   }
-  // Every comparison named, in first-appearance order across pages.
-  const legend = [...new Map(decoders.flatMap((d) => d.legend).map((e) => [e.id, e])).values()];
   const scatter = new Map();
   for (const [unit, indices] of units) scatter.set(unit, scatterOrder(indices, actual, prediction, absolute));
   return {
     revision: pages[0].revision,
     count,
-    legend,
     actual,
     prediction,
     error,

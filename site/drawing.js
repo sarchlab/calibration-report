@@ -768,7 +768,7 @@ export function drawChart(
         chart,
         rank,
         pair.signedError,
-        colors.get(pair.id).color,
+        (colors.get(pair.id)?.color ?? chartTheme.palette[0]),
         pairDescription(pair, {'Case rank': rank.toLocaleString('en-US')}),
       );
     });
@@ -864,7 +864,7 @@ export function drawChart(
         chart,
         pair.actual,
         pair.prediction,
-        colors.get(pair.id).color,
+        (colors.get(pair.id)?.color ?? chartTheme.palette[0]),
         pairDescription(pair),
       );
     }

@@ -908,19 +908,81 @@ describe('expanded summary charts across revisions and selections', () => {
     return within(screen.getByRole('dialog')).getByRole('group', {name: 'Point details'});
   };
 
-  test('comparisons only the newer pairs have get their own color and legend entry', async () => {
-    stubApi({revision: 1, computedAt: new Date().toISOString(), limits, pairsConv: true, pairsRevision: 2});
+  const pairsCalls = (calls) => calls.filter((path) => path.includes('/pairs'));
+  const zoomIn = (canvas) => fireEvent.wheel(canvas, {deltaY: -10, clientX: 170, clientY: 90});
+
+  test('pairs of a newer revision than the summary are not drawn', async () => {
+    // The newer pairs name a benchmark the manifest does not declare yet.
+    const calls = stubApi({revision: 1, computedAt: new Date().toISOString(), limits, pairsConv: true, pairsRevision: 2});
     testMount(<HostedReport runKey="demo" />);
     const canvas = await overlay('S-curve');
-    fireEvent.wheel(canvas, {deltaY: -10, clientX: 170, clientY: 90});
+    zoomIn(canvas);
     await waitFor(() => expect(screen.queryByText('Loading full data…')).toBeNull());
-    expect(screen.queryByText('Full data unavailable; showing the sample')).toBeNull();
-    // Twelve summary comparisons and three new ones (+10%, inside the
-    // sample's error range), all drawn.
-    expect(lastPoint(canvas).textContent).toContain('15 / 15');
-    const dialog = within(screen.getByRole('dialog'));
-    expect(dialog.getByText('Device A · Simulated conv vs. Measured conv')).toBeTruthy();
-    expect(dialog.getByText('Device A · Simulated vs. Measured')).toBeTruthy();
+    expect(pairsCalls(calls)).toHaveLength(1);
+    expect(screen.queryByRole('status')).toBeNull();
+    fireEvent.pointerMove(canvas, {pointerType: 'mouse', clientX: 170, clientY: 90});
+    expect(lastPoint(canvas).textContent).toContain('2 / 2');
+  });
+
+  test('a live summary reaching the pairs revision while zoomed draws the full data without another gesture', async () => {
+    vi.useFakeTimers({shouldAdvanceTime: true});
+    const state = {revision: 1, computedAt: new Date().toISOString(), limits, pairsRevision: 2};
+    const calls = stubApi(state);
+    testMount(<HostedReport runKey="demo" />);
+    const canvas = await overlay('S-curve');
+    zoomIn(canvas);
+    await advance(1);
+    expect(pairsCalls(calls)).toHaveLength(1);
+    expect(lastPoint(canvas).textContent).toContain('2 / 2');
+    state.revision = 2;
+    await advance(80);
+    expect(pairsCalls(calls)).toHaveLength(2);
+    expect(within(screen.getByRole('dialog')).getByRole('button', {name: 'Reset zoom'}).disabled).toBe(false);
+    expect(lastPoint(canvas).textContent).toContain('12 / 12');
+    vi.useRealTimers();
+  });
+
+  test('a superseded pairs response is ignored', async () => {
+    vi.useFakeTimers({shouldAdvanceTime: true});
+    const held = deferred();
+    const state = {
+      revision: 1,
+      computedAt: new Date().toISOString(),
+      limits,
+      holds: [{match: 'api/v1/runs/demo/pairs', promise: held.promise}],
+    };
+    const calls = stubApi(state);
+    testMount(<HostedReport runKey="demo" />);
+    const canvas = await overlay('S-curve');
+    zoomIn(canvas);
+    // The revision-1 request is still out when the summary moves to 2.
+    state.revision = 2;
+    await advance(80);
+    expect(pairsCalls(calls)).toHaveLength(2);
+    expect(lastPoint(canvas).textContent).toContain('12 / 12');
+    held.resolve();
+    await advance(1);
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(lastPoint(canvas).textContent).toContain('12 / 12');
+    vi.useRealTimers();
+  });
+
+  test('a pin survives full data that draws the same points', async () => {
+    // The default limits sample all twelve comparisons.
+    const held = deferred();
+    stubApi({
+      revision: 1,
+      computedAt: new Date().toISOString(),
+      holds: [{match: 'api/v1/runs/demo/pairs', promise: held.promise}],
+    });
+    testMount(<HostedReport runKey="demo" />);
+    const canvas = await overlay('S-curve');
+    zoomIn(canvas);
+    expect(lastPoint(canvas).textContent).toContain('12 / 12');
+    held.resolve();
+    await waitFor(() => expect(screen.queryByText('Loading full data…')).toBeNull());
+    expect(within(screen.getByRole('dialog')).getByRole('group', {name: 'Point details'}).textContent)
+      .toContain('12 / 12');
   });
 
   test('a pairs request finishing late leaves details pinned elsewhere alone', async () => {
