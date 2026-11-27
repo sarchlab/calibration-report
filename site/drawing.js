@@ -291,6 +291,27 @@ export const zoomAxes = {
   cdf: ['x'],
 };
 
+const byAbsolute = (list) =>
+  [...list].sort((a, b) => Math.abs(a.signedError) - Math.abs(b.signedError));
+// The CDF's error axis from `pairs` (its comparisons sorted by absolute
+// error, those errors, and the scale): a log axis starts at the decade of
+// the smallest nonzero error, where exact matches sit (`left`). The drawing
+// and the zoomed full-data selection (site/resample.js) share it.
+export function cdfAxis(pairs, preferLog) {
+  const sorted = byAbsolute(pairs);
+  const errors = sorted.map((pair) => Math.abs(pair.signedError));
+  const log = preferLog ?? preferLogScale(errors);
+  const smallest = errors.find((error) => error > 0) ?? 1;
+  const left = log ? 10 ** Math.floor(Math.log10(smallest)) : 0;
+  const maximum = errors.at(-1);
+  const padded = log
+    ? 10 ** (Math.ceil(Math.log10(Math.max(maximum, smallest))) + 0.1)
+    : maximum * 1.04 || 1;
+  // Padding an extreme error may overflow: keep the axis at the error.
+  const right = Number.isFinite(padded) ? padded : maximum;
+  return {sorted, errors, log, left, right};
+}
+
 // Drawing is imperative only inside the supplied canvas; React owns every DOM element.
 // `view` overrides each axis's data domain ({x: [min, max], y: [min, max]},
 // either optional); marks outside it are clipped and not hit-testable.
@@ -741,7 +762,7 @@ export function drawChart(
             ]),
           ),
       );
-    [...shown].sort((a, b) => a.signedError - b.signedError).forEach((pair, i) => {
+    (shown === pairs ? ranked : [...shown].sort((a, b) => a.signedError - b.signedError)).forEach((pair, i) => {
       const rank = pair.rank ?? i + 1;
       summaryPoint(
         chart,
@@ -755,20 +776,7 @@ export function drawChart(
   }
 
   function absoluteErrorCDF(pairs, total = pairs.length, preferLog, bandSource = pairs, shown = pairs) {
-    const byAbsolute = (list) =>
-      [...list].sort((a, b) => Math.abs(a.signedError) - Math.abs(b.signedError));
-    const errors = byAbsolute(pairs).map((pair) => Math.abs(pair.signedError));
-    const log = preferLog ?? preferLogScale(errors);
-    // A log axis starts at the decade of the smallest nonzero error; exact
-    // matches sit at its left edge.
-    const smallest = errors.find((error) => error > 0) ?? 1;
-    const left = log ? 10 ** Math.floor(Math.log10(smallest)) : 0;
-    const maximum = errors.at(-1);
-    const padded = log
-      ? 10 ** (Math.ceil(Math.log10(Math.max(maximum, smallest))) + 0.1)
-      : maximum * 1.04 || 1;
-    // Padding an extreme error may overflow: keep the axis at the error.
-    const right = Number.isFinite(padded) ? padded : maximum;
+    const {sorted, errors, log, left, right} = cdfAxis(pairs, preferLog);
     const bands = timeBands(pairs, bandSource);
     const chart = summaryAxes(
       'Absolute error cumulative distribution',
@@ -800,7 +808,7 @@ export function drawChart(
     ctx.beginPath();
     ctx.moveTo(x(left), y(0));
     let fraction = 0;
-    const ranked = byAbsolute(shown);
+    const ranked = shown === pairs ? sorted : byAbsolute(shown);
     for (let i = 0; i < ranked.length; i++) {
       const error = Math.abs(ranked[i].signedError);
       const px = x(Math.max(left, error));

@@ -66,11 +66,14 @@ export function fullCharts(pages) {
     if (!units.has(unitOf[i])) units.set(unitOf[i], []);
     units.get(unitOf[i]).push(i);
   }
+  // Every comparison named, in first-appearance order across pages.
+  const legend = [...new Map(decoders.flatMap((d) => d.legend).map((e) => [e.id, e])).values()];
   const scatter = new Map();
   for (const [unit, indices] of units) scatter.set(unit, scatterOrder(indices, actual, prediction, absolute));
   return {
     revision: pages[0].revision,
     count,
+    legend,
     actual,
     prediction,
     error,
@@ -122,32 +125,32 @@ function scatterOrder(indices, actual, prediction, absolute) {
   return Uint32Array.from(order);
 }
 
-// First position in `order` whose value (`key` of the index there) is not
+// First position in `order` whose value (`valueOf` the index there) is not
 // below `value`.
-function lowerBound(order, key, value) {
+function lowerBound(order, valueOf, value) {
   let low = 0,
     high = order.length;
   while (low < high) {
     const middle = (low + high) >>> 1;
-    if (key[order[middle]] < value) low = middle + 1;
+    if (valueOf(order[middle]) < value) low = middle + 1;
     else high = middle;
   }
   return low;
 }
 
-// Positions of `order` (ascending by `key`) to draw for the view range
-// [min, max] of `key`, at most `limit`: the highest-priority positions in
+// Positions of `order` (ascending by `valueOf`, the drawn coordinate) to
+// draw for the view range [min, max] of that coordinate, at most `limit`: the highest-priority positions in
 // range, priority being the bit reversal of the position (so a view draws
 // evenly spread ranks), plus the first and last positions overall, and the
 // nearest position outside each end of the range, so a line enters and
 // leaves the view where it would at full resolution. A `limit` below 5
 // draws only those.
-function rankWindow(order, key, [min, max], limit) {
+function rankWindow(order, valueOf, [min, max], limit) {
   const n = order.length;
   if (!n) return [];
-  const start = lowerBound(order, key, min);
-  let end = lowerBound(order, key, max);
-  while (end < n && key[order[end]] === max) end++;
+  const start = lowerBound(order, valueOf, min);
+  let end = lowerBound(order, valueOf, max);
+  while (end < n && valueOf(order[end]) === max) end++;
   const picked = new Set([0, n - 1]);
   if (start > 0) picked.add(start - 1);
   if (end < n) picked.add(end);
@@ -171,15 +174,18 @@ const everything = [-Infinity, Infinity];
 // The S-curve comparisons for a view (zoomed in signed error), each with
 // its global `rank`.
 export function visibleRanked(full, view, limit) {
-  return rankWindow(full.scurve, full.error, view?.y ?? everything, limit).map(
+  return rankWindow(full.scurve, (i) => full.error[i], view?.y ?? everything, limit).map(
     (position) => ({...full.pair(full.scurve[position]), rank: position + 1}),
   );
 }
 
 // The CDF comparisons for a view (zoomed in absolute error), each with its
-// global `rank`, so its cumulative share is rank / count.
-export function visibleCDF(full, view, limit) {
-  return rankWindow(full.cdf, full.absolute, view?.x ?? everything, limit).map(
+// global `rank`, so its cumulative share is rank / count. Errors below
+// `floor` (a log axis's left edge, cdfAxis in site/drawing.js) are drawn,
+// and so selected, at the floor.
+export function visibleCDF(full, view, limit, floor = 0) {
+  const at = (i) => Math.max(floor, full.absolute[i]);
+  return rankWindow(full.cdf, at, view?.x ?? everything, limit).map(
     (position) => ({...full.pair(full.cdf[position]), rank: position + 1}),
   );
 }

@@ -66,6 +66,19 @@ const fftRows = [1, 2].map((x) => ({
   group: 'a', benchmark: 'fft', x, plot: 50, non_scaling_params: {},
   values: {hw: 100, sim: 900 + x},
 }));
+// A benchmark of a later revision whose comparison (same unit) is new.
+const convMeta = {
+  scaling_param: 'n',
+  params: {n: {unit: ''}},
+  values: {
+    hwc: {name: 'Measured conv', unit: 'ns', role: 'hardware_measurement'},
+    simc: {name: 'Simulated conv', unit: 'ns', role: 'simulator_output'},
+  },
+};
+const convRows = [1, 2, 3].map((x) => ({
+  group: 'a', benchmark: 'conv', x, plot: 60, non_scaling_params: {},
+  values: {hwc: 100 * x, simc: 110 * x},
+}));
 function summary(scope, revision, computedAt, limits = summaryLimits, fft = false) {
   const scoped = scope === 'overview' ? groups : groups.filter(([id]) => scope === 'group:' + id);
   const keys = scoped.map(([, key]) => key);
@@ -184,10 +197,12 @@ function stubApi(state) {
       const scope = query.get('scope');
       const scoped = scope === 'overview' ? groups : groups.filter(([id]) => scope === 'group:' + id);
       const keys = scoped.map(([, key]) => key);
+      // With `pairsConv`, a newer revision adds a comparison the summary lacks.
+      const conv = state.pairsConv ? convRows : [];
       const pages = pairPages(
         buildPairs({
-          rows: rows.filter((row) => keys.includes(row.group)),
-          benchmarks,
+          rows: [...rows, ...conv].filter((row) => keys.includes(row.group)),
+          benchmarks: state.pairsConv ? {...benchmarks, conv: convMeta} : benchmarks,
           groups: scoped,
           overview: scope === 'overview',
         }),
@@ -877,6 +892,98 @@ describe('expanded summary charts', () => {
     expect(screen.queryByText('Full data unavailable; showing the sample')).toBeNull();
     const first = pairsCalls(calls).filter((path) => !path.includes('offset='));
     expect(first).toHaveLength(2);
+    expect(lastPoint(canvas).textContent).toContain('12 / 12');
+  });
+});
+
+describe('expanded summary charts across revisions and selections', () => {
+  const testMount = (element) => render(<MantineProvider env="test">{element}</MantineProvider>);
+  const limits = {scurve: 2, cdf: 2, scatter: 2};
+  const overlay = async (name) => {
+    fireEvent.click(await screen.findByRole('button', {name: new RegExp('^Expand ' + name)}));
+    return within(screen.getByRole('dialog')).getByRole('img');
+  };
+  const lastPoint = (canvas) => {
+    fireEvent.keyDown(canvas, {key: 'End'});
+    return within(screen.getByRole('dialog')).getByRole('group', {name: 'Point details'});
+  };
+
+  test('comparisons only the newer pairs have get their own color and legend entry', async () => {
+    stubApi({revision: 1, computedAt: new Date().toISOString(), limits, pairsConv: true, pairsRevision: 2});
+    testMount(<HostedReport runKey="demo" />);
+    const canvas = await overlay('S-curve');
+    fireEvent.wheel(canvas, {deltaY: -10, clientX: 170, clientY: 90});
+    await waitFor(() => expect(screen.queryByText('Loading full data…')).toBeNull());
+    expect(screen.queryByText('Full data unavailable; showing the sample')).toBeNull();
+    // Twelve summary comparisons and three new ones (+10%, inside the
+    // sample's error range), all drawn.
+    expect(lastPoint(canvas).textContent).toContain('15 / 15');
+    const dialog = within(screen.getByRole('dialog'));
+    expect(dialog.getByText('Device A · Simulated conv vs. Measured conv')).toBeTruthy();
+    expect(dialog.getByText('Device A · Simulated vs. Measured')).toBeTruthy();
+  });
+
+  test('a pairs request finishing late leaves details pinned elsewhere alone', async () => {
+    const held = deferred();
+    stubApi({
+      revision: 1,
+      computedAt: new Date().toISOString(),
+      limits,
+      holds: [{match: 'api/v1/runs/demo/pairs', promise: held.promise}],
+    });
+    testMount(<HostedReport runKey="demo" />);
+    // Zoom (starting the request), reset, then close the overlay.
+    const canvas = await overlay('S-curve');
+    fireEvent.wheel(canvas, {deltaY: -10, clientX: 170, clientY: 90});
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Reset zoom'}));
+    // A reset overlay keeps its pinned details when the data arrives.
+    fireEvent.keyDown(canvas, {key: 'End'});
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Close expanded chart'}));
+    // Pin a point on an inline chart.
+    const inline = screen.getAllByRole('img')[0];
+    fireEvent.keyDown(inline, {key: 'End'});
+    const pinned = screen.getByRole('group', {name: 'Point details'}).textContent;
+    held.resolve();
+    await waitFor(() => expect(screen.queryByText('Loading full data…')).toBeNull());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByRole('group', {name: 'Point details'}).textContent).toBe(pinned);
+  });
+
+  test('a reset overlay keeps its pinned details when the full data arrives', async () => {
+    const held = deferred();
+    stubApi({
+      revision: 1,
+      computedAt: new Date().toISOString(),
+      limits,
+      holds: [{match: 'api/v1/runs/demo/pairs', promise: held.promise}],
+    });
+    testMount(<HostedReport runKey="demo" />);
+    const canvas = await overlay('S-curve');
+    fireEvent.wheel(canvas, {deltaY: -10, clientX: 170, clientY: 90});
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Reset zoom'}));
+    expect(lastPoint(canvas).textContent).toContain('2 / 2');
+    held.resolve();
+    await waitFor(() => expect(screen.queryByText('Loading full data…')).toBeNull());
+    expect(within(screen.getByRole('dialog')).getByRole('group', {name: 'Point details'}).textContent)
+      .toContain('2 / 2');
+  });
+
+  test('a zoomed overlay drops its own pinned details when its points are replaced', async () => {
+    const held = deferred();
+    stubApi({
+      revision: 1,
+      computedAt: new Date().toISOString(),
+      limits,
+      holds: [{match: 'api/v1/runs/demo/pairs', promise: held.promise}],
+    });
+    testMount(<HostedReport runKey="demo" />);
+    const canvas = await overlay('S-curve');
+    fireEvent.wheel(canvas, {deltaY: -10, clientX: 170, clientY: 90});
+    expect(lastPoint(canvas).textContent).toContain('2 / 2');
+    held.resolve();
+    await waitFor(() =>
+      expect(within(screen.getByRole('dialog')).queryByRole('group', {name: 'Point details'})).toBeNull(),
+    );
     expect(lastPoint(canvas).textContent).toContain('12 / 12');
   });
 });

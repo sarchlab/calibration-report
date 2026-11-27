@@ -12,7 +12,9 @@ import {
   logFactor,
   zoomAxes,
 } from '../site/drawing.js';
-import {comparisonPairs, preferLogScale} from '../site/model.js';
+import {buildPairs, comparisonPairs, preferLogScale} from '../site/model.js';
+import {fullCharts, visibleCDF} from '../site/resample.js';
+import {cdfAxis} from '../site/drawing.js';
 import {panView, pinchView, wheelFactor, zoomView} from '../site/zoom.js';
 
 const benchmarks = {
@@ -817,5 +819,35 @@ describe('zoomed sample density', () => {
       );
       expect(dense.hitPoints).toHaveLength(3);
     }
+  });
+});
+
+describe('zoomed log CDF', () => {
+  test('exact matches drawn at the log floor stay selected and hit-testable', () => {
+    // Errors 0 (exact) and 1%…100%; the sample is every fifth comparison.
+    const data = Array.from({length: 200}, (_, i) => ({
+      group: 'gpu', benchmark: 'fir', plot: 1, x: i, non_scaling_params: {block: 64},
+      values: {hw: 1000, sim: i % 4 === 0 ? 1000 : 1000 * (1 + (1 + (i % 100)) / 100)},
+    }));
+    const body = buildPairs({rows: data, benchmarks, groups: [[1, 'gpu', 'Example GPU']], overview: false});
+    const full = fullCharts([{...body, revision: 1}]);
+    const sample = comparisonPairs(data, benchmarks).filter((_, i) => i % 5 === 1);
+    const {left} = cdfAxis(sample, true);
+    expect(left).toBe(1);
+    const view = {x: [left, 3]};
+    const exact = (pair) => pair.signedError === 0;
+    // Selecting by raw error would drop them (0 is outside [1, 3]) but for
+    // rank 1 and the neighbor below the view, which are always kept.
+    expect(visibleCDF(full, view, 1500).filter(exact).length).toBeLessThanOrEqual(2);
+    const shown = visibleCDF(full, view, 1500, left);
+    expect(shown.filter(exact).length).toBe(50);
+    const drawn = drawChart(
+      document.createElement('canvas'),
+      {kind: 'cdf', pairs: sample, total: full.count, log: true, bands: sample, shown},
+      theme,
+      benchmarks,
+      {view},
+    );
+    expect(drawn.hitPoints.some((p) => p.description.comparisons[0].signedError === 0)).toBe(true);
   });
 });

@@ -1,7 +1,7 @@
 import {ActionIcon, Button, Modal, Paper, VisuallyHidden} from '@mantine/core';
 import {useElementSize} from '@mantine/hooks';
 import {useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState} from 'react';
-import {drawChart, zoomAxes} from './drawing.js';
+import {cdfAxis, drawChart, zoomAxes} from './drawing.js';
 import {panView, pinchView, wheelFactor, zoomView} from './zoom.js';
 import {visibleCDF, visibleRanked, visibleScatter} from './resample.js';
 import {
@@ -199,8 +199,6 @@ function ChartOverlay({spec, theme, controls, legend, fullData, onClose}) {
   // The full data of the current `fullData.load` only.
   const [full, setFull] = useState({load: null, status: null, data: null});
   const fullState = fullData && full.load === fullData.load ? full : null;
-  const closeRef = useRef(close);
-  closeRef.current = close;
   const started = useRef(null);
   const changeView = useCallback(
     (next) => {
@@ -211,11 +209,10 @@ function ChartOverlay({spec, theme, controls, legend, fullData, onClose}) {
       started.current = load;
       setFull({load, status: 'loading', data: null});
       load().then(
+        // A zoomed canvas whose drawn pairs change drops its own details
+        // (PlotCanvas); nothing else is closed.
         (data) => {
-          if (started.current !== load) return;
-          // The drawn points change under any open details.
-          closeRef.current();
-          setFull({load, status: 'loaded', data});
+          if (started.current === load) setFull({load, status: 'loaded', data});
         },
         () => {
           if (started.current === load) setFull({load, status: 'failed', data: null});
@@ -283,7 +280,12 @@ function ChartOverlay({spec, theme, controls, legend, fullData, onClose}) {
           detailsTarget={detailsTarget}
         />
       </div>
-      {legend}
+      {legend && drawn.colors !== spec.colors ? (
+        // Comparisons the full data adds, after the summary's own colors.
+        <Legend curves={[...drawn.colors.values()]} />
+      ) : (
+        legend
+      )}
       <div ref={detailsTarget} />
     </>
   );
@@ -324,8 +326,9 @@ export function PlotCanvas({
   useLayoutEffect(() => () => removePlot(id), [id, removePlot]);
   // Refreshed rows replace what a hover or pinned selection pointed at.
   // Rebuilt arrays of the same row objects (new metadata) are not a refresh.
-  // A launch-group chart compares its dispatches, not its rebuilt medians.
-  const sourceRows = spec.dispatches ?? spec.rows;
+  // A launch-group chart compares its dispatches, not its rebuilt medians;
+  // a summary chart its drawn pairs (`shown`, from full data when zoomed).
+  const sourceRows = spec.dispatches ?? spec.rows ?? spec.shown ?? spec.pairs;
   const shownRows = useRef(sourceRows);
   useLayoutEffect(() => {
     const previous = shownRows.current;
@@ -983,7 +986,7 @@ function Scatter({
     () => ({kind: 'scatter', pairs, unit, colors, log}),
     [pairs, unit, colors, log],
   );
-  const fullData = useFullData(loadPairs, spec, scatterShown);
+  const fullData = useFullData(loadPairs, spec, scatterShown, theme.palette);
   const stats = useMemo(
     () => exact?.stats ?? [...rankingStats(pairs), ...errorStats(pairs)],
     [pairs, exact],
@@ -1030,14 +1033,28 @@ function SampleNote({shown, count}) {
 // What a zoomed hosted summary chart draws from the full data: at most the
 // server sample's per-chart limit (site/resample.js).
 const rankedShown = (full, view) => visibleRanked(full, view, summaryLimits.scurve);
-const cdfShown = (full, view) => visibleCDF(full, view, summaryLimits.cdf);
+// Selected where the CDF draws them: sub-floor errors at the log floor.
+const cdfShown = (full, view, spec) =>
+  visibleCDF(full, view, summaryLimits.cdf, cdfAxis(spec.pairs, spec.log).left);
 const scatterShown = (full, view, spec) =>
   visibleScatter(full, spec.unit, view, summaryLimits.scatter);
+// `colors` extended, in the same palette order, by comparisons of `legend`
+// it lacks (pairs of a newer revision than the summary); `colors` itself
+// when it has them all.
+export function extendColors(colors, legend, palette) {
+  if (legend.every(({id}) => colors.has(id))) return colors;
+  const extended = new Map(colors);
+  for (const {id, name} of legend)
+    if (!extended.has(id))
+      extended.set(id, {color: palette[extended.size % palette.length], name});
+  return extended;
+}
 // The `fullData` of a hosted summary chart (ChartOverlay): `spec` with the
 // comparisons `shown(full, view, spec)` drawn over it, ranks and cumulative
-// shares counted among all comparisons. Null without `loadPairs` (the file
-// source draws every pair already).
-function useFullData(loadPairs, spec, shown) {
+// shares counted among all comparisons, and colors for comparisons the
+// summary did not have. Null without `loadPairs` (the file source draws
+// every pair already).
+function useFullData(loadPairs, spec, shown, palette) {
   return useMemo(
     () =>
       loadPairs
@@ -1046,11 +1063,12 @@ function useFullData(loadPairs, spec, shown) {
             specFor: (full, view) => ({
               ...spec,
               ...(spec.kind !== 'scatter' && {total: full.count}),
+              ...(spec.colors && {colors: extendColors(spec.colors, full.legend, palette)}),
               shown: shown(full, view, spec),
             }),
           }
         : null,
-    [loadPairs, spec, shown],
+    [loadPairs, spec, shown, palette],
   );
 }
 // Summary of one scope, from the full pair list (file source) or from a
@@ -1131,8 +1149,8 @@ export function Summary({
     cdf.log ??
     preferLogScale(cdf.pairs.map((pair) => Math.abs(pair.signedError)));
   const cdfSpec = useMemo(() => ({...cdf, log: cdfLog}), [cdf, cdfLog]);
-  const rankedFull = useFullData(loadPairs, rankedSpec, rankedShown);
-  const cdfFull = useFullData(loadPairs, cdfSpec, cdfShown);
+  const rankedFull = useFullData(loadPairs, rankedSpec, rankedShown, theme.palette);
+  const cdfFull = useFullData(loadPairs, cdfSpec, cdfShown, theme.palette);
   const {close} = usePoints();
   if (!count) return null;
   const legend = <Legend curves={[...colors.values()]} />;
