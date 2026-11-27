@@ -140,6 +140,7 @@ function ChartFrame({spec, theme, title, controls = null, legend = null, summary
         zIndex={9}
         lockScroll={false}
         closeOnEscape={false}
+        transitionProps={{transition: 'fade'}}
         className="chart-overlay"
         classNames={{content: 'chart-overlay-content', body: 'chart-overlay-body'}}
         closeButtonProps={{'aria-label': 'Close expanded chart'}}
@@ -163,18 +164,23 @@ const OVERLAY_HINT_HEIGHT = 24;
 const scaleKey = (spec) => JSON.stringify([spec.scales, spec.log, spec.factor]);
 function ChartOverlay({spec, theme, controls, legend, onClose}) {
   const {selection, close} = usePoints();
-  // A zoom belongs to the axis scales it was made on; changing a scale
-  // resets it. Changing the view dismisses point details, as scales do.
+  // A zoom belongs to the axis scales it was made on: changing a scale
+  // discards it. Changing the view dismisses point details, as scales do.
   const scales = scaleKey(spec);
-  const [zoom, setZoom] = useState({view: null, scales});
-  const view = zoom.scales === scales ? zoom.view : null;
+  const [view, setView] = useState(null);
+  const [zoomedScales, setZoomedScales] = useState(scales);
+  if (zoomedScales !== scales) {
+    setZoomedScales(scales);
+    setView(null);
+  }
   const changeView = useCallback(
     (next) => {
       close();
-      setZoom({view: next, scales});
+      setView(next);
     },
-    [close, scales],
+    [close],
   );
+  const detailsTarget = useRef(null);
   // Escape dismisses pinned point details first (PointProvider handles
   // that), then the overlay.
   const pinned = useRef(selection);
@@ -220,16 +226,19 @@ function ChartOverlay({spec, theme, controls, legend, onClose}) {
           onViewChange={changeView}
           size={size}
           pixelRatio={pixelRatio}
+          detailsTarget={detailsTarget}
         />
       </div>
       {legend}
+      <div ref={detailsTarget} />
     </>
   );
 }
 // With `onViewChange`, the wheel zooms the chart's view around the pointer,
 // a mouse drag pans it and a double click resets it (calls it with null),
 // changing only the axes zoomAxes allows for the chart's kind. `size` and
-// `pixelRatio` replace the default layout (see drawChart).
+// `pixelRatio` replace the default layout (see drawChart). With
+// `detailsTarget` (a ref), pinned point details render inside that element.
 export function PlotCanvas({
   spec,
   theme,
@@ -238,6 +247,7 @@ export function PlotCanvas({
   onViewChange,
   size = null,
   pixelRatio = 2,
+  detailsTarget,
 }) {
   const interaction = usePoints();
   const {
@@ -306,7 +316,7 @@ export function PlotCanvas({
     node.addEventListener('wheel', wheel, {passive: false});
     return () => node.removeEventListener('wheel', wheel);
   }, [zoomable, allowed]);
-  const plot = {id, canvas, wrapper, points, summary};
+  const plot = {id, canvas, wrapper, points, summary, detailsTarget};
   const pinned = selection?.id === id;
   const active = pinned
     ? selection
@@ -429,11 +439,12 @@ export function PlotCanvas({
             drag.current = null;
           }}
           onDoubleClick={() => {
-            if (zoomable) onViewChange(null);
+            if (zoomable && view) onViewChange(null);
           }}
           onClick={(event) => {
-            // The click that ends a drag selects nothing.
-            if (dragged.current) {
+            // The click that ends a drag, or the second click of a double
+            // click on a zoomable chart, selects nothing.
+            if (dragged.current || (zoomable && event.detail > 1)) {
               dragged.current = false;
               pointer.current = undefined;
               return;
@@ -972,8 +983,9 @@ export function Summary({
           <SampleNote shown={ranked.pairs.length} count={count} />
           <PlotDetails entries={stats} count={count}>
             <p>
-              Negative values are underestimates. Positive values are
-              overestimates.
+              {factor
+                ? 'Above 1× the simulator is slower than hardware; below, faster.'
+                : 'Negative values are underestimates. Positive values are overestimates.'}
             </p>
           </PlotDetails>
         </Paper>

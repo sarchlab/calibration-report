@@ -156,7 +156,6 @@ export function Report({snapshot, revision = 0, waiting = false}) {
   }, [report.title]);
   return (
     <PointProvider
-      key={revision}
       benchmarks={benchmarks}
       groups={report.groups}
       overview={overview}

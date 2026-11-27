@@ -102,15 +102,29 @@ export function logFactor(error) {
 export function fromLogFactor(position) {
   return Math.sign(position) * (10 ** Math.abs(position) - 1) * 100;
 }
-const factorNumber = new Intl.NumberFormat('en-US', {maximumSignificantDigits: 3});
-export function factorLabel(error) {
-  const factor = 1 + Math.abs(error) / 100;
-  const text = factorNumber.format(factor) + '×';
-  if (text === '1×') return text;
-  return text + (error > 0 ? ' slower' : ' faster');
+// "1×" names only parity; any other error reads as a factor slower or
+// faster, with `digits` significant digits.
+export function factorLabel(error, digits = 3) {
+  if (error === 0) return '1×';
+  const number = new Intl.NumberFormat('en-US', {maximumSignificantDigits: digits});
+  return number.format(1 + Math.abs(error) / 100) + '× ' + (error > 0 ? 'slower' : 'faster');
+}
+// Labels for factor ticks, with the fewest digits (from 3) that keep them
+// distinct and keep every factor other than parity from reading as 1.
+export function factorLabels(errors) {
+  let labels;
+  for (let digits = 3; digits <= 12; digits++) {
+    labels = errors.map((error) => factorLabel(error, digits));
+    if (
+      new Set(labels).size === labels.length &&
+      labels.every((label, i) => errors[i] === 0 || !label.startsWith('1× '))
+    )
+      break;
+  }
+  return labels;
 }
 const FACTOR_STEPS = [1.001, 1.002, 1.005, 1.01, 1.02, 1.05, 1.1, 1.2, 1.5, 2, 3, 5];
-// Signed errors at round factors in [min, max]: 1× first, then powers of
+// Signed errors at round factors in [min, max]: 1× (exactly 0) first, then powers of
 // ten, then other round factors in increasing order on either side, each at
 // least an even share of the axis from the ticks already chosen.
 export function factorTicks(min, max, count) {
@@ -127,7 +141,8 @@ export function factorTicks(min, max, count) {
     )
       chosen.push(position);
   };
-  // Powers of ten come first, so a wide axis reads 10×, 100×….
+  add(0);
+  // Powers of ten come next, so a wide axis reads 10×, 100×….
   const decades = [];
   for (let power = 1; power <= Math.max(Math.abs(low), Math.abs(high)); power++)
     decades.push(power);
@@ -139,16 +154,15 @@ export function factorTicks(min, max, count) {
     add(Math.log10(factor));
     add(-Math.log10(factor));
   }
-  // A view zoomed away from 1× may hold no round factor: fall back to
-  // linear ticks over the factors themselves.
-  if (chosen.length < 2 && (low > 0 || high < 0)) {
-    const sign = low > 0 ? 1 : -1;
-    const [a, b] = [10 ** Math.abs(low), 10 ** Math.abs(high)].sort((x, y) => x - y);
-    return linearTicks(a, b, count)
-      .map((factor) => sign * (factor - 1) * 100)
-      .sort((x, y) => x - y);
+  // A narrow view (near parity, or between two round factors) holds few
+  // round factors: linear ticks over the error itself then read better.
+  // They include 0 (1×) whenever it is in view.
+  const errors = chosen.map(fromLogFactor);
+  if (errors.length < 3) {
+    const linear = linearTicks(min, max, count);
+    if (linear.length > errors.length) return linear;
   }
-  return chosen.map(fromLogFactor).sort((a, b) => a - b);
+  return errors.sort((a, b) => a - b);
 }
 
 // Each axis scale maps data values to the space positions are linear in.
@@ -165,6 +179,7 @@ function numericAxis(
   [start, end],
   {log = false, factor = false, unit = '', count = 5, format = formatTick} = {},
 ) {
+  // A factor axis labels its ticks together (factorLabels); `format` is unused.
   const scale = factor ? 'factor' : log && min > 0 ? 'log' : 'linear';
   const {transform, inverse} = axisScales[scale];
   const low = transform(min),
@@ -174,12 +189,13 @@ function numericAxis(
       ? (start + end) / 2
       : start + ((transform(value) - low) / (high - low)) * (end - start);
   const divisor = unit === 'ns' ? 1e6 : 1;
-  const ticks = (
+  const values =
     scale === 'factor'
       ? factorTicks(min, max, count)
-      : axisTicks(min / divisor, max / divisor, count, scale === 'log')
-  ).map((value) => ({
-    label: format(value),
+      : axisTicks(min / divisor, max / divisor, count, scale === 'log');
+  const labels = scale === 'factor' ? factorLabels(values) : values.map((value) => format(value));
+  const ticks = values.map((value, i) => ({
+    label: labels[i],
     position: position(value * divisor),
   }));
   return {position, ticks, scale, domain: [min, max], range: [start, end], transform, inverse};
@@ -292,8 +308,10 @@ export function drawChart(
     ctx.rect(left - CLIP, top - CLIP, right - left + 2 * CLIP, bottom - top + 2 * CLIP);
     ctx.clip();
   }
+  // Only points centered in the frame itself are selectable.
+  const EDGE = 1e-6;
   const inside = ({left, right, top, bottom}, x, y) =>
-    x >= left - CLIP && x <= right + CLIP && y >= top - CLIP && y <= bottom + CLIP;
+    x >= left - EDGE && x <= right + EDGE && y >= top - EDGE && y <= bottom + EDGE;
 
   // Default-sized axes get the default tick counts; larger ones more.
   const tickCount = (length, spacing, minimum) =>
@@ -502,7 +520,7 @@ export function drawChart(
       // the view leaves it out.
       xPosition: (value) => {
         const px = xAxis.position(value);
-        return px >= left - CLIP && px <= right + CLIP ? px / width : null;
+        return px >= left - EDGE && px <= right + EDGE ? px / width : null;
       },
       statusPosition: (bounds ? bottom - 4 : bottom) / height,
     };
@@ -610,12 +628,11 @@ export function drawChart(
   function summaryPoint(chart, x, y, color, description) {
     const px = chart.x(x),
       py = chart.y(y);
-    if (!inside(chart.frame, px, py)) return;
     chart.ctx.fillStyle = color;
     chart.ctx.beginPath();
     chart.ctx.arc(px, py, 1.5, 0, 2 * Math.PI);
     chart.ctx.fill();
-    chart.points.push({x: px, y: py, description});
+    if (inside(chart.frame, px, py)) chart.points.push({x: px, y: py, description});
   }
 
   // Ends the clipped plot drawing and gives the chart's result.
@@ -656,7 +673,7 @@ export function drawChart(
       [inverse(minimum - margin), inverse(maximum + margin)],
       {maxCount: end},
       factor
-        ? {factor: true, format: factorLabel}
+        ? {factor: true}
         : {format: (n) => (n > 0 ? '+' : '') + formatTick(n) + '%'},
       bands,
     );

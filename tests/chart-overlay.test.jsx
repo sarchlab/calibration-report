@@ -6,6 +6,7 @@ import {nearestPoint} from '../site/Charts.jsx';
 import {
   drawChart,
   factorLabel,
+  factorLabels,
   factorTicks,
   fromLogFactor,
   logFactor,
@@ -43,13 +44,14 @@ const theme = {
 const pairs = comparisonPairs(rows, benchmarks);
 const colors = new Map([[pairs[0].id, {color: '#078', name: 'Simulated'}]]);
 
+// Mantine's test environment renders modals without transitions.
+const report = (data, revision = 0) => (
+  <MantineProvider env="test">
+    <Report snapshot={{report: {groups}, benchmarks, data}} revision={revision} />
+  </MantineProvider>
+);
 function mount() {
-  // Mantine's test environment renders modals without transitions.
-  render(
-    <MantineProvider env="test">
-      <Report snapshot={{report: {groups}, benchmarks, data: rows}} />
-    </MantineProvider>,
-  );
+  return render(report(rows));
 }
 const dialog = () => screen.getByRole('dialog');
 const pressed = (button) => button.getAttribute('aria-pressed');
@@ -72,14 +74,17 @@ describe('log-factor axis', () => {
     expect(factorLabel(50)).toBe('1.5× slower');
     expect(factorLabel(900)).toBe('10× slower');
     expect(factorLabel(-900)).toBe('10× faster');
+    // Bare 1× is parity only; near-parity ticks get the digits they need.
+    expect(factorLabel(0.1)).not.toBe('1×');
+    expect(factorLabels([-0.1, 0, 0.1])).toEqual(['1.001× faster', '1×', '1.001× slower']);
   });
 
   test('ticks are round factors around 1×, or linear factors away from it', () => {
-    const ticks = factorTicks(-300, 300, 5).map(factorLabel);
+    const ticks = factorTicks(-300, 300, 5).map((error) => factorLabel(error));
     expect(ticks).toContain('1×');
     expect(ticks).toContain('2× slower');
     expect(ticks).toContain('2× faster');
-    const wide = factorTicks(-9900, 9900, 7).map(factorLabel);
+    const wide = factorTicks(-9900, 9900, 7).map((error) => factorLabel(error));
     expect(wide).toContain('10× slower');
     expect(wide).toContain('10× faster');
     // A view between 3× and 5× slower holds only the 5× round factor.
@@ -97,7 +102,9 @@ describe('log-factor axis', () => {
     );
     const {y} = drawn.axes;
     expect(y.scale).toBe('factor');
-    expect(y.ticks.map((tick) => tick.label)).toContain('1×');
+    const ones = y.ticks.filter((tick) => tick.label === '1×');
+    expect(ones).toHaveLength(1);
+    expect(ones[0].position).toBeCloseTo(y.position(0));
     // Points sit at their log factor: equal factors either side of 1× are
     // equally far from it.
     const one = y.position(0);
@@ -113,6 +120,19 @@ describe('log-factor axis', () => {
       benchmarks,
     );
     expect(linear.axes.y.scale).toBe('linear');
+    // A tight view around parity still has distinct, usable ticks.
+    const tight = drawChart(
+      document.createElement('canvas'),
+      {kind: 'ranked', pairs, colors, factor: true},
+      theme,
+      benchmarks,
+      {view: {y: [-0.05, 0.05]}},
+    );
+    const labels = tight.axes.y.ticks.map((tick) => tick.label);
+    expect(labels.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(labels).size).toBe(labels.length);
+    const parity = tight.axes.y.ticks.find((tick) => tick.label === '1×');
+    expect(parity.position).toBeCloseTo(tight.axes.y.position(0));
     expect(linear.axes.y.ticks.every((tick) => tick.label.endsWith('%'))).toBe(true);
   });
 });
@@ -185,7 +205,13 @@ describe('zoom math', () => {
     expect(zoomed.axes.x.domain).toEqual(view.x);
     expect(zoomed.hitPoints.length).toBeGreaterThan(0);
     expect(zoomed.hitPoints.length).toBeLessThan(pairs.length);
+    const {x, y} = zoomed.axes;
     for (const point of zoomed.hitPoints) {
+      // Selectable centers lie in the frame itself, not its drawn bleed.
+      expect(point.x).toBeGreaterThanOrEqual(x.range[0] - 1e-6);
+      expect(point.x).toBeLessThanOrEqual(x.range[1] + 1e-6);
+      expect(point.y).toBeGreaterThanOrEqual(y.range[1] - 1e-6);
+      expect(point.y).toBeLessThanOrEqual(y.range[0] + 1e-6);
       const [pair] = point.description.comparisons;
       expect(point.x).toBeCloseTo(zoomed.axes.x.position(pair.actual));
       expect(point.y).toBeCloseTo(zoomed.axes.y.position(pair.prediction));
@@ -229,7 +255,8 @@ describe('overlay', () => {
     const canvas = within(dialog()).getByRole('img');
     canvas.focus();
     fireEvent.keyDown(canvas, {key: 'Home'});
-    expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
+    // The pinned panel shares the dialog's focus boundary.
+    expect(within(dialog()).getByRole('group', {name: 'Point details'})).toBeTruthy();
     fireEvent.keyDown(canvas, {key: 'Escape'});
     expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
     expect(dialog()).toBeTruthy();
@@ -272,5 +299,53 @@ describe('overlay', () => {
     fireEvent.click(screen.getByRole('tab', {name: 'Example GPU'}));
     fireEvent.click(screen.getByRole('tab', {name: 'Overview'}));
     expect(pressed(screen.getByRole('button', {name: 'Y log factor'}))).toBe('true');
+  });
+
+  test('a data revision keeps the overlay and its zoom but clears pinned details', () => {
+    const view = mount();
+    fireEvent.click(screen.getByRole('button', {name: 'Expand Measured vs. simulated · ms'}));
+    fireEvent.wheel(within(dialog()).getByRole('img'), {deltaY: -100, clientX: 170, clientY: 90});
+    const canvas = within(dialog()).getByRole('img');
+    canvas.focus();
+    fireEvent.keyDown(canvas, {key: 'Home'});
+    expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
+    const changed = rows.map((row, i) =>
+      i === 3 ? {...row, values: {...row.values, sim: row.values.sim * 1.01}} : row,
+    );
+    view.rerender(report(changed, 1));
+    expect(within(dialog()).getByRole('button', {name: 'Reset zoom'}).disabled).toBe(false);
+    expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+  });
+
+  test('changing a scale discards the zoom, even when changed back', () => {
+    mount();
+    fireEvent.click(screen.getByRole('button', {name: 'Expand Measured vs. simulated · ms'}));
+    const reset = within(dialog()).getByRole('button', {name: 'Reset zoom'});
+    fireEvent.wheel(within(dialog()).getByRole('img'), {deltaY: -200, clientX: 100, clientY: 80});
+    expect(reset.disabled).toBe(false);
+    const scale = within(dialog()).getByRole('button', {name: 'X/Y log'});
+    fireEvent.click(scale);
+    fireEvent.click(scale);
+    expect(reset.disabled).toBe(true);
+  });
+
+  test('the second click of a double click neither pins nor unpins', () => {
+    mount();
+    fireEvent.click(screen.getByRole('button', {name: 'Expand Measured vs. simulated · ms'}));
+    const canvas = within(dialog()).getByRole('img');
+    canvas.focus();
+    fireEvent.keyDown(canvas, {key: 'Home'});
+    fireEvent.click(canvas, {clientX: 5, clientY: 5, detail: 2});
+    expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
+    // Unzoomed, a double click has nothing to reset and keeps the details.
+    fireEvent.doubleClick(canvas);
+    expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
+  });
+
+  test('the S-curve note follows the log-factor axis', () => {
+    mount();
+    expect(screen.getByText(/Negative values are underestimates/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', {name: 'Y log factor'}));
+    expect(screen.getByText(/Above 1× the simulator is slower than hardware/)).toBeTruthy();
   });
 });
