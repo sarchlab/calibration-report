@@ -82,7 +82,7 @@ export const nwBenchmark = {
 };
 export const sradBenchmark = {
   scaling_param: 'size',
-  params: {size: {unit: ''}, launch: {unit: ''}},
+  params: {size: {unit: ''}, iterations: {unit: ''}, launch: {unit: ''}},
   values: launchValues,
 };
 
@@ -124,10 +124,20 @@ export function gaussianPoints({group = 'gpu', benchmark = 'rodinia_gaussian', s
   return data;
 }
 
-export function sradPoints({group = 'gpu', benchmark = 'rodinia_srad', sizes = [64, 128, 256]} = {}) {
-  return sizes.flatMap((size) =>
-    ['#1 srad_cuda_1', '#2 srad_cuda_2'].map((launch, i) =>
-      launchPoint(group, benchmark, size, {launch}, i + 1),
+// SRAD launches both kernels once per iteration: the count depends on
+// `iterations`, never on the size.
+export function sradPoints({
+  group = 'gpu',
+  benchmark = 'rodinia_srad',
+  sizes = [64, 128, 256],
+  iterations = [1],
+} = {}) {
+  return iterations.flatMap((count) =>
+    sizes.flatMap((size) =>
+      Array.from({length: 2 * count}, (_, i) => {
+        const launch = '#' + (i + 1) + ' srad_cuda_' + ((i % 2) + 1);
+        return launchPoint(group, benchmark, size, {iterations: count, launch}, i + 1);
+      }),
     ),
   );
 }
@@ -137,7 +147,11 @@ export function launchOrdinalReport(data = [...nwPoints(), ...sradPoints()]) {
     report: {title: 'Launch ordinals', description: '', live: false, groups: {gpu: {name: 'GPU'}}},
     benchmarks: {
       rodinia_nw: nwBenchmark,
-      rodinia_gaussian: {...sradBenchmark, scaling_param: 'size'},
+      rodinia_gaussian: {
+        scaling_param: 'size',
+        params: {size: {unit: ''}, launch: {unit: ''}},
+        values: launchValues,
+      },
       rodinia_srad: sradBenchmark,
     },
     data,

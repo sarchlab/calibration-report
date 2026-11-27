@@ -279,11 +279,12 @@ export function parseLaunch(params) {
 
 // The group × benchmark pairs, as JSON([group, benchmark]), whose charts are
 // launch-ordinal: every row has an ordinal `launch` label and no
-// `launch_group`, and the number of launches per (parameters without
-// `launch`, x) is not the same everywhere, because the launch count varies
-// with the scaling value. Such a benchmark gets one chart per (parameters
-// without `launch`, x), drawn over the launch ordinal. `rows` are visible
-// rows. The hosted API applies the same rule in SQL (`launchOrdinalCharts`).
+// `launch_group`, and for some combination of the other parameters the
+// number of launches differs between x values: the launch count varies with
+// the scaling value (a count that depends only on other parameters, like
+// SRAD's iterations, does not). Such a benchmark gets one chart per
+// (parameters without `launch`, x), drawn over the launch ordinal. `rows`
+// are visible rows. The hosted API applies the same rule in SQL (`launchOrdinalCharts`).
 export function launchOrdinalBenchmarks(rows) {
   const benchmarks = new Map();
   for (const row of rows) {
@@ -297,13 +298,20 @@ export function launchOrdinalBenchmarks(rows) {
       continue;
     }
     const {launch, ...rest} = params;
-    const key = JSON.stringify([Object.entries(rest).sort(), row.x]);
-    if (!benchmark.launches.has(key)) benchmark.launches.set(key, new Set());
-    benchmark.launches.get(key).add(launch);
+    const key = JSON.stringify(Object.entries(rest).sort());
+    if (!benchmark.launches.has(key)) benchmark.launches.set(key, new Map());
+    const perX = benchmark.launches.get(key);
+    if (!perX.has(row.x)) perX.set(row.x, new Set());
+    perX.get(row.x).add(launch);
   }
   const ordinal = new Set();
   for (const [id, {ordinal: candidate, launches}] of benchmarks)
-    if (candidate && new Set([...launches.values()].map((set) => set.size)).size > 1)
+    if (
+      candidate &&
+      [...launches.values()].some(
+        (perX) => new Set([...perX.values()].map((set) => set.size)).size > 1,
+      )
+    )
       ordinal.add(id);
   return ordinal;
 }

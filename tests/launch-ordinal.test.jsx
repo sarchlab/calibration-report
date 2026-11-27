@@ -56,6 +56,11 @@ describe('launch-ordinal benchmarks', () => {
     const series = seriesOf(sradPoints(), 'rodinia_srad');
     expect(series).toHaveLength(2);
     expect(series.every((s) => s.rows.length === 3 && !('launchOrdinal' in s))).toBe(true);
+    // A count that depends only on another parameter is fixed too: 2, 4,
+    // and 8 launches for 1, 2, and 4 iterations, at every size.
+    const iterated = sradPoints({iterations: [1, 2, 4]});
+    expect(ordinalOf(iterated)).toEqual([]);
+    expect(seriesOf(iterated, 'rodinia_srad')).toHaveLength(2 + 4 + 8);
   });
 
   test('launch groups keep their median charts', () => {
@@ -184,6 +189,9 @@ describe('file viewer', () => {
     expect(document.querySelector('.point-kernel').textContent).toBe('#7 nw_kernel2');
     // SRAD keeps a chart per launch over the size.
     const sradHeadings = [...srad.querySelectorAll('.series h3')].map((h) => h.textContent);
-    expect(sradHeadings).toEqual(['launch=#1 srad_cuda_1', 'launch=#2 srad_cuda_2']);
+    expect(sradHeadings).toEqual([
+      'iterations=1 · launch=#1 srad_cuda_1',
+      'iterations=1 · launch=#2 srad_cuda_2',
+    ]);
   });
 });

@@ -921,7 +921,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
           : point;
       const data = [
         ...nwPoints({sizes, penalties: [1, 10]}).map(queued),
-        ...sradPoints(),
+        ...sradPoints({iterations: [1, 2]}),
         ...gaussianPoints(),
       ];
       const report = {
@@ -936,7 +936,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
       expect(manifest.plots.gpu).toEqual(
         fileBenchmarks.map((b) => [manifest.benchmark_keys.indexOf(b.id), b.series.length]),
       );
-      expect(manifest.plots.gpu.map(([, count]) => count)).toEqual([63, 2, 2]);
+      expect(manifest.plots.gpu.map(([, count]) => count)).toEqual([63, 6, 2]);
       const ordinalOf = (row) => Number(row.non_scaling_params.launch.split(' ')[0].slice(1));
       const byOrdinal = (a, b) => ordinalOf(a) - ordinalOf(b);
       const pages = new Map();
@@ -993,7 +993,7 @@ describe.skipIf(!dsn)('hosted backend', () => {
       );
       expect('launch_ordinal' in srad).toBe(false);
       expect(srad.plots.map((p) => p.chart)).toEqual(srad.plots.map((p) => p.id));
-      expect(srad.plots.map((p) => p.rows.length)).toEqual([3, 3]);
+      expect(srad.plots.map((p) => p.rows.length)).toEqual([3, 3, 3, 3, 3, 3]);
       const {body: gaussian} = await api(
         `/ordinal/plots?format=3&rid=${manifest.id}&group=gpu&benchmark=rodinia_gaussian`,
       );

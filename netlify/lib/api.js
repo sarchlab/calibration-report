@@ -39,8 +39,9 @@ const drawnPoint = `EXISTS (SELECT 1 FROM cr.observations o WHERE o.point_id = p
 // the visible plots matching `scope` (SQL over cr.plots with parameters from
 // `values`), with their chart counts, keyed `group_id:benchmark_id`. A
 // candidate's visible plots all have an ordinal `launch` and no
-// `launch_group`; it is launch-ordinal when its launch counts per
-// (params - 'launch', x) of drawn points differ. Each such pair is one chart.
+// `launch_group`; it is launch-ordinal when, for some params - 'launch', its
+// launch counts (drawn points) differ between x values. Each
+// (params - 'launch', x) is one chart.
 async function launchOrdinalCharts(client, scope, values) {
   const drawn = drawnPoint.replace('$DRAWN', '$' + (values.length + 1));
   const found = await rows(
@@ -51,14 +52,17 @@ async function launchOrdinalCharts(client, scope, values) {
        HAVING bool_and(coalesce(params->>'launch' ~ ${launchLabel}, false)
                        AND NOT params ? 'launch_group')),
      charts AS (
-       SELECT pl.group_id, pl.benchmark_id, count(*) AS launches
+       SELECT pl.group_id, pl.benchmark_id, pl.params - 'launch' AS rest, count(*) AS launches
        FROM candidates c
        JOIN cr.plots pl USING (group_id, benchmark_id)
        JOIN cr.points p ON p.plot_id = pl.id
        WHERE pl.visible AND ${drawn}
-       GROUP BY pl.group_id, pl.benchmark_id, pl.params - 'launch', p.x)
-     SELECT group_id, benchmark_id, count(*)::int AS charts FROM charts
-     GROUP BY group_id, benchmark_id HAVING min(launches) <> max(launches)`,
+       GROUP BY pl.group_id, pl.benchmark_id, pl.params - 'launch', p.x),
+     varying AS (
+       SELECT group_id, benchmark_id, min(launches) <> max(launches) AS varies, count(*) AS n
+       FROM charts GROUP BY group_id, benchmark_id, rest)
+     SELECT group_id, benchmark_id, sum(n)::int AS charts FROM varying
+     GROUP BY group_id, benchmark_id HAVING bool_or(varies)`,
     [...values, drawnStates],
   );
   return new Map(found.map((r) => [r.group_id + ':' + r.benchmark_id, r.charts]));
