@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import {createPortal} from 'react-dom';
 import {useMediaQuery} from '@mantine/hooks';
 import {displayName, displayUnit, launchBands} from './model.js';
 
@@ -310,6 +311,20 @@ export function PointProvider({
     panelRef = useRef(null);
   const pendingScroll = useRef(null),
     pendingFocus = useRef(null);
+  // A new reset key (data revision, view or theme) drops the selection
+  // before anything renders it against the new data.
+  const [shownResetKey, setShownResetKey] = useState(resetKey);
+  if (shownResetKey !== resetKey) {
+    setShownResetKey(resetKey);
+    // Focus inside an expanded chart's details returns to its canvas, so it
+    // stays within the chart's dialog once the details close.
+    const current = selectedRef.current;
+    if (current?.detailsTarget && panelRef.current?.contains(document.activeElement))
+      pendingFocus.current = current.canvas.current;
+    selectedRef.current = null;
+    setSelection(null);
+    setHover(null);
+  }
   const desktop = useMediaQuery(desktopQuery, false, {
     getInitialValueInEffect: false,
   });
@@ -364,9 +379,6 @@ export function PointProvider({
     [select],
   );
 
-  useLayoutEffect(() => {
-    close();
-  }, [resetKey, close]);
   useLayoutEffect(() => {
     document.body.classList.toggle('point-details-open', !!selection);
     document.body.classList.toggle('overview-view', overview);
@@ -458,94 +470,97 @@ export function PointProvider({
     benchmarks,
     groups,
   };
+  // A plot with a `detailsTarget` (an expanded chart) shows its pinned
+  // details inside that element, within the chart's dialog.
+  const detailsTarget = selection?.detailsTarget?.current;
+  const panel = selection && (
+    <Paper
+      ref={panelRef}
+      className="point-detail point-detail-pinned"
+      role="group"
+      aria-label="Point details"
+      withBorder
+      radius="md"
+      shadow="md"
+    >
+      <div
+        id="pinned-point-description"
+        className="point-description"
+        ref={attachContent}
+        tabIndex={0}
+        aria-live="polite"
+        aria-atomic="true"
+        onKeyDown={(event) => {
+          if (event.key === 'Tab' && event.shiftKey && !sourceHidden) {
+            event.preventDefault();
+            selection.canvas.current?.focus({preventScroll: true});
+          }
+          if (
+            ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)
+          )
+            browse(event, selection);
+        }}
+      >
+        <PointDescription
+          description={selection.points[selection.index].description}
+          benchmarks={benchmarks}
+          groups={groups}
+        />
+      </div>
+      <div className="point-controls">
+        {[
+          [-10, '<<', 'Previous 10 points'],
+          [-1, '<', 'Previous point'],
+        ].map(([delta, glyph, label]) => (
+          <ActionIcon
+            key={delta}
+            size={24}
+            variant="subtle"
+            color="gray"
+            title={label}
+            aria-label={label}
+            onClick={() => step(delta)}
+          >
+            {glyph}
+          </ActionIcon>
+        ))}
+        <span>
+          {selection.index + 1} / {selection.points.length}
+        </span>
+        {[
+          [1, '>', 'Next point'],
+          [10, '>>', 'Next 10 points'],
+        ].map(([delta, glyph, label]) => (
+          <ActionIcon
+            key={delta}
+            size={24}
+            variant="subtle"
+            color="gray"
+            title={label}
+            aria-label={label}
+            onClick={() => step(delta)}
+          >
+            {glyph}
+          </ActionIcon>
+        ))}
+        <ActionIcon
+          size={24}
+          variant="subtle"
+          color="gray"
+          title="Close point details"
+          aria-label="Close point details"
+          onClick={() => close(true)}
+        >
+          ×
+        </ActionIcon>
+      </div>
+    </Paper>
+  );
   return (
     <PointContext.Provider value={value}>
       {children}
-      {selection && (
-        <Portal>
-          <Paper
-            ref={panelRef}
-            className="point-detail point-detail-pinned"
-            role="group"
-            aria-label="Point details"
-            withBorder
-            radius="md"
-            shadow="md"
-          >
-            <div
-              id="pinned-point-description"
-              className="point-description"
-              ref={attachContent}
-              tabIndex={0}
-              aria-live="polite"
-              aria-atomic="true"
-              onKeyDown={(event) => {
-                if (event.key === 'Tab' && event.shiftKey && !sourceHidden) {
-                  event.preventDefault();
-                  selection.canvas.current?.focus({preventScroll: true});
-                }
-                if (
-                  ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)
-                )
-                  browse(event, selection);
-              }}
-            >
-              <PointDescription
-                description={selection.points[selection.index].description}
-                benchmarks={benchmarks}
-                groups={groups}
-              />
-            </div>
-            <div className="point-controls">
-              {[
-                [-10, '<<', 'Previous 10 points'],
-                [-1, '<', 'Previous point'],
-              ].map(([delta, glyph, label]) => (
-                <ActionIcon
-                  key={delta}
-                  size={24}
-                  variant="subtle"
-                  color="gray"
-                  title={label}
-                  aria-label={label}
-                  onClick={() => step(delta)}
-                >
-                  {glyph}
-                </ActionIcon>
-              ))}
-              <span>
-                {selection.index + 1} / {selection.points.length}
-              </span>
-              {[
-                [1, '>', 'Next point'],
-                [10, '>>', 'Next 10 points'],
-              ].map(([delta, glyph, label]) => (
-                <ActionIcon
-                  key={delta}
-                  size={24}
-                  variant="subtle"
-                  color="gray"
-                  title={label}
-                  aria-label={label}
-                  onClick={() => step(delta)}
-                >
-                  {glyph}
-                </ActionIcon>
-              ))}
-              <ActionIcon
-                size={24}
-                variant="subtle"
-                color="gray"
-                title="Close point details"
-                aria-label="Close point details"
-                onClick={() => close(true)}
-              >
-                ×
-              </ActionIcon>
-            </div>
-          </Paper>
-        </Portal>
-      )}
+      {panel &&
+        (detailsTarget ? createPortal(panel, detailsTarget) : <Portal>{panel}</Portal>)}
     </PointContext.Provider>
   );
 }

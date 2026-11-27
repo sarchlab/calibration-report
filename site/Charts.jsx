@@ -1,10 +1,13 @@
-import {Button, Paper, VisuallyHidden} from '@mantine/core';
-import {useId, useLayoutEffect, useMemo, useRef, useState} from 'react';
-import {drawChart} from './drawing.js';
+import {ActionIcon, Button, Modal, Paper, VisuallyHidden} from '@mantine/core';
+import {useElementSize} from '@mantine/hooks';
+import {useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState} from 'react';
+import {drawChart, zoomAxes} from './drawing.js';
+import {panView, pinchView, wheelFactor, zoomView} from './zoom.js';
 import {
   chartParams,
   comparisonPairs,
   displayName,
+  displayUnit,
   errorPercentiles,
   errorStats,
   isLaunchGroup,
@@ -60,16 +63,25 @@ function Legend({curves}) {
     </div>
   );
 }
-export function nearestPoint(event, canvas, points, pointerType) {
+// Drawing units per CSS pixel of a canvas drawn at `size` (drawing units;
+// the default layout draws at 2 canvas pixels per unit).
+function drawingScale(canvas, size) {
   const rect = canvas.getBoundingClientRect();
+  return {
+    rect,
+    x: (size?.width ?? canvas.width / 2) / rect.width,
+    y: (size?.height ?? canvas.height / 2) / rect.height,
+  };
+}
+// The index of the point nearest the event within the pointer's radius, or -1.
+export function nearestPoint(event, canvas, points, pointerType, size) {
+  const {rect, x, y} = drawingScale(canvas, size);
   const radius = pointerType === 'touch' || pointerType === 'pen' ? 28 : 14;
   let best = -1,
     distance = radius * radius;
   points.forEach((point, index) => {
-    const dx =
-      event.clientX - rect.left - (point.x * rect.width) / (canvas.width / 2);
-    const dy =
-      event.clientY - rect.top - (point.y * rect.height) / (canvas.height / 2);
+    const dx = event.clientX - rect.left - point.x / x;
+    const dy = event.clientY - rect.top - point.y / y;
     const d = dx * dx + dy * dy;
     if (d < distance) {
       best = index;
@@ -80,12 +92,166 @@ export function nearestPoint(event, canvas, points, pointerType) {
 }
 // A summary chart whose sample is empty (the byte budget left none) is
 // replaced by a note.
-function SummaryCanvas({spec, theme}) {
-  if (!spec.pairs.length)
+function SummaryChart(props) {
+  if (!props.spec.pairs.length)
     return <p className="summary-note empty-sample">No sample available</p>;
-  return <PlotCanvas spec={spec} theme={theme} summary />;
+  return <ChartFrame {...props} summary />;
 }
-export function PlotCanvas({spec, theme, summary = false}) {
+function ExpandIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+      <path
+        d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+      />
+    </svg>
+  );
+}
+// A chart with its `controls`, plus an expand button that opens the same
+// spec in a full-screen overlay, where it can be zoomed and panned. The
+// overlay repeats the controls and shows `legend` below the chart.
+function ChartFrame({spec, theme, title, controls = null, legend = null, summary = false}) {
+  const [expanded, setExpanded] = useState(false);
+  const collapse = useCallback(() => setExpanded(false), []);
+  return (
+    <>
+      <div className="scale-controls" role="group" aria-label="Chart controls">
+        {controls}
+        <ActionIcon
+          size={22}
+          variant="default"
+          aria-label={'Expand ' + title}
+          title="Expand chart"
+          onClick={() => setExpanded(true)}
+        >
+          <ExpandIcon />
+        </ActionIcon>
+      </div>
+      <PlotCanvas spec={spec} theme={theme} summary={summary} />
+      {/* Escape is handled by ChartOverlay; the page scroll lock is CSS, so
+          the pinned point panel (z-index 10, outside the modal) still scrolls. */}
+      <Modal
+        opened={expanded}
+        onClose={collapse}
+        title={title}
+        fullScreen
+        zIndex={9}
+        lockScroll={false}
+        closeOnEscape={false}
+        transitionProps={{transition: 'fade'}}
+        className="chart-overlay"
+        classNames={{content: 'chart-overlay-content', body: 'chart-overlay-body'}}
+        closeButtonProps={{'aria-label': 'Close expanded chart'}}
+      >
+        <ChartOverlay
+          spec={spec}
+          theme={theme}
+          controls={controls}
+          legend={legend}
+          onClose={collapse}
+        />
+      </Modal>
+    </>
+  );
+}
+// Two taps this close in time (ms) make a double tap.
+const DOUBLE_TAP_MS = 350;
+// Overlay drawing units are this many CSS pixels, so its text reads at a
+// comfortable size on a window-sized chart.
+const OVERLAY_TEXT_SCALE = 1.25;
+// Room under the overlay canvas for its hint line.
+const OVERLAY_HINT_HEIGHT = 24;
+const scaleKey = (spec) => JSON.stringify([spec.scales, spec.log, spec.factor]);
+function ChartOverlay({spec, theme, controls, legend, onClose}) {
+  const {selection, close} = usePoints();
+  // A zoom belongs to the axis scales it was made on: changing a scale
+  // discards it. Changing the view dismisses point details, as scales do.
+  const scales = scaleKey(spec);
+  const [view, setView] = useState(null);
+  const [zoomedScales, setZoomedScales] = useState(scales);
+  if (zoomedScales !== scales) {
+    setZoomedScales(scales);
+    setView(null);
+  }
+  const changeView = useCallback(
+    (next) => {
+      close();
+      setView(next);
+    },
+    [close],
+  );
+  const detailsTarget = useRef(null);
+  // Escape dismisses pinned point details first (PointProvider handles
+  // that), then the overlay.
+  const pinned = useRef(selection);
+  pinned.current = selection;
+  useEffect(() => {
+    const keydown = (event) => {
+      if (event.key === 'Escape' && !event.isComposing && !pinned.current) onClose();
+    };
+    window.addEventListener('keydown', keydown, true);
+    return () => window.removeEventListener('keydown', keydown, true);
+  }, [onClose]);
+  const {ref, width, height} = useElementSize();
+  const size = useMemo(
+    () =>
+      width > 0 && height > OVERLAY_HINT_HEIGHT
+        ? {
+            width: width / OVERLAY_TEXT_SCALE,
+            height: (height - OVERLAY_HINT_HEIGHT) / OVERLAY_TEXT_SCALE,
+          }
+        : null,
+    [width, height],
+  );
+  const pixelRatio = OVERLAY_TEXT_SCALE * Math.max(2, globalThis.devicePixelRatio || 1);
+  return (
+    <>
+      <div className="scale-controls chart-overlay-controls" role="group" aria-label="Chart controls">
+        <p className="zoom-hint">Scroll or pinch to zoom · Drag to pan · Double-click or double-tap to reset</p>
+        {controls}
+        <Button
+          size="compact-xs"
+          variant="default"
+          disabled={!view}
+          onClick={() => changeView(null)}
+        >
+          Reset zoom
+        </Button>
+      </div>
+      <div className="chart-overlay-plot" ref={ref}>
+        <PlotCanvas
+          spec={spec}
+          theme={theme}
+          view={view}
+          onViewChange={changeView}
+          size={size}
+          pixelRatio={pixelRatio}
+          detailsTarget={detailsTarget}
+        />
+      </div>
+      {legend}
+      <div ref={detailsTarget} />
+    </>
+  );
+}
+// With `onViewChange`, the wheel or a two-finger pinch zooms the chart's view
+// around the pointer or pinch, a one-pointer drag pans it, and a double click
+// or double tap resets it (calls it with null),
+// changing only the axes zoomAxes allows for the chart's kind. `size` and
+// `pixelRatio` replace the default layout (see drawChart). With
+// `detailsTarget` (a ref), pinned point details render inside that element.
+export function PlotCanvas({
+  spec,
+  theme,
+  summary = false,
+  view = null,
+  onViewChange,
+  size = null,
+  pixelRatio = 2,
+  detailsTarget,
+}) {
   const interaction = usePoints();
   const {
     benchmarks,
@@ -123,11 +289,99 @@ export function PlotCanvas({spec, theme, summary = false}) {
   const [drawing, setDrawing] = useState(null);
   const [statusDetail, setStatusDetail] = useState('');
   useLayoutEffect(() => {
-    setDrawing(drawChart(canvas.current, spec, theme, benchmarks));
-    setStatusDetail('');
-  }, [spec, theme, benchmarks]);
+    setDrawing(drawChart(canvas.current, spec, theme, benchmarks, {view, size, pixelRatio}));
+  }, [spec, theme, benchmarks, view, size, pixelRatio]);
+  useLayoutEffect(() => setStatusDetail(''), [spec, theme, benchmarks]);
   const points = drawing?.hitPoints ?? [];
-  const plot = {id, canvas, wrapper, points, summary};
+  const drawnSize = drawing && {width: drawing.width, height: drawing.height};
+  // Zoom gestures read the latest drawing; a drag pans from where it began.
+  const zoomable = Boolean(onViewChange);
+  const allowed = zoomAxes[spec.kind];
+  const latest = useRef();
+  latest.current = {drawing, view, onViewChange};
+  // Pointers down on a zoomable chart, and the drawing, view and pointer
+  // positions where the current drag or pinch began.
+  const gesture = useRef({pointers: new Map(), start: null});
+  const dragged = useRef(false);
+  const lastTap = useRef(null);
+  // A click or tap on a zoomed chart waits out the double-click window
+  // before selecting, so the details panel cannot cover the chart before a
+  // second click or tap. A view or data change, or unmount, drops it along
+  // with the double-tap history.
+  const pendingTap = useRef(null);
+  const cancelTap = () => {
+    clearTimeout(pendingTap.current);
+    pendingTap.current = null;
+  };
+  useEffect(
+    () => () => {
+      cancelTap();
+      lastTap.current = null;
+    },
+    [view, spec],
+  );
+  const beginGesture = () => {
+    const {pointers} = gesture.current;
+    const {drawing, view} = latest.current;
+    gesture.current.start =
+      pointers.size && drawing?.axes ? {drawing, view, pointers: new Map(pointers)} : null;
+  };
+  // A pointer's position in the drawing units of `drawing`.
+  const drawingPoint = ({clientX, clientY}, drawing) => {
+    const {rect, x, y} = drawingScale(canvas.current, drawing);
+    return {x: (clientX - rect.left) * x, y: (clientY - rect.top) * y};
+  };
+  const moveGesture = (event) => {
+    const {pointers, start} = gesture.current;
+    pointers.set(event.pointerId, {clientX: event.clientX, clientY: event.clientY});
+    if (!start) return;
+    const ids = [...start.pointers.keys()];
+    let next;
+    if (ids.length >= 2 && pointers.has(ids[0]) && pointers.has(ids[1])) {
+      const at = (positions) => ids.slice(0, 2).map((id) => drawingPoint(positions.get(id), start.drawing));
+      dragged.current = true;
+      next = pinchView(start.view, start.drawing.axes, allowed, at(start.pointers), at(pointers));
+    } else {
+      const from = start.pointers.get(event.pointerId);
+      if (!from) return;
+      const dx = event.clientX - from.clientX,
+        dy = event.clientY - from.clientY;
+      // A touch may wobble a little and still be a tap.
+      const slop = event.pointerType === 'mouse' ? 3 : 8;
+      if (!dragged.current && Math.hypot(dx, dy) < slop) return;
+      dragged.current = true;
+      const {x, y} = drawingScale(canvas.current, start.drawing);
+      next = panView(start.view, start.drawing.axes, allowed, {x: dx * x, y: dy * y});
+    }
+    // A gesture along locked axes only changes nothing.
+    if (next !== latest.current.view) onViewChange(next);
+  };
+  const endPointer = (event) => {
+    const {pointers} = gesture.current;
+    if (!pointers.delete(event.pointerId)) return;
+    // A finger left after a pinch pans on from the current view.
+    beginGesture();
+  };
+  useEffect(() => {
+    if (!zoomable) return;
+    const node = canvas.current;
+    // A non-passive listener, so the page does not scroll as the chart zooms.
+    const wheel = (event) => {
+      const {drawing, view, onViewChange} = latest.current;
+      if (!drawing?.axes) return;
+      event.preventDefault();
+      const {rect, x, y} = drawingScale(node, drawing);
+      const point = {
+        x: (event.clientX - rect.left) * x,
+        y: (event.clientY - rect.top) * y,
+      };
+      const next = zoomView(view, drawing.axes, allowed, point, wheelFactor(event));
+      if (next !== view) onViewChange(next);
+    };
+    node.addEventListener('wheel', wheel, {passive: false});
+    return () => node.removeEventListener('wheel', wheel);
+  }, [zoomable, allowed]);
+  const plot = {id, canvas, wrapper, points, summary, detailsTarget};
   const pinned = selection?.id === id;
   const active = pinned
     ? selection
@@ -137,6 +391,7 @@ export function PlotCanvas({spec, theme, summary = false}) {
   const point = active && points[active.index];
   // One marker per X with unavailable results; in a launch-group chart, a
   // status shared by several dispatches is listed once with its count.
+  // A zoomed view drops the markers it leaves out.
   const markers = drawing?.xPosition
     ? Array.from(
         Map.groupBy(sourceRows, spec.xOf ?? ((row) => row.x)),
@@ -146,7 +401,8 @@ export function PlotCanvas({spec, theme, summary = false}) {
               .filter((curve) => isMarked(row, curve.id))
               .map((curve) => ({curve, status: row.statuses[curve.id]})),
           );
-          if (!marked.length) return null;
+          const xFraction = drawing.xPosition(x);
+          if (!marked.length || xFraction === null) return null;
           const main =
             marked.find(({status}) => status.state !== 'running') ?? marked[0];
           const {state, symbol} = main.status;
@@ -166,7 +422,7 @@ export function PlotCanvas({spec, theme, summary = false}) {
             ),
           ].join('\n');
           return {
-            x,
+            xFraction,
             state,
             symbol: symbol ?? visibleStates.get(state).symbol,
             message,
@@ -207,33 +463,100 @@ export function PlotCanvas({spec, theme, summary = false}) {
               .filter(Boolean)
               .join(' ') || undefined
           }
+          data-zoomable={zoomable || undefined}
+          // The overlay handles pinch, pan and double tap itself.
+          style={zoomable ? {touchAction: 'none'} : undefined}
           onPointerMove={(event) => {
+            if (gesture.current.pointers.has(event.pointerId)) {
+              moveGesture(event);
+              return;
+            }
             if (event.pointerType !== 'mouse' || pinned || selection) return;
             const index = nearestPoint(
               event,
               canvas.current,
               points,
               event.pointerType,
+              drawnSize,
             );
             canvas.current.style.cursor = index < 0 ? '' : 'pointer';
             showHover(plot, index);
           }}
           onPointerDown={(event) => {
             pointer.current = event.pointerType;
+            if (!zoomable || (event.pointerType === 'mouse' && event.button !== 0)) return;
+            const {pointers} = gesture.current;
+            // A second pointer makes a pinch, never a tap.
+            dragged.current = pointers.size > 0;
+            pointers.set(event.pointerId, {clientX: event.clientX, clientY: event.clientY});
+            beginGesture();
+            // Capture fails for a pointer that is no longer active.
+            try {
+              canvas.current.setPointerCapture?.(event.pointerId);
+            } catch {
+              // The gesture still follows events on the canvas.
+            }
           }}
-          onPointerCancel={() => {
+          onPointerUp={endPointer}
+          onPointerCancel={(event) => {
             pointer.current = undefined;
+            endPointer(event);
+          }}
+          onDoubleClick={() => {
+            cancelTap();
+            if (zoomable && view) onViewChange(null);
           }}
           onClick={(event) => {
+            // The click that ends a drag or pinch, or the second click of a
+            // double click or tap on a zoomable chart, selects nothing; a
+            // double tap resets a zoomed view as a double click does.
+            if (dragged.current) {
+              dragged.current = false;
+              pointer.current = undefined;
+              return;
+            }
+            const touchTap =
+              zoomable && (event.nativeEvent.pointerType || pointer.current) === 'touch';
+            if (touchTap) {
+              const tap = {time: event.timeStamp, x: event.clientX, y: event.clientY};
+              const last = lastTap.current;
+              lastTap.current = tap;
+              if (
+                last &&
+                tap.time - last.time < DOUBLE_TAP_MS &&
+                Math.hypot(tap.x - last.x, tap.y - last.y) < 30
+              ) {
+                lastTap.current = null;
+                pointer.current = undefined;
+                cancelTap();
+                if (view) onViewChange(null);
+                return;
+              }
+            }
+            if (zoomable && event.detail > 1) {
+              cancelTap();
+              pointer.current = undefined;
+              return;
+            }
             const index = nearestPoint(
               event,
               canvas.current,
               points,
               event.nativeEvent.pointerType || pointer.current,
+              drawnSize,
             );
             pointer.current = undefined;
-            if (index < 0 || (pinned && selection.index === index)) close();
-            else select(plot, index);
+            const apply = () => {
+              if (index < 0 || (pinned && selection.index === index)) close();
+              else select(plot, index);
+            };
+            cancelTap();
+            if (zoomable && view)
+              pendingTap.current = setTimeout(() => {
+                pendingTap.current = null;
+                apply();
+              }, DOUBLE_TAP_MS);
+            else apply();
           }}
           onKeyDown={(event) => {
             if (!points.length) return;
@@ -248,8 +571,8 @@ export function PlotCanvas({spec, theme, summary = false}) {
             className="point-highlight"
             aria-hidden="true"
             style={{
-              left: (100 * point.x) / (canvas.current.width / 2) + '%',
-              top: (100 * point.y) / (canvas.current.height / 2) + '%',
+              left: (100 * point.x) / drawing.width + '%',
+              top: (100 * point.y) / drawing.height + '%',
             }}
           />
         )}
@@ -260,7 +583,7 @@ export function PlotCanvas({spec, theme, summary = false}) {
             aria-label="Unavailable results"
             style={{top: 100 * drawing.statusPosition + '%'}}
           >
-            {markers.map(({x, state, symbol, message}, i) => (
+            {markers.map(({xFraction, state, symbol, message}, i) => (
               <button
                 type="button"
                 className="plot-status-marker"
@@ -269,7 +592,7 @@ export function PlotCanvas({spec, theme, summary = false}) {
                   /\p{Emoji_Presentation}|\uFE0F/u.test(symbol) || undefined
                 }
                 key={i}
-                style={{left: 100 * drawing.xPosition(x) + '%'}}
+                style={{left: 100 * xFraction + '%'}}
                 title={message}
                 aria-label={message}
                 onClick={() => setStatusDetail(message)}
@@ -320,6 +643,7 @@ function CurvePlot({
   series,
   xLabel,
   unit,
+  title,
   theme,
   preferences,
   setPreference,
@@ -365,10 +689,9 @@ function CurvePlot({
       canLog,
     };
   }, [rows, dispatches, launchOrdinal, curves, series, xLabel, unit, preferences]);
-  return (
-    <div className="plot">
-      <div className="scale-controls" role="group" aria-label="Axis scales">
-        {['x', 'y'].map((axis) => (
+  const controls = (
+    <div className="scale-group" role="group" aria-label="Axis scales">
+      {['x', 'y'].map((axis) => (
           <Button
             key={axis}
             size="compact-xs"
@@ -393,8 +716,17 @@ function CurvePlot({
             {axis.toUpperCase()} log
           </Button>
         ))}
-      </div>
-      <PlotCanvas spec={spec} theme={theme} />
+    </div>
+  );
+  return (
+    <div className="plot">
+      <ChartFrame
+        spec={spec}
+        theme={theme}
+        title={title}
+        controls={controls}
+        legend={<Legend curves={curves} />}
+      />
     </div>
   );
 }
@@ -550,6 +882,12 @@ export function Benchmark({
                   series={plot.comparable}
                   xLabel={group.launchOrdinal ? 'launch' : xLabel}
                   unit={plot.unit}
+                  title={
+                    displayName(id) +
+                    ' · ' +
+                    group.label +
+                    (group.plots.length > 1 ? ' · ' + displayUnit(plot.unit) : '')
+                  }
                   theme={theme}
                   preferences={preferences.get(plot.key)}
                   setPreference={setPreference}
@@ -577,6 +915,7 @@ function Scatter({
   preferences,
   setPreference,
   exact,
+  legend,
 }) {
   const {close} = usePoints();
   const key = JSON.stringify(['scatter', scope, unit]);
@@ -598,20 +937,25 @@ function Scatter({
   const count = exact?.count ?? pairs.length;
   return (
     <div className="plot">
-      <div className="scale-controls">
-        <Button
-          size="compact-xs"
-          variant={log ? 'filled' : 'default'}
-          aria-pressed={log}
-          onClick={() => {
-            close();
-            setPreference(key, !log);
-          }}
-        >
-          X/Y log
-        </Button>
-      </div>
-      <SummaryCanvas spec={spec} theme={theme} />
+      <SummaryChart
+        spec={spec}
+        theme={theme}
+        title={'Measured vs. simulated' + (unit ? ' · ' + displayUnit(unit) : '')}
+        legend={legend}
+        controls={
+          <Button
+            size="compact-xs"
+            variant={log ? 'filled' : 'default'}
+            aria-pressed={log}
+            onClick={() => {
+              close();
+              setPreference(key, !log);
+            }}
+          >
+            X/Y log
+          </Button>
+        }
+      />
       <SampleNote shown={pairs.length} count={count} />
       <PlotDetails entries={stats} count={count}>
         <p>Dashed line indicates equal values.</p>
@@ -677,7 +1021,13 @@ export function Summary({
       stats: errorStats(pairs),
       percentiles: errorPercentiles(pairs),
       ranked: {kind: 'ranked', pairs, colors, bands: pairs},
-      cdf: {kind: 'cdf', pairs, bands: pairs},
+      // The scale is resolved here, so the overlay sees when data flips it.
+      cdf: {
+        kind: 'cdf',
+        pairs,
+        bands: pairs,
+        log: preferLogScale(pairs.map((pair) => Math.abs(pair.signedError))),
+      },
       scatter: Array.from(
         Map.groupBy(pairs, (pair) => pair.unit),
         ([unit, values]) => ({unit, pairs: values}),
@@ -685,7 +1035,20 @@ export function Summary({
     };
   }, [sourcePairs, summary, scope, groups, theme]);
   const {count, colors, stats, percentiles, ranked, cdf} = model;
+  // The S-curve's log-factor Y axis, remembered per scope like scatter scales.
+  const factorKey = JSON.stringify(['scurve-factor', scope]);
+  const factor = preferences.get(factorKey) ?? false;
+  const rankedSpec = useMemo(() => ({...ranked, factor}), [ranked, factor]);
+  // The CDF's log X axis: the automatic choice unless toggled, per scope.
+  const cdfKey = JSON.stringify(['cdf-log', scope]);
+  const cdfLog =
+    preferences.get(cdfKey) ??
+    cdf.log ??
+    preferLogScale(cdf.pairs.map((pair) => Math.abs(pair.signedError)));
+  const cdfSpec = useMemo(() => ({...cdf, log: cdfLog}), [cdf, cdfLog]);
+  const {close} = usePoints();
   if (!count) return null;
+  const legend = <Legend curves={[...colors.values()]} />;
   return (
     <section id="summary" aria-label="Accuracy summary">
       <h2>
@@ -697,7 +1060,7 @@ export function Summary({
         <p className="summary-note">
           {count.toLocaleString()} paired measurements
         </p>
-        <Legend curves={[...colors.values()]} />
+        {legend}
       </div>
       <div className="charts summary-charts">
         <Paper
@@ -708,12 +1071,32 @@ export function Summary({
           p="md"
         >
           <figcaption>S-curve</figcaption>
-          <SummaryCanvas spec={ranked} theme={theme} />
+          <SummaryChart
+            spec={rankedSpec}
+            theme={theme}
+            title="S-curve"
+            legend={legend}
+            controls={
+              <Button
+                size="compact-xs"
+                variant={factor ? 'filled' : 'default'}
+                aria-pressed={factor}
+                title="Plot simulated / measured as a factor on a log scale"
+                onClick={() => {
+                  close();
+                  setPreference(factorKey, !factor);
+                }}
+              >
+                Y log factor
+              </Button>
+            }
+          />
           <SampleNote shown={ranked.pairs.length} count={count} />
           <PlotDetails entries={stats} count={count}>
             <p>
-              Negative values are underestimates. Positive values are
-              overestimates.
+              {factor
+                ? 'Above 1× the simulator is slower than hardware; below, faster.'
+                : 'Negative values are underestimates. Positive values are overestimates.'}
             </p>
           </PlotDetails>
         </Paper>
@@ -725,7 +1108,24 @@ export function Summary({
           p="md"
         >
           <figcaption>Absolute error distribution (CDF)</figcaption>
-          <SummaryCanvas spec={cdf} theme={theme} />
+          <SummaryChart
+            spec={cdfSpec}
+            theme={theme}
+            title="Absolute error distribution (CDF)"
+            controls={
+              <Button
+                size="compact-xs"
+                variant={cdfLog ? 'filled' : 'default'}
+                aria-pressed={cdfLog}
+                onClick={() => {
+                  close();
+                  setPreference(cdfKey, !cdfLog);
+                }}
+              >
+                X log
+              </Button>
+            }
+          />
           <SampleNote shown={cdf.pairs.length} count={count} />
           <PlotDetails entries={percentiles} count={count}>
             <p>|simulated − measured| / min(simulated, measured)</p>
@@ -751,6 +1151,7 @@ export function Summary({
               preferences={preferences}
               setPreference={setPreference}
               exact={exact}
+              legend={legend}
             />
           ))}
         </Paper>

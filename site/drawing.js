@@ -8,6 +8,7 @@ import {
   quantile,
 } from './model.js';
 
+const percentNumber = new Intl.NumberFormat('en-US', {maximumFractionDigits: 1});
 const tickNumber = new Intl.NumberFormat('en-US', {
   maximumSignificantDigits: 3,
   useGrouping: false,
@@ -93,13 +94,104 @@ function axisTicks(min, max, count, log) {
   return ticks.sort((a, b) => a - b);
 }
 
+// The S-curve's log-factor scale: a signed error e (%, positive when the
+// simulator is slower) is the factor 1 + |e|/100 between simulated and
+// measured values, plotted as sign(e)·log10(factor) = log10(sim / hw).
+export function logFactor(error) {
+  return Math.sign(error) * Math.log10(1 + Math.abs(error) / 100);
+}
+export function fromLogFactor(position) {
+  return Math.sign(position) * (10 ** Math.abs(position) - 1) * 100;
+}
+// "1×" names only parity; any other error reads as a factor slower or
+// faster, with `digits` significant digits.
+export function factorLabel(error, digits = 3) {
+  if (error === 0) return '1×';
+  const number = new Intl.NumberFormat('en-US', {maximumSignificantDigits: digits});
+  return number.format(1 + Math.abs(error) / 100) + '× ' + (error > 0 ? 'slower' : 'faster');
+}
+// Labels for factor ticks, with the fewest digits (from 3) that keep them
+// distinct and keep every factor other than parity from reading as 1.
+export function factorLabels(errors) {
+  let labels;
+  for (let digits = 3; digits <= 12; digits++) {
+    labels = errors.map((error) => factorLabel(error, digits));
+    if (
+      new Set(labels).size === labels.length &&
+      labels.every((label, i) => errors[i] === 0 || !label.startsWith('1× '))
+    )
+      break;
+  }
+  return labels;
+}
+const FACTOR_STEPS = [1.001, 1.002, 1.005, 1.01, 1.02, 1.05, 1.1, 1.2, 1.5, 2, 3, 5];
+// Signed errors at round factors in [min, max]: 1× (exactly 0) first, then powers of
+// ten, then other round factors in increasing order on either side, each at
+// least an even share of the axis from the ticks already chosen.
+export function factorTicks(min, max, count) {
+  const low = logFactor(min),
+    high = logFactor(max);
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return [];
+  if (!(high > low)) return [min];
+  const gap = (high - low) / (count + 1);
+  const chosen = [];
+  const add = (position) => {
+    if (
+      position >= low - 1e-12 &&
+      position <= high + 1e-12 &&
+      chosen.every((other) => Math.abs(other - position) >= gap)
+    )
+      chosen.push(position);
+  };
+  add(0);
+  // Powers of ten come next, so a wide axis reads 10×, 100×….
+  const decades = [];
+  for (let power = 1; power <= Math.max(Math.abs(low), Math.abs(high)); power++)
+    decades.push(power);
+  for (const factor of [
+    ...decades.map((power) => 10 ** power),
+    ...FACTOR_STEPS,
+    ...decades.flatMap((power) => [2, 5].map((n) => n * 10 ** power)),
+  ]) {
+    add(Math.log10(factor));
+    add(-Math.log10(factor));
+  }
+  // A narrow view (near parity, or between two round factors) holds few
+  // round factors: linear ticks over the error itself then read better.
+  // They include 0 (1×) whenever it is in view.
+  const errors = chosen.map(fromLogFactor);
+  if (errors.length < 3) {
+    const linear = linearTicks(min, max, count);
+    if (linear.length > errors.length) return linear;
+  }
+  return errors.sort((a, b) => a - b);
+}
+
+// Each axis scale maps data values to the space positions are linear in.
+const axisScales = {
+  linear: {transform: (n) => n, inverse: (n) => n},
+  log: {transform: Math.log10, inverse: (n) => 10 ** n},
+  factor: {transform: logFactor, inverse: fromLogFactor},
+};
+
+// An axis from data `[min, max]` to positions `[start, end]`. The returned
+// `domain`, `range` and `transform`/`inverse` describe it to the zoom math.
 function numericAxis(
   [min, max],
   [start, end],
-  {log = false, unit = '', count = 5, format = formatTick} = {},
+  {
+    log = false,
+    factor = false,
+    unit = '',
+    count = 5,
+    format = formatTick,
+    values: valuesOf,
+    subformat,
+  } = {},
 ) {
-  log = log && min > 0;
-  const transform = log ? Math.log10 : (n) => n;
+  // A factor axis labels its ticks together (factorLabels); `format` is unused.
+  const scale = factor ? 'factor' : log && min > 0 ? 'log' : 'linear';
+  const {transform, inverse} = axisScales[scale];
   const low = transform(min),
     high = transform(max);
   const position = (value) =>
@@ -107,13 +199,20 @@ function numericAxis(
       ? (start + end) / 2
       : start + ((transform(value) - low) / (high - low)) * (end - start);
   const divisor = unit === 'ns' ? 1e6 : 1;
-  const ticks = axisTicks(min / divisor, max / divisor, count, log).map(
-    (value) => ({
-      label: format(value),
-      position: position(value * divisor),
-    }),
-  );
-  return {position, ticks};
+  // `valuesOf(min, max, count)` replaces the automatic tick values, and
+  // `subformat` adds a second, smaller label line under each tick.
+  const values = valuesOf
+    ? valuesOf(min, max, count)
+    : scale === 'factor'
+      ? factorTicks(min, max, count)
+      : axisTicks(min / divisor, max / divisor, count, scale === 'log');
+  const labels = scale === 'factor' ? factorLabels(values) : values.map((value) => format(value));
+  const ticks = values.map((value, i) => ({
+    label: labels[i],
+    sublabel: subformat?.(value),
+    position: position(value * divisor),
+  }));
+  return {position, ticks, scale, domain: [min, max], range: [start, end], transform, inverse};
 }
 
 // Background bands of the summary curves: the comparisons split by measured
@@ -183,22 +282,79 @@ export function bandLabels({unit, cutoffs}) {
   ];
 }
 
+// Which axes a zoom may change, by chart kind: the S-curve keeps its rank
+// axis and the CDF its fraction axis.
+export const zoomAxes = {
+  curve: ['x', 'y'],
+  scatter: ['x', 'y'],
+  ranked: ['y'],
+  cdf: ['x'],
+};
+
 // Drawing is imperative only inside the supplied canvas; React owns every DOM element.
-export function drawChart(canvas, spec, chartTheme, benchmarks) {
+// `view` overrides each axis's data domain ({x: [min, max], y: [min, max]},
+// either optional); marks outside it are clipped and not hit-testable.
+// `size` ({width, height}) replaces the default layout size, in drawing units
+// of `pixelRatio` canvas pixels. Every result gives that size as `width` and
+// `height`, its `hitPoints`, and its `axes` for the zoom math.
+export function drawChart(
+  canvas,
+  spec,
+  chartTheme,
+  benchmarks,
+  {view = null, size = null, pixelRatio = 2} = {},
+) {
+  // Sizes the canvas and returns its scaled drawing context.
+  function setup(width, height) {
+    canvas.width = Math.round(width * pixelRatio);
+    canvas.height = Math.round(height * pixelRatio);
+    canvas.setAttribute('role', 'img');
+    const ctx = canvas.getContext('2d');
+    ctx.scale(pixelRatio, pixelRatio);
+    return ctx;
+  }
+
+  // Marks reach a little past the frame, so edge points stay whole.
+  const CLIP = 3;
+  function clipTo(ctx, {left, right, top, bottom}) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left - CLIP, top - CLIP, right - left + 2 * CLIP, bottom - top + 2 * CLIP);
+    ctx.clip();
+  }
+  // Only points centered in the frame itself are selectable.
+  const EDGE = 1e-6;
+  const inside = ({left, right, top, bottom}, x, y) =>
+    x >= left - EDGE && x <= right + EDGE && y >= top - EDGE && y <= bottom + EDGE;
+
+  // Default-sized axes get the default tick counts; larger ones more.
+  const tickCount = (length, spacing, minimum) =>
+    Math.max(minimum, Math.round(Math.abs(length) / spacing));
   function drawAxisTicks(ctx, x, y, {left, right, top, bottom}) {
     ctx.strokeStyle = chartTheme.grid;
     ctx.fillStyle = chartTheme.label;
     ctx.textAlign = 'center';
     let lastRight = -Infinity;
     let lastLabel;
-    for (const {position, label} of x.ticks) {
+    for (const {position, label, sublabel} of x.ticks) {
       ctx.beginPath();
       ctx.moveTo(position, top);
       ctx.lineTo(position, bottom);
       ctx.stroke();
-      const half = ctx.measureText(label).width / 2;
+      ctx.save();
+      ctx.font = '9px system-ui';
+      const subWidth = sublabel ? ctx.measureText(sublabel).width : 0;
+      ctx.restore();
+      const half = Math.max(ctx.measureText(label).width, subWidth) / 2;
       if (label === lastLabel || position - half < lastRight + 6) continue;
       ctx.fillText(label, position, bottom + 13);
+      if (sublabel) {
+        ctx.save();
+        ctx.font = '9px system-ui';
+        ctx.globalAlpha = 0.75;
+        ctx.fillText(sublabel, position, bottom + 24);
+        ctx.restore();
+      }
       lastRight = position + half;
       lastLabel = label;
     }
@@ -239,9 +395,9 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
   // curve into one line per value, connecting only rows that share it.
   function drawCurve(rows, curves, xLabel, unit, bounds, scales, xOf, lineOf) {
     const hitPoints = [];
-    canvas.width = 640;
-    canvas.height = bounds ? 318 : 70;
-    canvas.setAttribute('role', 'img');
+    const width = Math.max(320, size?.width ?? 320);
+    const height = bounds ? Math.max(159, size?.height ?? 159) : 35;
+    const ctx = setup(width, height);
     const xScale = scales.x ? 'logarithmic' : 'linear';
     const yScale = scales.y ? 'logarithmic' : 'linear';
     canvas.setAttribute(
@@ -256,16 +412,15 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
             ' Y axis'
         : 'Unavailable results by ' + xLabel,
     );
-    const ctx = canvas.getContext('2d');
-    ctx.scale(2, 2);
-    const frame = {left: 53, right: 305, top: 8, bottom: bounds ? 124 : 8};
+    const frame = {left: 53, right: width - 15, top: 8, bottom: bounds ? height - 35 : 8};
     const {left, right, top, bottom} = frame;
     ctx.font = '10px system-ui';
     ctx.fillStyle = chartTheme.label;
-    const xAxis = numericAxis([xOf(rows[0]), xOf(rows.at(-1))], [left, right], {
-      log: scales.x,
-      count: 6,
-    });
+    const xAxis = numericAxis(
+      view?.x ?? [xOf(rows[0]), xOf(rows.at(-1))],
+      [left, right],
+      {log: scales.x, count: tickCount(right - left, 42, 6)},
+    );
     let yAxis = {ticks: []};
     let yLabel = '';
     if (bounds) {
@@ -276,9 +431,10 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       const span = Math.max(max - min, Math.abs(max) * 0.02) || 0.001;
       min -= span * 0.12;
       max += span * 0.12;
-      yAxis = numericAxis([inverseY(min), inverseY(max)], [bottom, top], {
+      yAxis = numericAxis(view?.y ?? [inverseY(min), inverseY(max)], [bottom, top], {
         log: scales.y,
         unit,
+        count: tickCount(bottom - top, 23, 5),
       });
       yLabel = [displayUnit(unit), scales.y ? 'log' : '']
         .filter(Boolean)
@@ -294,6 +450,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     );
     const x = (index) => xAxis.position(xOf(rows[index]));
     const y = yAxis.position;
+    clipTo(ctx, frame);
 
     // Launch-group percentile bands behind every curve, outermost first in
     // the curve's color, so nested levels darken toward the median. A level
@@ -363,6 +520,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
         const paired = row.launches?.comparisons
           .filter((comparison) => comparison.count > 0)
           .map((comparison) => comparison.id);
+        if (!inside(frame, x(i), y(value))) return;
         hitPoints.push({
           x: x(i),
           y: y(value),
@@ -377,11 +535,19 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
         });
       });
     }
+    ctx.restore();
     return {
-      canvas,
       hitPoints,
-      xPosition: (value) => xAxis.position(value) / (canvas.width / 2),
-      statusPosition: (bounds ? bottom - 4 : bottom) / (canvas.height / 2),
+      width,
+      height,
+      axes: {x: xAxis, y: bounds ? yAxis : null},
+      // The X of a status marker as a fraction of the width, or null when
+      // the view leaves it out.
+      xPosition: (value) => {
+        const px = xAxis.position(value);
+        return px >= left - EDGE && px <= right + EDGE ? px / width : null;
+      },
+      statusPosition: (bounds ? bottom - 4 : bottom) / height,
     };
   }
 
@@ -395,40 +561,52 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     yOptions = {},
     bands = null,
   ) {
-    canvas.width = 640;
-    const legend = bands && bandLegendLayout(canvas, bands);
-    canvas.height = legend ? 372 + 2 * (18 + 13 * legend.rows) : 372;
-    canvas.setAttribute('role', 'img');
+    const width = Math.max(320, size?.width ?? 320);
+    const legend = bands && bandLegendLayout(canvas, bands, width - 14);
+    const legendHeight = legend ? 18 + 13 * legend.rows : 0;
+    const height = Math.max(186 + legendHeight, size?.height ?? 0);
+    const plotHeight = height - legendHeight;
+    const ctx = setup(width, height);
     canvas.setAttribute(
       'aria-label',
       legend
         ? title + '. Hardware time bands: ' + legend.labels.join(', ') + '.'
         : title,
     );
-    const ctx = canvas.getContext('2d');
-    ctx.scale(2, 2);
     ctx.font = '10px system-ui';
-    const frame = {left: 51, right: 306, top: 12, bottom: 143};
-    const {left, right, top, bottom} = frame;
-    const xAxis = numericAxis(xRange, [left, right], {count: 6, ...xOptions});
-    const yAxis = numericAxis(yRange, [bottom, top], yOptions);
+    // A second line of X tick labels takes room from the plot.
+    const top = 12,
+      bottom = plotHeight - (xOptions.subformat ? 53 : 43);
+    const yAxis = numericAxis(view?.y ?? yRange, [bottom, top], {
+      count: tickCount(bottom - top, 26, 5),
+      ...yOptions,
+    });
+    // Room for the widest Y tick label beside the rotated axis title.
+    const widest = Math.max(0, ...yAxis.ticks.map(({label}) => ctx.measureText(label).width));
+    const left = Math.max(51, Math.ceil(widest) + 22);
+    const frame = {left, right: width - 14, top, bottom};
+    const {maxCount = Infinity, ...xRest} = xOptions;
+    const xAxis = numericAxis(view?.x ?? xRange, [left, frame.right], {
+      count: Math.min(maxCount, tickCount(frame.right - left, 42, 6)),
+      ...xRest,
+    });
     const x = xAxis.position;
     const y = yAxis.position;
     drawAxisTicks(ctx, xAxis, yAxis, frame);
-    drawAxisTitles(ctx, xLabel, yLabel, frame, 179);
-    if (legend) drawBandLegend(ctx, legend, 196);
-    return {canvas, ctx, x, y, points: []};
+    drawAxisTitles(ctx, xLabel, yLabel, frame, plotHeight - 7);
+    if (legend) drawBandLegend(ctx, legend, plotHeight + 10);
+    clipTo(ctx, frame);
+    return {ctx, x, y, frame, points: [], width, height, axes: {x: xAxis, y: yAxis}};
   }
 
   // The most legend columns (of 3, 2, 1) whose slots fit every label.
-  function bandLegendLayout(canvas, bands) {
+  function bandLegendLayout(canvas, bands, width) {
     const ctx = canvas.getContext('2d');
     ctx.font = '9px system-ui';
     const labels = bandLabels(bands).map(
       (label, i) => label + (bands.bands[i].length ? '' : ' (none)'),
     );
     const widest = Math.max(...labels.map((label) => ctx.measureText(label).width));
-    const width = 306;
     const columns = [3, 2, 1].find((n) => 16 + widest + 6 <= width / n) ?? 1;
     return {labels, columns, rows: Math.ceil(labels.length / columns), slot: width / columns};
   }
@@ -474,11 +652,20 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
   }
 
   function summaryPoint(chart, x, y, color, description) {
+    const px = chart.x(x),
+      py = chart.y(y);
     chart.ctx.fillStyle = color;
     chart.ctx.beginPath();
-    chart.ctx.arc(chart.x(x), chart.y(y), 1.5, 0, 2 * Math.PI);
+    chart.ctx.arc(px, py, 1.5, 0, 2 * Math.PI);
     chart.ctx.fill();
-    chart.points.push({x: chart.x(x), y: chart.y(y), description});
+    if (inside(chart.frame, px, py)) chart.points.push({x: px, y: py, description});
+  }
+
+  // Ends the clipped plot drawing and gives the chart's result.
+  function finish(chart) {
+    chart.ctx.restore();
+    const {points: hitPoints, width, height, axes} = chart;
+    return {hitPoints, width, height, axes};
   }
 
   function referenceLine(chart, x0, y0, x1, y1) {
@@ -493,22 +680,49 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     ctx.restore();
   }
 
+  // The S-curve's rank axis, ticked at percentiles of all `total` cases
+  // (rank r is 100·(r − 1)/(total − 1)%), each with its case rank below.
+  // A single case has one tick, at its rank 1, labelled 100%.
+  function percentileAxis(total) {
+    const rankAt = (percent) => 1 + (percent / 100) * (total - 1);
+    const percentOf = (rank) => (total > 1 ? (100 * (rank - 1)) / (total - 1) : 100);
+    return {
+      // Quartiles, or 5% steps (which keep them) when the axis has room.
+      values: (min, max, count) => {
+        if (total <= 1) return [1];
+        const step = 100 / 5 + 1 <= count ? 5 : 25;
+        return Array.from({length: 100 / step + 1}, (_, i) => rankAt(i * step));
+      },
+      format: (rank) => percentNumber.format(percentOf(rank)) + '%',
+      subformat: (rank) => Math.round(rank).toLocaleString('en-US'),
+    };
+  }
+
   // A sampled chart's pairs carry their `rank` among `total` comparisons.
-  function rankedErrors(pairs, colors, total = pairs.length, bandSource = pairs) {
+  // With `factor`, the error axis is the signed log factor (sim / hw).
+  function rankedErrors(pairs, colors, total = pairs.length, bandSource = pairs, factor = false) {
     const ranked = [...pairs].sort((a, b) => a.signedError - b.signedError);
     const end = Math.max(2, total);
-    const minimum = Math.min(0, ranked[0].signedError);
-    const maximum = Math.max(0, ranked[ranked.length - 1].signedError);
-    const margin = Math.max(0.2, (maximum - minimum) * 0.06);
+    // Margins are a share of the axis in its own (transformed) space.
+    const {transform, inverse} = axisScales[factor ? 'factor' : 'linear'];
+    const minimum = transform(Math.min(0, ranked[0].signedError));
+    const maximum = transform(Math.max(0, ranked[ranked.length - 1].signedError));
+    const margin = Math.max(factor ? 0.001 : 0.2, (maximum - minimum) * 0.06);
     const bands = timeBands(pairs, bandSource);
     const chart = summaryAxes(
-      'S-curve of signed relative error',
-      'Case rank',
-      'Signed error (%)',
+      'S-curve of signed relative error' + (factor ? ', log-factor Y axis' : ''),
+      'Percentile of cases (case count below)',
+      factor ? 'Sim / hardware (log)' : 'Signed error (%)',
       [1, end],
-      [minimum - margin, maximum + margin],
-      {count: Math.min(6, end)},
-      {format: (n) => (n > 0 ? '+' : '') + formatTick(n) + '%'},
+      // An extreme log factor's padded end may overflow: keep it unpadded.
+      [inverse(minimum - margin), inverse(maximum + margin)].map((end, i) =>
+        Number.isFinite(end) ? end : inverse(i ? maximum : minimum),
+      ),
+      // Ticks count real cases; `end` only pads a single case's axis.
+      percentileAxis(total),
+      factor
+        ? {factor: true}
+        : {format: (n) => (n > 0 ? '+' : '') + formatTick(n) + '%'},
       bands,
     );
     referenceLine(chart, 1, 0, end, 0);
@@ -535,7 +749,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
         pairDescription(pair, {'Case rank': rank.toLocaleString('en-US')}),
       );
     });
-    return {hitPoints: chart.points};
+    return finish(chart);
   }
 
   function absoluteErrorCDF(pairs, total = pairs.length, preferLog, bandSource = pairs) {
@@ -544,11 +758,16 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     );
     const errors = ranked.map((pair) => Math.abs(pair.signedError));
     const log = preferLog ?? preferLogScale(errors);
-    const left = log ? 10 ** Math.floor(Math.log10(errors[0])) : 0;
+    // A log axis starts at the decade of the smallest nonzero error; exact
+    // matches sit at its left edge.
+    const smallest = errors.find((error) => error > 0) ?? 1;
+    const left = log ? 10 ** Math.floor(Math.log10(smallest)) : 0;
     const maximum = errors.at(-1);
-    const right = log
-      ? 10 ** (Math.ceil(Math.log10(maximum)) + 0.1)
+    const padded = log
+      ? 10 ** (Math.ceil(Math.log10(Math.max(maximum, smallest))) + 0.1)
       : maximum * 1.04 || 1;
+    // Padding an extreme error may overflow: keep the axis at the error.
+    const right = Number.isFinite(padded) ? padded : maximum;
     const bands = timeBands(pairs, bandSource);
     const chart = summaryAxes(
       'Absolute error cumulative distribution',
@@ -581,10 +800,11 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     ctx.moveTo(x(left), y(0));
     let fraction = 0;
     for (let i = 0; i < errors.length; i++) {
-      const px = x(errors[i]);
+      const px = x(Math.max(left, errors[i]));
       ctx.lineTo(px, y(fraction));
       fraction = (ranked[i].rank ?? i + 1) / total;
       ctx.lineTo(px, y(fraction));
+      if (!inside(chart.frame, px, y(fraction))) continue;
       chart.points.push({
         x: px,
         y: y(fraction),
@@ -596,7 +816,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     }
     ctx.lineTo(x(right), y(1));
     ctx.stroke();
-    return {hitPoints: chart.points};
+    return finish(chart);
   }
 
   function comparisonScatter(pairs, unit, colors, log) {
@@ -637,7 +857,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
         pairDescription(pair),
       );
     }
-    return {hitPoints: chart.points};
+    return finish(chart);
   }
 
   if (spec.kind === 'curve')
@@ -652,7 +872,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       spec.lineOf,
     );
   if (spec.kind === 'ranked')
-    return rankedErrors(spec.pairs, spec.colors, spec.total, spec.bands);
+    return rankedErrors(spec.pairs, spec.colors, spec.total, spec.bands, spec.factor);
   if (spec.kind === 'cdf')
     return absoluteErrorCDF(spec.pairs, spec.total, spec.log, spec.bands);
   return comparisonScatter(spec.pairs, spec.unit, spec.colors, spec.log);
