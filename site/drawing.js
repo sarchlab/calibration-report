@@ -234,7 +234,10 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     ctx.restore();
   }
 
-  function drawCurve(rows, curves, xLabel, unit, bounds, scales) {
+  // `xOf` gives a row's X (its x unless a launch-ordinal chart says
+  // otherwise; rows are sorted by it); `lineOf`, when given, splits each
+  // curve into one line per value, connecting only rows that share it.
+  function drawCurve(rows, curves, xLabel, unit, bounds, scales, xOf, lineOf) {
     const hitPoints = [];
     canvas.width = 640;
     canvas.height = bounds ? 318 : 70;
@@ -259,7 +262,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     const {left, right, top, bottom} = frame;
     ctx.font = '10px system-ui';
     ctx.fillStyle = chartTheme.label;
-    const xAxis = numericAxis([rows[0].x, rows.at(-1).x], [left, right], {
+    const xAxis = numericAxis([xOf(rows[0]), xOf(rows.at(-1))], [left, right], {
       log: scales.x,
       count: 6,
     });
@@ -289,7 +292,7 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       frame,
       bottom + (bounds ? 29 : 25),
     );
-    const x = (index) => xAxis.position(rows[index].x);
+    const x = (index) => xAxis.position(xOf(rows[index]));
     const y = yAxis.position;
 
     // Launch-group percentile bands behind every curve, outermost first in
@@ -331,18 +334,23 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
     for (const curve of curves) {
       ctx.strokeStyle = ctx.fillStyle = curve.color;
       ctx.lineWidth = 1.65;
-      let drawing = false;
       ctx.beginPath();
-      rows.forEach((row, i) => {
-        const value = row.values[curve.id];
-        if (!Number.isFinite(value)) {
-          drawing = false;
-          return;
+      const lines = lineOf
+        ? Map.groupBy(rows.keys(), (i) => lineOf(rows[i])).values()
+        : [rows.keys()];
+      for (const line of lines) {
+        let drawing = false;
+        for (const i of line) {
+          const value = rows[i].values[curve.id];
+          if (!Number.isFinite(value)) {
+            drawing = false;
+            continue;
+          }
+          if (drawing) ctx.lineTo(x(i), y(value));
+          else ctx.moveTo(x(i), y(value));
+          drawing = true;
         }
-        if (drawing) ctx.lineTo(x(i), y(value));
-        else ctx.moveTo(x(i), y(value));
-        drawing = true;
-      });
+      }
       ctx.stroke();
       rows.forEach((row, i) => {
         const value = row.values[curve.id];
@@ -640,6 +648,8 @@ export function drawChart(canvas, spec, chartTheme, benchmarks) {
       spec.unit,
       spec.bounds,
       spec.scales,
+      spec.xOf ?? ((row) => row.x),
+      spec.lineOf,
     );
   if (spec.kind === 'ranked')
     return rankedErrors(spec.pairs, spec.colors, spec.total, spec.bands);

@@ -11,6 +11,7 @@ import {
   isMarked,
   launchGroupRows,
   parameterLabel,
+  parseLaunch,
   preferLogScale,
   rankingStats,
   relabelPairs,
@@ -138,7 +139,7 @@ export function PlotCanvas({spec, theme, summary = false}) {
   // status shared by several dispatches is listed once with its count.
   const markers = drawing?.xPosition
     ? Array.from(
-        Map.groupBy(sourceRows, (row) => row.x),
+        Map.groupBy(sourceRows, spec.xOf ?? ((row) => row.x)),
         ([x, rows]) => {
           const marked = rows.flatMap((row) =>
             spec.series
@@ -314,6 +315,7 @@ function CurvePlot({
   plotKey,
   rows,
   dispatches,
+  launchOrdinal,
   curves,
   series,
   xLabel,
@@ -333,17 +335,27 @@ function CurvePlot({
       )
       .filter(Number.isFinite);
     const bounds = valueBounds(measures);
-    const canLog = {x: rows[0].x > 0, y: bounds !== null && bounds.min > 0};
+    // A launch-ordinal chart is drawn over the launch ordinal, linear by
+    // default, with one line per kernel.
+    const ordinal = launchOrdinal
+      ? {
+          xOf: (row) => parseLaunch(row.non_scaling_params).ordinal,
+          lineOf: (row) => parseLaunch(row.non_scaling_params).kernel,
+        }
+      : {};
+    const xOf = ordinal.xOf ?? ((row) => row.x);
+    const canLog = {x: xOf(rows[0]) > 0, y: bounds !== null && bounds.min > 0};
     const scales = {
       x:
         canLog.x &&
-        (preferences?.x ?? preferLogScale(rows.map((row) => row.x))),
+        (preferences?.x ?? (!launchOrdinal && preferLogScale(rows.map(xOf)))),
       y: canLog.y && (preferences?.y ?? preferLogScale(measures)),
     };
     return {
       kind: 'curve',
       rows,
       dispatches,
+      ...ordinal,
       curves,
       series,
       xLabel,
@@ -352,7 +364,7 @@ function CurvePlot({
       scales,
       canLog,
     };
-  }, [rows, dispatches, curves, series, xLabel, unit, preferences]);
+  }, [rows, dispatches, launchOrdinal, curves, series, xLabel, unit, preferences]);
   return (
     <div className="plot">
       <div className="scale-controls" role="group" aria-label="Axis scales">
@@ -385,6 +397,16 @@ function CurvePlot({
       <PlotCanvas spec={spec} theme={theme} />
     </div>
   );
+}
+// The heading of a launch-ordinal chart: its parameters without `launch`,
+// then the scaling parameter at the chart's x.
+function ordinalLabel(row, meta, order = Object.keys(row.non_scaling_params)) {
+  const {launch: _launch, ...rest} = row.non_scaling_params;
+  const scaling = meta.scaling_param;
+  return parameterLabel({...rest, [scaling]: row.x}, meta.params, [
+    ...order.filter((key) => key !== scaling),
+    scaling,
+  ]);
 }
 // `series` is every series of the benchmark (file source). With `paged`
 // (API source), `series` is only the current page of `count` series, `wide`
@@ -434,16 +456,26 @@ export function Benchmark({
         parameters,
         rows,
         pairs: groupPairs = comparisonPairs(rows, {[id]: meta}),
+        launchOrdinal = false,
       }) => {
-        const group = [...rows].sort((a, b) => a.x - b.x);
+        const group = launchOrdinal
+          ? [...rows].sort(
+              (a, b) =>
+                parseLaunch(a.non_scaling_params).ordinal -
+                parseLaunch(b.non_scaling_params).ordinal,
+            )
+          : [...rows].sort((a, b) => a.x - b.x);
         const grouped = isLaunchGroup(group[0].non_scaling_params);
         return {
           parameters,
-          label: parameterLabel(
-            chartParams(group[0].non_scaling_params),
-            meta.params,
-            parameterOrder,
-          ),
+          launchOrdinal,
+          label: launchOrdinal
+            ? ordinalLabel(group[0], meta, parameterOrder)
+            : parameterLabel(
+                chartParams(group[0].non_scaling_params),
+                meta.params,
+                parameterOrder,
+              ),
           plots: Array.from(units, ([unit, comparable]) => {
             const plotted = group.filter((row) =>
               comparable.some(
@@ -513,9 +545,10 @@ export function Benchmark({
                   plotKey={plot.key}
                   rows={plot.rows}
                   dispatches={plot.dispatches}
+                  launchOrdinal={group.launchOrdinal}
                   curves={plot.active}
                   series={plot.comparable}
-                  xLabel={xLabel}
+                  xLabel={group.launchOrdinal ? 'launch' : xLabel}
                   unit={plot.unit}
                   theme={theme}
                   preferences={preferences.get(plot.key)}

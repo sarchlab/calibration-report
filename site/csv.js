@@ -115,9 +115,12 @@ export async function runCsv(manifest, fetchPage, {onProgress, signal} = {}) {
   async function exportTask(task, chunks) {
     // The greatest x emitted per plot: rows arrive in x order, so a plot that
     // a shifted window returns again yields only rows beyond it. Progress
-    // counts charts, as the manifest does.
+    // counts charts, as the manifest does. A launch-ordinal benchmark splits
+    // each plot across charts (one per x) in chart order, so its rows are
+    // kept once per (plot, x) and written in plot and x order at the end.
     const emitted = new Map();
     const charts = new Set();
+    const ordinal = new Map();
     let counted = 0;
     for (let offset = 0, total = task.count; offset < total; offset += PLOTS_PER_PAGE) {
       let after = null;
@@ -138,6 +141,11 @@ export async function runCsv(manifest, fetchPage, {onProgress, signal} = {}) {
         total = body.total;
         const points = body.plots.flatMap((plot) => {
           charts.add(plot.chart);
+          if (body.launch_ordinal) {
+            for (const row of plot.rows)
+              ordinal.set(JSON.stringify([plot.id, row.x]), [plot.id, row]);
+            return [];
+          }
           const last = emitted.get(plot.id) ?? -Infinity;
           const fresh = plot.rows.filter((row) => row.x > last);
           emitted.set(plot.id, fresh.length ? fresh.at(-1).x : last);
@@ -150,6 +158,12 @@ export async function runCsv(manifest, fetchPage, {onProgress, signal} = {}) {
       done += charts.size - counted;
       counted = charts.size;
       onProgress?.({plots: Math.min(done, plots), of: plots});
+    }
+    if (ordinal.size) {
+      const sorted = [...ordinal.values()].sort(([a, r], [b, s]) => a - b || r.x - s.x);
+      const points = sorted.map(([, row]) => row);
+      chunks.push(csvRows(columns, manifest, points));
+      rows += points.length;
     }
   }
   let next = 0;

@@ -104,7 +104,7 @@ describe('runCsv', () => {
       queries.push(query);
       const {group, benchmark} = Object.fromEntries(q);
       expect(q.get('rid')).toBe('7');
-      expect(q.get('format')).toBe('2');
+      expect(q.get('format')).toBe('3');
       if (group === 'a' && benchmark === 'gemm') {
         // Plot 1 continues in a second chunk.
         if (!q.get('after'))
@@ -186,6 +186,36 @@ describe('runCsv', () => {
     );
     expect(rows).toBe(6);
     expect(progress).toEqual([{plots: 1, of: 1}]);
+  });
+
+  it('writes launch-ordinal rows once, in plot and x order, across charts and pages', async () => {
+    const one = {...manifest, group_order: ['a'], plots: {a: [[0, 3]]}};
+    // Charts are one x each, ordered by first point, here x = 4, 2, then 1;
+    // plots 1 and 2 span all three, and plot 2's row at x = 2 comes again
+    // when a window shifts.
+    const chart = (x, ids) => ids.map((id) => ({id, chart: 10 * x, rows: [point('a', 'gemm', id, x)]}));
+    const progress = [];
+    const {chunks, rows} = await runCsv(
+      {...one},
+      async (query) => {
+        const offset = Number(new URLSearchParams(query).get('offset'));
+        expect(offset).toBe(0);
+        return {
+          revision: 3,
+          total: 3,
+          launch_ordinal: true,
+          plots: [...chart(4, [1, 2, 3]), ...chart(2, [1, 2]), ...chart(2, [2]), ...chart(1, [1, 2])],
+          next: null,
+        };
+      },
+      {onProgress: (p) => progress.push(p)},
+    );
+    const lines = chunks.join('').split('\r\n').slice(1, -1);
+    expect(lines.map((line) => line.split(',').slice(3, 5).join(':'))).toEqual([
+      '1:1', '2:1', '4:1', '1:2', '2:2', '4:2', '4:3',
+    ]);
+    expect(rows).toBe(7);
+    expect(progress).toEqual([{plots: 3, of: 3}]);
   });
 
   it('exports only the header for a run without visible plots', async () => {

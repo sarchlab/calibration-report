@@ -307,7 +307,8 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
     const loading = wanted.current;
     start(
       async (signal) => {
-        // One series per chart: a launch-group chart gathers its plots. All
+        // One series per chart: a launch-group chart gathers its plots, and
+        // a launch-ordinal chart gathers its plots' rows at one x. All
         // chunks of a page must come from one revision, or a write between
         // them could split a chart; a mixed page is read again.
         for (let attempt = 0; attempt < PAGE_ATTEMPTS; attempt++) {
@@ -327,7 +328,12 @@ function usePlotPage(runKey, manifest, group, benchmark, window, onReplaced) {
             }
             for (const plot of body.plots) {
               if (!charts.has(plot.chart))
-                charts.set(plot.chart, {parameters: String(plot.chart), rows: []});
+                charts.set(
+                  plot.chart,
+                  body.launch_ordinal
+                    ? {parameters: String(plot.chart), rows: [], launchOrdinal: true}
+                    : {parameters: String(plot.chart), rows: []},
+                );
               charts.get(plot.chart).rows.push(...plot.rows);
             }
             after = body.next;
