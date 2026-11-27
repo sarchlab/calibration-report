@@ -1,6 +1,6 @@
 import {MantineProvider} from '@mantine/core';
-import {fireEvent, render, screen, within} from '@testing-library/react';
-import {describe, expect, test} from 'vitest';
+import {act, fireEvent, render, screen, within} from '@testing-library/react';
+import {describe, expect, test, vi} from 'vitest';
 import {Report} from '../site/App.jsx';
 import {nearestPoint} from '../site/Charts.jsx';
 import {
@@ -603,6 +603,41 @@ describe('overlay', () => {
       tap(canvas, 300, 30);
       tap(canvas, 300, 30);
       expect(reset().disabled).toBe(true);
+    });
+
+    test('on a zoomed chart a tap selects after the double-tap window', () => {
+      vi.useFakeTimers();
+      const canvas = scatterOverlay();
+      const [x, y] = firstPoint(canvas);
+      // Zooming around the point keeps it under the finger.
+      fireEvent.wheel(canvas, {deltaY: -100, clientX: x, clientY: y});
+      expect(reset().disabled).toBe(false);
+      tap(canvas, x, y);
+      expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+      act(() => vi.advanceTimersByTime(350));
+      expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
+      expect(reset().disabled).toBe(false);
+    });
+
+    test('a zoomed double tap resets and never opens details', () => {
+      vi.useFakeTimers();
+      const canvas = scatterOverlay();
+      const [x, y] = firstPoint(canvas);
+      fireEvent.wheel(canvas, {deltaY: -100, clientX: x, clientY: y});
+      tap(canvas, x, y);
+      expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+      tap(canvas, x, y);
+      expect(reset().disabled).toBe(true);
+      act(() => vi.advanceTimersByTime(1000));
+      expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+    });
+
+    test('an unzoomed tap selects at once', () => {
+      vi.useFakeTimers();
+      const canvas = scatterOverlay();
+      const [x, y] = firstPoint(canvas);
+      tap(canvas, x, y);
+      expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
     });
   });
 });

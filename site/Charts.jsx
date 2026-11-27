@@ -156,6 +156,8 @@ function ChartFrame({spec, theme, title, controls = null, legend = null, summary
     </>
   );
 }
+// Two taps this close in time (ms) make a double tap.
+const DOUBLE_TAP_MS = 350;
 // Overlay drawing units are this many CSS pixels, so its text reads at a
 // comfortable size on a window-sized chart.
 const OVERLAY_TEXT_SCALE = 1.25;
@@ -302,6 +304,15 @@ export function PlotCanvas({
   const gesture = useRef({pointers: new Map(), start: null});
   const dragged = useRef(false);
   const lastTap = useRef(null);
+  // A touch tap on a zoomed chart waits out the double-tap window before
+  // selecting, so the details panel cannot cover the chart before a second
+  // tap. A view change or unmount drops it.
+  const pendingTap = useRef(null);
+  const cancelTap = () => {
+    clearTimeout(pendingTap.current);
+    pendingTap.current = null;
+  };
+  useEffect(() => cancelTap, [view]);
   const beginGesture = () => {
     const {pointers} = gesture.current;
     const {drawing, view} = latest.current;
@@ -496,13 +507,20 @@ export function PlotCanvas({
               pointer.current = undefined;
               return;
             }
-            if (zoomable && (event.nativeEvent.pointerType || pointer.current) === 'touch') {
+            const touchTap =
+              zoomable && (event.nativeEvent.pointerType || pointer.current) === 'touch';
+            if (touchTap) {
               const tap = {time: event.timeStamp, x: event.clientX, y: event.clientY};
               const last = lastTap.current;
               lastTap.current = tap;
-              if (last && tap.time - last.time < 350 && Math.hypot(tap.x - last.x, tap.y - last.y) < 30) {
+              if (
+                last &&
+                tap.time - last.time < DOUBLE_TAP_MS &&
+                Math.hypot(tap.x - last.x, tap.y - last.y) < 30
+              ) {
                 lastTap.current = null;
                 pointer.current = undefined;
+                cancelTap();
                 if (view) onViewChange(null);
                 return;
               }
@@ -519,8 +537,17 @@ export function PlotCanvas({
               drawnSize,
             );
             pointer.current = undefined;
-            if (index < 0 || (pinned && selection.index === index)) close();
-            else select(plot, index);
+            const apply = () => {
+              if (index < 0 || (pinned && selection.index === index)) close();
+              else select(plot, index);
+            };
+            cancelTap();
+            if (touchTap && view)
+              pendingTap.current = setTimeout(() => {
+                pendingTap.current = null;
+                apply();
+              }, DOUBLE_TAP_MS);
+            else apply();
           }}
           onKeyDown={(event) => {
             if (!points.length) return;
