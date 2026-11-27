@@ -17,6 +17,9 @@ const PAGE_ROWS = 20000;
 // this many points beyond its budget.
 const PAGE_BATCH = 256;
 const SUMMARY_MAX_BYTES = 2 * 1024 * 1024;
+// Total serialized pages of one scope's pairs (§5 Pairs); a larger scope
+// keeps its sampled charts. `PAIRS_MAX_BYTES` in the environment lowers it.
+const PAIRS_MAX_BYTES = 64 * 1024 * 1024;
 const encoder = new TextEncoder();
 const MAX_PLOTS_PER_PAGE = 48;
 // The chart of a plot: chartParams (site/model.js) in SQL. Plots whose
@@ -620,8 +623,9 @@ const byteLength = (value) => encoder.encode(JSON.stringify(value)).length;
 // self-contained: `envelope`, the comparison tables, `offset` (index of its
 // first comparison), `next` (the next page's offset or null), and the
 // `samples` columns of its comparisons with the `plots` they name. There is
-// always at least one page. Exported for tests, which pass a small `limit`.
-export function pairPages(body, envelope, limit = PAGE_BYTES) {
+// always at least one page. Returns null as soon as the pages exceed `total`
+// bytes in all. Exported for tests, which pass small budgets.
+export function pairPages(body, envelope, limit = PAGE_BYTES, total = PAIRS_MAX_BYTES) {
   const {plots, samples, ...tables} = body;
   const empty = () => ({plot: [], x: [], pair: [], actual: [], prediction: []});
   // Sized with the longest offset and next.
@@ -641,8 +645,10 @@ export function pairPages(body, envelope, limit = PAGE_BYTES) {
   }
   const pages = [];
   let page = null,
-    bytes = 0;
+    bytes = 0,
+    done = 0; // bytes of the pages before `page`
   const start = (offset) => {
+    done += bytes;
     page = {...envelope, ...tables, offset, next: null, plots: {}, samples: empty()};
     pages.push(page);
     bytes = base;
@@ -662,13 +668,14 @@ export function pairPages(body, envelope, limit = PAGE_BYTES) {
     if (!(plot in page.plots)) page.plots[plot] = plots[plot];
     for (const column of columns) page.samples[column].push(samples[column][i]);
     bytes += size;
+    if (done + bytes > total) return null;
   }
-  return pages;
+  return done + bytes > total ? null : pages;
 }
 
 // Every comparison of one canonical scope, paged; null when `requested` no
 // longer resolves to `scope`.
-async function computePairs(pool, key, rid, requested, scope, computedAt, interval) {
+async function computePairs(pool, key, rid, requested, scope, computedAt, interval, maxBytes) {
   return read(
     pool,
     async (client) => {
@@ -686,7 +693,10 @@ async function computePairs(pool, key, rid, requested, scope, computedAt, interv
         computed_at: computedAt,
         min_interval: interval,
       };
-      return {...envelope, pages: pairPages(body, envelope)};
+      // Over the total budget, a small record says so, so that later
+      // requests answer 413 from the cache without recomputing.
+      const pages = pairPages(body, envelope, PAGE_BYTES, maxBytes);
+      return pages ? {...envelope, pages} : {...envelope, too_large: true, pages: []};
     },
     'REPEATABLE READ',
   );
@@ -836,7 +846,16 @@ async function pairsResponse(pool, store, key, query, env, now) {
       now,
       blobKey,
       compute: (scope, computedAt) =>
-        computePairs(pool, key, rid, requested, scope, computedAt, interval),
+        computePairs(
+          pool,
+          key,
+          rid,
+          requested,
+          scope,
+          computedAt,
+          interval,
+          Number(env.PAIRS_MAX_BYTES ?? PAIRS_MAX_BYTES),
+        ),
     });
   } else {
     if (!/^\d+$/.test(revision)) throw new HttpError(400, 'Invalid revision');
@@ -845,6 +864,8 @@ async function pairsResponse(pool, store, key, query, env, now) {
       throw new HttpError(503, 'The run changed; start over');
     value = entry.data;
   }
+  if (value.too_large)
+    throw new HttpError(413, 'Full data too large; the summary keeps its sample');
   const page = value.pages.find((candidate) => candidate.offset === offset);
   if (!page) throw new HttpError(400, 'Invalid offset');
   return json(page, {immutable: page.state === 'completed'});

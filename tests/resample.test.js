@@ -53,6 +53,10 @@ describe('pairs pages', () => {
       expect(page.next).toBe(offset === body.count ? null : offset);
     }
     expect(pages.flatMap((page) => decodeSamples(page).pairs)).toEqual(decodeSamples(body).pairs);
+    // Over the total budget there are no pages at all.
+    const sum = pages.reduce((n, page) => n + new TextEncoder().encode(JSON.stringify(page)).length, 0);
+    expect(pairPages(body, envelope, limit, sum + 200)).not.toBeNull();
+    expect(pairPages(body, envelope, limit, sum / 2)).toBeNull();
     // A scope that fits, or has no comparisons, is one page.
     expect(pairPages(body, envelope)).toHaveLength(1);
     const empty = pairPages(buildPairs({...input(0)}), envelope);

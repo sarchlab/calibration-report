@@ -206,10 +206,13 @@ function stubApi(state) {
           groups: scoped,
           overview: scope === 'overview',
         }),
-        {rid: 7, key: 'demo', scope, revision: state.pairsRevision ?? state.revision, state: 'running'},
+        // `pairsRevisions` answers successive first pages at these revisions.
+        {rid: 7, key: 'demo', scope, revision: (query.get('revision') ?? state.pairsRevisions?.shift()) ?? state.pairsRevision ?? state.revision, state: 'running'},
         state.pairsLimit,
       );
       body = pages.find((page) => page.offset === Number(query.get('offset') ?? 0));
+      if (state.pairsTooLarge)
+        return {ok: false, status: 413, json: async () => ({error: 'Full data too large; the summary keeps its sample'})};
     }
     else if (path.includes('/plots') && state.launchOrdinal) body = ordinalPage(query.get('group'));
     else if (path.includes('/plots')) {
@@ -1047,5 +1050,35 @@ describe('expanded summary charts across revisions and selections', () => {
       expect(within(screen.getByRole('dialog')).queryByRole('group', {name: 'Point details'})).toBeNull(),
     );
     expect(lastPoint(canvas).textContent).toContain('12 / 12');
+  });
+
+  test('pairs trailing the summary are reloaded while zoomed until they match', async () => {
+    vi.useFakeTimers({shouldAdvanceTime: true});
+    // The first answer trails the summary (revision 2) at revision 1.
+    const state = {revision: 2, computedAt: new Date().toISOString(), limits, pairsRevisions: [1]};
+    const calls = stubApi(state);
+    testMount(<HostedReport runKey="demo" />);
+    const canvas = await overlay('S-curve');
+    zoomIn(canvas);
+    await advance(1);
+    expect(pairsCalls(calls)).toHaveLength(1);
+    expect(lastPoint(canvas).textContent).toContain('2 / 2');
+    await advance(3);
+    expect(pairsCalls(calls)).toHaveLength(2);
+    expect(lastPoint(canvas).textContent).toContain('12 / 12');
+    // Matching data stops the retries.
+    await advance(20);
+    expect(pairsCalls(calls)).toHaveLength(2);
+    vi.useRealTimers();
+  });
+
+  test('a scope too large for full data keeps the sample and says so', async () => {
+    const calls = stubApi({revision: 1, computedAt: new Date().toISOString(), limits, pairsTooLarge: true});
+    testMount(<HostedReport runKey="demo" />);
+    const canvas = await overlay('S-curve');
+    zoomIn(canvas);
+    expect(await screen.findByText('Full data too large; showing the sample')).toBeTruthy();
+    expect(pairsCalls(calls)).toHaveLength(1);
+    expect(lastPoint(canvas).textContent).toContain('2 / 2');
   });
 });

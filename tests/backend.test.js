@@ -564,6 +564,23 @@ describe.skipIf(!dsn)('hosted backend', () => {
       expect(unknown.status).toBe(400);
     });
 
+    it('answers 413 for a scope over the pairs budget, from the cache afterwards', async () => {
+      const scope = 'group:' + manifest.group_ids.b;
+      const small = memoryStore();
+      const path = `/synthetic/pairs?rid=${manifest.id}&scope=${scope}&format=${PAIRS_FORMAT}`;
+      const tight = {store: small, env: {PAIRS_MAX_BYTES: '5000'}};
+      const first = await api(path, tight);
+      expect(first.status).toBe(413);
+      expect(first.body.error).toMatch(/too large/);
+      const entry = small.entries.get(`v1/pairs${PAIRS_FORMAT}/${manifest.id}/${scope}`);
+      expect(entry.data).toMatchObject({too_large: true, pages: []});
+      expect(entry.metadata.state).toBe('completed');
+      const broken = {connect: () => Promise.reject(new Error('no database'))};
+      expect((await api(path, {...tight, pool: broken})).status).toBe(413);
+      // The default budget fits it.
+      expect((await api(path, {store: memoryStore()})).status).toBe(200);
+    });
+
     it('rejects malformed paths', async () => {
       const response = await handleApi(new Request('http://localhost/api/v1/runs/%E0%A4%A'), {pool, store});
       expect(response.status).toBe(400);

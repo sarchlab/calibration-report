@@ -195,7 +195,10 @@ const scaleKey = (spec) => JSON.stringify([spec.scales, spec.log, spec.factor]);
 const fullStatus = {
   loading: 'Loading full data…',
   failed: 'Full data unavailable; showing the sample',
+  tooLarge: 'Full data too large; showing the sample',
 };
+// Reloads of pairs older than the summary while zoomed, and their delays.
+const STALE_PAIRS_RETRIES = [2000, 4000, 8000];
 // A summary chart drawn from a sample can pass `fullData`: `load()` resolves
 // to every comparison of the scope (fullCharts in site/resample.js),
 // `revision` is the revision of the summary drawn, and `specFor(full, view)`
@@ -221,22 +224,46 @@ function ChartOverlay({spec, theme, controls, legend, fullData, onClose}) {
   const fullState = fullData && full.load === fullData.load ? full : null;
   const started = useRef(null);
   const zoomed = view !== null;
-  useEffect(() => {
-    if (!zoomed || !fullData || fullState) return;
-    const {load} = fullData;
-    started.current = load;
-    setFull({load, status: 'loading', data: null});
+  // Runs `load` (attempt `retry`, 0 first) unless superseded meanwhile.
+  const run = useCallback((load, retry) => {
+    const token = {};
+    started.current = token;
+    setFull((current) => ({load, status: 'loading', data: current.load === load ? current.data : null, retry}));
     load().then(
       // A zoomed canvas whose drawn pairs change drops its own details
       // (PlotCanvas); nothing else is closed.
       (data) => {
-        if (started.current === load) setFull({load, status: 'loaded', data});
+        if (started.current === token) setFull({load, status: 'loaded', data, retry});
       },
-      () => {
-        if (started.current === load) setFull({load, status: 'failed', data: null});
+      (error) => {
+        if (started.current === token)
+          setFull({load, status: error?.status === 413 ? 'tooLarge' : 'failed', data: null, retry});
       },
     );
-  }, [zoomed, fullData, fullState]);
+  }, []);
+  useEffect(() => {
+    if (zoomed && fullData && !fullState) run(fullData.load, 0);
+  }, [zoomed, fullData, fullState, run]);
+  // Pairs older than the summary (the server's record trails it) are
+  // reloaded a few times while the overlay stays zoomed on this summary.
+  const stale =
+    zoomed &&
+    fullState?.status === 'loaded' &&
+    fullState.data.revision < fullData.revision &&
+    fullState.retry < STALE_PAIRS_RETRIES.length;
+  useEffect(() => {
+    if (!stale) return;
+    const {load, retry} = fullState;
+    const timer = setTimeout(() => run(load, retry + 1), STALE_PAIRS_RETRIES[retry]);
+    return () => clearTimeout(timer);
+  }, [stale, fullState, run]);
+  // Leaving the overlay or the summary supersedes any request.
+  useEffect(
+    () => () => {
+      started.current = null;
+    },
+    [],
+  );
   const changeView = useCallback(
     (next) => {
       close();

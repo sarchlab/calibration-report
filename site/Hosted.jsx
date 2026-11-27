@@ -63,8 +63,9 @@ async function fetchPairs(runKey, rid, scope) {
 }
 
 // `loadPairs` for the summary shown (Summary): loads its scope's pairs at
-// most once per run id, revision and scope, keeping only the latest load;
-// a failed load is forgotten so a later gesture retries.
+// most once per run id, revision and scope, keeping only the latest load.
+// A failed load, or pairs older than the summary (the server's record
+// trailing it), is forgotten, so a later call loads again.
 function usePairsLoader(runKey, summary) {
   const latest = useRef(null);
   const rid = summary?.rid;
@@ -78,9 +79,10 @@ function usePairsLoader(runKey, summary) {
         const promise = fetchPairs(runKey, rid, scope);
         const entry = {id, promise};
         latest.current = entry;
-        promise.catch(() => {
+        const forget = () => {
           if (latest.current === entry) latest.current = null;
-        });
+        };
+        promise.then((full) => full.revision < revision && forget(), forget);
       }
       return latest.current.promise;
     };
