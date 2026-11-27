@@ -137,6 +137,34 @@ describe('log-factor axis', () => {
   });
 });
 
+describe('S-curve percentile axis', () => {
+  const ranked = (options) =>
+    drawChart(
+      document.createElement('canvas'),
+      {kind: 'ranked', pairs, colors, total: 2861},
+      theme,
+      benchmarks,
+      options,
+    ).axes.x;
+
+  test('ticks at quartiles of the full total, with the case rank below', () => {
+    const x = ranked();
+    expect(x.ticks.map((tick) => tick.label)).toEqual(['0%', '25%', '50%', '75%', '100%']);
+    // Rank r of N is 100·(r − 1)/(N − 1)%: a sample of 12 still counts 2,861.
+    expect(x.ticks.map((tick) => tick.sublabel)).toEqual(['1', '716', '1,431', '2,146', '2,861']);
+    expect(x.ticks[0].position).toBeCloseTo(x.position(1));
+    expect(x.ticks[2].position).toBeCloseTo(x.position(1431));
+    expect(x.ticks[4].position).toBeCloseTo(x.position(2861));
+  });
+
+  test('a wide overlay ticks every 5%, keeping the quartiles', () => {
+    const x = ranked({size: {width: 1200, height: 500}});
+    const labels = x.ticks.map((tick) => tick.label);
+    expect(labels).toHaveLength(21);
+    expect(labels).toEqual(expect.arrayContaining(['5%', '25%', '75%', '95%']));
+  });
+});
+
 describe('zoom math', () => {
   const linear = {
     domain: [0, 100],
@@ -639,5 +667,45 @@ describe('overlay', () => {
       tap(canvas, x, y);
       expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
     });
+  });
+});
+
+describe('CDF log toggle', () => {
+  const withErrors = (errors) =>
+    rows.map((row, i) => ({
+      ...row,
+      values: {hw: row.values.hw, sim: row.values.hw * (1 + errors[i] / 100)},
+    }));
+  const evenly = withErrors(rows.map((_, i) => 10 * (i + 1)));
+  const geometric = withErrors(rows.map((_, i) => 2 ** i / 10));
+  const xLog = () =>
+    within(screen.getByRole('region', {name: 'Accuracy summary'})).getByRole('button', {
+      name: 'X log',
+    });
+
+  test.each([
+    ['linear', evenly, 'false', 'true'],
+    ['log', geometric, 'true', 'false'],
+  ])('overrides an automatic %s choice and keeps it across views', (_, data, auto, toggled) => {
+    render(report(data));
+    expect(pressed(xLog())).toBe(auto);
+    fireEvent.click(xLog());
+    expect(pressed(xLog())).toBe(toggled);
+    fireEvent.click(screen.getByRole('tab', {name: 'Example GPU'}));
+    // Each scope keeps its own choice.
+    expect(pressed(xLog())).toBe(auto);
+    fireEvent.click(screen.getByRole('tab', {name: 'Overview'}));
+    expect(pressed(xLog())).toBe(toggled);
+  });
+
+  test('toggling in the overlay discards its zoom', () => {
+    render(report(evenly));
+    fireEvent.click(screen.getByRole('button', {name: 'Expand Absolute error distribution (CDF)'}));
+    const reset = within(dialog()).getByRole('button', {name: 'Reset zoom'});
+    fireEvent.wheel(within(dialog()).getByRole('img'), {deltaY: -200, clientX: 150, clientY: 80});
+    expect(reset.disabled).toBe(false);
+    fireEvent.click(within(dialog()).getByRole('button', {name: 'X log'}));
+    expect(reset.disabled).toBe(true);
+    expect(screen.getAllByRole('button', {name: 'X log'}).map(pressed)).toEqual(['true', 'true']);
   });
 });

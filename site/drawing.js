@@ -8,6 +8,7 @@ import {
   quantile,
 } from './model.js';
 
+const percentNumber = new Intl.NumberFormat('en-US', {maximumFractionDigits: 1});
 const tickNumber = new Intl.NumberFormat('en-US', {
   maximumSignificantDigits: 3,
   useGrouping: false,
@@ -178,7 +179,15 @@ const axisScales = {
 function numericAxis(
   [min, max],
   [start, end],
-  {log = false, factor = false, unit = '', count = 5, format = formatTick} = {},
+  {
+    log = false,
+    factor = false,
+    unit = '',
+    count = 5,
+    format = formatTick,
+    values: valuesOf,
+    subformat,
+  } = {},
 ) {
   // A factor axis labels its ticks together (factorLabels); `format` is unused.
   const scale = factor ? 'factor' : log && min > 0 ? 'log' : 'linear';
@@ -190,13 +199,17 @@ function numericAxis(
       ? (start + end) / 2
       : start + ((transform(value) - low) / (high - low)) * (end - start);
   const divisor = unit === 'ns' ? 1e6 : 1;
-  const values =
-    scale === 'factor'
+  // `valuesOf(min, max, count)` replaces the automatic tick values, and
+  // `subformat` adds a second, smaller label line under each tick.
+  const values = valuesOf
+    ? valuesOf(min, max, count)
+    : scale === 'factor'
       ? factorTicks(min, max, count)
       : axisTicks(min / divisor, max / divisor, count, scale === 'log');
   const labels = scale === 'factor' ? factorLabels(values) : values.map((value) => format(value));
   const ticks = values.map((value, i) => ({
     label: labels[i],
+    sublabel: subformat?.(value),
     position: position(value * divisor),
   }));
   return {position, ticks, scale, domain: [min, max], range: [start, end], transform, inverse};
@@ -323,14 +336,25 @@ export function drawChart(
     ctx.textAlign = 'center';
     let lastRight = -Infinity;
     let lastLabel;
-    for (const {position, label} of x.ticks) {
+    for (const {position, label, sublabel} of x.ticks) {
       ctx.beginPath();
       ctx.moveTo(position, top);
       ctx.lineTo(position, bottom);
       ctx.stroke();
-      const half = ctx.measureText(label).width / 2;
+      ctx.save();
+      ctx.font = '9px system-ui';
+      const subWidth = sublabel ? ctx.measureText(sublabel).width : 0;
+      ctx.restore();
+      const half = Math.max(ctx.measureText(label).width, subWidth) / 2;
       if (label === lastLabel || position - half < lastRight + 6) continue;
       ctx.fillText(label, position, bottom + 13);
+      if (sublabel) {
+        ctx.save();
+        ctx.font = '9px system-ui';
+        ctx.globalAlpha = 0.75;
+        ctx.fillText(sublabel, position, bottom + 24);
+        ctx.restore();
+      }
       lastRight = position + half;
       lastLabel = label;
     }
@@ -550,8 +574,9 @@ export function drawChart(
         : title,
     );
     ctx.font = '10px system-ui';
+    // A second line of X tick labels takes room from the plot.
     const top = 12,
-      bottom = plotHeight - 43;
+      bottom = plotHeight - (xOptions.subformat ? 53 : 43);
     const yAxis = numericAxis(view?.y ?? yRange, [bottom, top], {
       count: tickCount(bottom - top, 26, 5),
       ...yOptions,
@@ -655,6 +680,22 @@ export function drawChart(
     ctx.restore();
   }
 
+  // The S-curve's rank axis, ticked at percentiles of all `total` cases
+  // (rank r is 100·(r − 1)/(total − 1)%), each with its case rank below.
+  function percentileAxis(total) {
+    const rankAt = (percent) => 1 + (percent / 100) * (total - 1);
+    const percentOf = (rank) => (100 * (rank - 1)) / (total - 1);
+    return {
+      // Quartiles, or 5% steps (which keep them) when the axis has room.
+      values: (min, max, count) => {
+        const step = 100 / 5 + 1 <= count ? 5 : 25;
+        return Array.from({length: 100 / step + 1}, (_, i) => rankAt(i * step));
+      },
+      format: (rank) => percentNumber.format(percentOf(rank)) + '%',
+      subformat: (rank) => Math.round(rank).toLocaleString('en-US'),
+    };
+  }
+
   // A sampled chart's pairs carry their `rank` among `total` comparisons.
   // With `factor`, the error axis is the signed log factor (sim / hw).
   function rankedErrors(pairs, colors, total = pairs.length, bandSource = pairs, factor = false) {
@@ -668,14 +709,14 @@ export function drawChart(
     const bands = timeBands(pairs, bandSource);
     const chart = summaryAxes(
       'S-curve of signed relative error' + (factor ? ', log-factor Y axis' : ''),
-      'Case rank',
+      'Percentile of cases (case count below)',
       factor ? 'Sim / hardware (log)' : 'Signed error (%)',
       [1, end],
       // An extreme log factor's padded end may overflow: keep it unpadded.
       [inverse(minimum - margin), inverse(maximum + margin)].map((end, i) =>
         Number.isFinite(end) ? end : inverse(i ? maximum : minimum),
       ),
-      {maxCount: end},
+      percentileAxis(end),
       factor
         ? {factor: true}
         : {format: (n) => (n > 0 ? '+' : '') + formatTick(n) + '%'},
@@ -714,10 +755,13 @@ export function drawChart(
     );
     const errors = ranked.map((pair) => Math.abs(pair.signedError));
     const log = preferLog ?? preferLogScale(errors);
-    const left = log ? 10 ** Math.floor(Math.log10(errors[0])) : 0;
+    // A log axis starts at the decade of the smallest nonzero error; exact
+    // matches sit at its left edge.
+    const smallest = errors.find((error) => error > 0) ?? 1;
+    const left = log ? 10 ** Math.floor(Math.log10(smallest)) : 0;
     const maximum = errors.at(-1);
     const right = log
-      ? 10 ** (Math.ceil(Math.log10(maximum)) + 0.1)
+      ? 10 ** (Math.ceil(Math.log10(Math.max(maximum, smallest))) + 0.1)
       : maximum * 1.04 || 1;
     const bands = timeBands(pairs, bandSource);
     const chart = summaryAxes(
@@ -751,7 +795,7 @@ export function drawChart(
     ctx.moveTo(x(left), y(0));
     let fraction = 0;
     for (let i = 0; i < errors.length; i++) {
-      const px = x(errors[i]);
+      const px = x(Math.max(left, errors[i]));
       ctx.lineTo(px, y(fraction));
       fraction = (ranked[i].rank ?? i + 1) / total;
       ctx.lineTo(px, y(fraction));

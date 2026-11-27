@@ -1030,6 +1030,13 @@ export function Summary({
   const factorKey = JSON.stringify(['scurve-factor', scope]);
   const factor = preferences.get(factorKey) ?? false;
   const rankedSpec = useMemo(() => ({...ranked, factor}), [ranked, factor]);
+  // The CDF's log X axis: the automatic choice unless toggled, per scope.
+  const cdfKey = JSON.stringify(['cdf-log', scope]);
+  const cdfLog =
+    preferences.get(cdfKey) ??
+    cdf.log ??
+    preferLogScale(cdf.pairs.map((pair) => Math.abs(pair.signedError)));
+  const cdfSpec = useMemo(() => ({...cdf, log: cdfLog}), [cdf, cdfLog]);
   const {close} = usePoints();
   if (!count) return null;
   const legend = <Legend curves={[...colors.values()]} />;
@@ -1093,9 +1100,22 @@ export function Summary({
         >
           <figcaption>Absolute error distribution (CDF)</figcaption>
           <SummaryChart
-            spec={cdf}
+            spec={cdfSpec}
             theme={theme}
             title="Absolute error distribution (CDF)"
+            controls={
+              <Button
+                size="compact-xs"
+                variant={cdfLog ? 'filled' : 'default'}
+                aria-pressed={cdfLog}
+                onClick={() => {
+                  close();
+                  setPreference(cdfKey, !cdfLog);
+                }}
+              >
+                X log
+              </Button>
+            }
           />
           <SampleNote shown={cdf.pairs.length} count={count} />
           <PlotDetails entries={percentiles} count={count}>

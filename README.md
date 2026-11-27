@@ -39,6 +39,10 @@ Pagination never changes the summary population: device and Overview summaries u
 
 The Overview aggregates the qualified comparisons from all groups. Each group shows only its own comparisons. Both views include a ranked signed-error plot, a cumulative distribution of absolute relative error, and a measured-versus-simulated scatter plot. A comparison requires two positive measurements at the same point and one declared hardware series with the same unit as the simulator series. Ambiguous hardware references are omitted. The S-curve uses signed error, `(simulated - measured) / min(simulated, measured)`. The CDF takes the absolute value of the same error.
 
+The S-curve's X axis is the percentile of cases: rank `r` of `N` comparisons sits at `100·(r − 1)/(N − 1)`%. It is ticked at the quartiles, or every 5% when there is room, with the matching case rank as a smaller second line under each tick. `N` is the full comparison count even when a hosted summary draws a sample. Point details still give the case rank.
+
+The CDF's **X log** button switches its error axis between linear and logarithmic scale. Its default is the automatic choice (below, or the hosted summary's), and like the other scale buttons the choice is kept per summary scope while the page is open. On a log axis, exact matches sit at the left edge.
+
 The S-curve's **Y log factor** button switches its error axis to a signed log factor: an error `e` is the factor `1 + |e|/100` between simulated and measured values, plotted as `sign(e)·log10(factor)` (that is, `log10(simulated / measured)`). The axis is continuous through 1×; ticks above it read `N× slower` (simulator overestimates) and below it `N× faster`, with as many digits as distinct ticks need near parity; bare `1×` marks parity only. The default stays linear, and the choice is kept per summary scope while the page is open.
 
 The scatter plot can switch both axes to logarithmic scale. It reports Kendall’s tau-b, pairwise ordering accuracy among pairs with distinct measured values, and Spearman’s rho using average ranks for ties.
