@@ -3,8 +3,10 @@
 // tests pass their own.
 import {
   API_VERSION,
+  PAIRS_FORMAT,
   PLOTS_FORMAT,
   SUMMARY_FORMAT,
+  buildPairs,
   buildSummary,
   summaryLimits,
 } from '../../site/model.js';
@@ -15,6 +17,9 @@ const PAGE_ROWS = 20000;
 // this many points beyond its budget.
 const PAGE_BATCH = 256;
 const SUMMARY_MAX_BYTES = 2 * 1024 * 1024;
+// Total serialized pages of one scope's pairs (§5 Pairs); a larger scope
+// keeps its sampled charts. `PAIRS_MAX_BYTES` in the environment lowers it.
+const PAIRS_MAX_BYTES = 64 * 1024 * 1024;
 const encoder = new TextEncoder();
 const MAX_PLOTS_PER_PAGE = 48;
 // The chart of a plot: chartParams (site/model.js) in SQL. Plots whose
@@ -508,79 +513,96 @@ const halve = (limits) =>
 const canonicalScope = (groups) =>
   groups.length === 1 ? 'group:' + groups[0][0] : 'overview';
 
+// The groups and comparison input of one canonical scope, read in the
+// caller's snapshot: `all` is every group of the run, `input` what
+// buildSummary and buildPairs take. Returns null when `requested` no longer
+// resolves to `scope`.
+async function readScope(client, run, requested, scope) {
+  const all = (
+    await rows(
+      client,
+      'SELECT id, key, name FROM cr.groups WHERE run_id = $1 ORDER BY id',
+      [run.id],
+    )
+  ).map((g) => [Number(g.id), g.key, g.name]);
+  // The group count may have changed since the scope was resolved: a
+  // one-group Overview is no longer its group.
+  if (requested === 'overview' && canonicalScope(all) !== scope) return null;
+  const groups =
+    scope === 'overview' ? all : all.filter(([id]) => 'group:' + id === scope);
+  if (!groups.length) throw new HttpError(404, 'Unknown scope');
+  const series = await rows(
+    client,
+    `SELECT b.id AS benchmark_id, b.key AS benchmark, s.key, s.name, s.unit, s.role
+     FROM cr.series s JOIN cr.benchmarks b ON b.id = s.benchmark_id
+     WHERE b.run_id = $1 ORDER BY s.id`,
+    [run.id],
+  );
+  const benchmarks = Object.create(null);
+  const benchmarkKey = new Map();
+  for (const {benchmark_id, benchmark, key, name, unit, role} of series) {
+    benchmarkKey.set(String(benchmark_id), benchmark);
+    benchmarks[benchmark] ??= {values: Object.create(null)};
+    benchmarks[benchmark].values[key] = role ? {name, unit, role} : {name, unit};
+  }
+  const groupKey = new Map(groups.map(([id, key]) => [String(id), key]));
+  // One row per point: the values of its role-tagged series.
+  const points = await rows(
+    client,
+    `SELECT p.group_id, p.benchmark_id, p.plot_id, p.x,
+            array_agg(s.key ORDER BY s.id) AS keys,
+            array_agg(o.value ORDER BY s.id) AS vals
+     FROM cr.points p
+     JOIN cr.observations o ON o.point_id = p.id
+     JOIN cr.series s ON s.id = o.series_id
+     WHERE p.group_id = ANY ($1::bigint[]) AND s.role IS NOT NULL AND o.value IS NOT NULL
+     GROUP BY p.id ORDER BY p.id`,
+    [groups.map(([id]) => id)],
+  );
+  return {
+    all,
+    input: {
+      rows: points.map((point) => ({
+        group: groupKey.get(String(point.group_id)),
+        benchmark: benchmarkKey.get(String(point.benchmark_id)),
+        plot: Number(point.plot_id),
+        x: point.x,
+        values: Object.fromEntries(point.keys.map((k, i) => [k, point.vals[i]])),
+      })),
+      benchmarks,
+      groups,
+      overview: scope === 'overview',
+    },
+  };
+}
+
+// Fills `plots[id][2]` with each plot's non_scaling_params, reading only the
+// ids not in `known` (a Map of params by id, extended in place).
+async function fillPlotParams(client, plots, known = new Map()) {
+  const missing = Object.keys(plots).filter((id) => !known.has(id));
+  for (const {id, params} of await rows(
+    client,
+    'SELECT id, params FROM cr.plots WHERE id = ANY ($1::bigint[])',
+    [missing],
+  ))
+    known.set(String(id), params);
+  for (const id of Object.keys(plots)) plots[id][2] = known.get(id);
+}
+
 // Returns null when `requested` no longer resolves to `scope`.
 async function computeSummary(pool, key, rid, requested, scope, envelope) {
   return read(
     pool,
     async (client) => {
       const run = await currentRun(client, key, rid);
-      let groups = (
-        await rows(
-          client,
-          'SELECT id, key, name FROM cr.groups WHERE run_id = $1 ORDER BY id',
-          [run.id],
-        )
-      ).map((g) => [Number(g.id), g.key, g.name]);
-      // The group count may have changed since the scope was resolved: a
-      // one-group Overview is no longer its group.
-      if (requested === 'overview' && canonicalScope(groups) !== scope) return null;
-      const scoped =
-        scope === 'overview' ? groups : groups.filter(([id]) => 'group:' + id === scope);
-      if (!scoped.length) throw new HttpError(404, 'Unknown scope');
-      const pointProgress = await runPointProgress(client, groups);
-      groups = scoped;
-      const series = await rows(
-        client,
-        `SELECT b.id AS benchmark_id, b.key AS benchmark, s.key, s.name, s.unit, s.role
-         FROM cr.series s JOIN cr.benchmarks b ON b.id = s.benchmark_id
-         WHERE b.run_id = $1 ORDER BY s.id`,
-        [run.id],
-      );
-      const benchmarks = Object.create(null);
-      const benchmarkKey = new Map();
-      for (const {benchmark_id, benchmark, key, name, unit, role} of series) {
-        benchmarkKey.set(String(benchmark_id), benchmark);
-        benchmarks[benchmark] ??= {values: Object.create(null)};
-        benchmarks[benchmark].values[key] = role ? {name, unit, role} : {name, unit};
-      }
-      const groupKey = new Map(groups.map(([id, key]) => [String(id), key]));
-      // One row per point: the values of its role-tagged series.
-      const points = await rows(
-        client,
-        `SELECT p.group_id, p.benchmark_id, p.plot_id, p.x,
-                array_agg(s.key ORDER BY s.id) AS keys,
-                array_agg(o.value ORDER BY s.id) AS vals
-         FROM cr.points p
-         JOIN cr.observations o ON o.point_id = p.id
-         JOIN cr.series s ON s.id = o.series_id
-         WHERE p.group_id = ANY ($1::bigint[]) AND s.role IS NOT NULL AND o.value IS NOT NULL
-         GROUP BY p.id ORDER BY p.id`,
-        [groups.map(([id]) => id)],
-      );
-      const sample = buildSummary({
-        rows: points.map((point) => ({
-          group: groupKey.get(String(point.group_id)),
-          benchmark: benchmarkKey.get(String(point.benchmark_id)),
-          plot: Number(point.plot_id),
-          x: point.x,
-          values: Object.fromEntries(point.keys.map((k, i) => [k, point.vals[i]])),
-        })),
-        benchmarks,
-        groups,
-        overview: scope === 'overview',
-      });
+      const scoped = await readScope(client, run, requested, scope);
+      if (!scoped) return null;
+      const pointProgress = await runPointProgress(client, scoped.all);
+      const sample = buildSummary(scoped.input);
       const plotParams = new Map();
       for (let limits = {...summaryLimits}; ; limits = halve(limits)) {
         const summary = sample(limits);
-        const missing = Object.keys(summary.plots).filter((id) => !plotParams.has(id));
-        for (const {id, params} of await rows(
-          client,
-          'SELECT id, params FROM cr.plots WHERE id = ANY ($1::bigint[])',
-          [missing],
-        ))
-          plotParams.set(String(id), params);
-        for (const id of Object.keys(summary.plots))
-          summary.plots[id][2] = plotParams.get(id);
+        await fillPlotParams(client, summary.plots, plotParams);
         const body = envelope(run, {...summary, point_progress: pointProgress});
         const exactOnly = !Object.values(limits).some(Boolean);
         if (encoder.encode(JSON.stringify(body)).length <= SUMMARY_MAX_BYTES)
@@ -595,24 +617,109 @@ async function computeSummary(pool, key, rid, requested, scope, envelope) {
   );
 }
 
-// §5 summary cache: compute only on request; recompute only when the run's
-// revision changed and the cached result is older than the interval; a
-// completed run's summary is final. No locks. Entries are stored under the
-// canonical scope only: a one-group run's Overview is its group.
-async function summaryResponse(pool, store, key, query, env, now) {
+const byteLength = (value) => encoder.encode(JSON.stringify(value)).length;
+
+// Splits a buildPairs body into pages of at most PAGE_BYTES serialized, each
+// self-contained: `envelope`, the comparison tables, `offset` (index of its
+// first comparison), `next` (the next page's offset or null), and the
+// `samples` columns of its comparisons with the `plots` they name. There is
+// always at least one page. Returns null as soon as the pages exceed `total`
+// bytes in all. Exported for tests, which pass small budgets.
+export function pairPages(body, envelope, limit = PAGE_BYTES, total = PAIRS_MAX_BYTES) {
+  const {plots, samples, ...tables} = body;
+  const empty = () => ({plot: [], x: [], pair: [], actual: [], prediction: []});
+  // Sized with the longest offset and next.
+  const base =
+    byteLength({
+      ...envelope,
+      ...tables,
+      offset: Number.MAX_SAFE_INTEGER,
+      next: Number.MAX_SAFE_INTEGER,
+      plots: {},
+      samples: empty(),
+    });
+  // The tables are bounded (§3) far below the budget.
+  if (base >= limit) {
+    console.error('Pairs header over budget', envelope.key, envelope.scope);
+    throw new HttpError(500, 'Pairs over budget');
+  }
+  const pages = [];
+  let page = null,
+    bytes = 0,
+    done = 0; // bytes of the pages before `page`
+  const start = (offset) => {
+    done += bytes;
+    page = {...envelope, ...tables, offset, next: null, plots: {}, samples: empty()};
+    pages.push(page);
+    bytes = base;
+  };
+  start(0);
+  const columns = Object.keys(samples);
+  for (let i = 0; i < body.count; i++) {
+    const plot = samples.plot[i];
+    let size = columns.reduce((sum, column) => sum + byteLength(samples[column][i]) + 1, 0);
+    const named = plot in page.plots;
+    if (!named) size += byteLength(String(plot)) + byteLength(plots[plot]) + 2;
+    if (i > page.offset && bytes + size > limit) {
+      page.next = i;
+      start(i);
+      size += named ? byteLength(String(plot)) + byteLength(plots[plot]) + 2 : 0;
+    }
+    if (!(plot in page.plots)) page.plots[plot] = plots[plot];
+    for (const column of columns) page.samples[column].push(samples[column][i]);
+    bytes += size;
+    if (done + bytes > total) return null;
+  }
+  return done + bytes > total ? null : pages;
+}
+
+// Every comparison of one canonical scope, paged; null when `requested` no
+// longer resolves to `scope`.
+async function computePairs(pool, key, rid, requested, scope, computedAt, interval, maxBytes) {
+  return read(
+    pool,
+    async (client) => {
+      const run = await currentRun(client, key, rid);
+      const scoped = await readScope(client, run, requested, scope);
+      if (!scoped) return null;
+      const body = buildPairs(scoped.input);
+      await fillPlotParams(client, body.plots);
+      const envelope = {
+        rid: run.id,
+        key,
+        scope,
+        revision: run.revision,
+        state: run.state,
+        computed_at: computedAt,
+        min_interval: interval,
+      };
+      // Over the total budget, a small record says so, so that later
+      // requests answer 413 from the cache without recomputing.
+      const pages = pairPages(body, envelope, PAGE_BYTES, maxBytes);
+      return pages ? {...envelope, pages} : {...envelope, too_large: true, pages: []};
+    },
+    'REPEATABLE READ',
+  );
+}
+
+// The validated `rid` and `scope` of a summary or pairs request.
+function scopeQuery(query) {
   const rid = query.get('rid');
   const requested = query.get('scope') ?? 'overview';
   if (!/^(overview|group:\d+)$/.test(requested))
     throw new HttpError(400, 'Invalid scope');
   if (rid === null || !/^\d+$/.test(rid)) throw new HttpError(409, 'rid required');
-  // A viewer built for another summary format must reload; one that names
-  // none gets the current format.
-  const format = query.get('format');
-  if (format !== null && format !== String(SUMMARY_FORMAT))
-    throw new HttpError(400, 'Unsupported summary format; reload the page');
-  const interval = Number(env.SUMMARY_MIN_INTERVAL ?? 60);
-  const blobKey = (scope) => `${API_VERSION}/summary${SUMMARY_FORMAT}/${rid}/${scope}`;
-  const respond = (body) => json(body, {immutable: body.state === 'completed'});
+  return {rid, requested};
+}
+
+// §5 summary cache, shared by summaries and pairs: compute only on request;
+// recompute only when the run's revision changed and the cached result is
+// older than the interval; a completed run's result is final. No locks.
+// Entries are stored under the canonical scope only: a one-group run's
+// Overview is its group. `compute(scope, computedAt)` returns the value to
+// store, which carries its `revision`, `state` and `computed_at`, or null
+// when `requested` no longer resolves to `scope`. Returns the value.
+async function cachedScope({pool, store, key, rid, requested, interval, now, blobKey, compute}) {
   const lookup = (scope) => store.getWithMetadata(blobKey(scope), {type: 'json'});
   const final = (entry) =>
     entry?.metadata.state === 'completed' && entry.metadata.key === key;
@@ -620,12 +727,12 @@ async function summaryResponse(pool, store, key, query, env, now) {
   // A requested scope that has an entry is canonical: a completed one is
   // served without the database.
   let cached = await lookup(requested);
-  if (final(cached)) return respond(cached.data);
+  if (final(cached)) return cached.data;
 
   // Resolve the canonical scope and read its baseline entry before the
   // computing snapshot; if the scope changes meanwhile, start over.
-  let scope, body;
-  for (let attempt = 0; !body; attempt++) {
+  let scope, value;
+  for (let attempt = 0; !value; attempt++) {
     if (attempt === 3) throw new HttpError(503, 'The run is changing; retry');
     const [run] = await read(pool, (client) =>
       rows(
@@ -646,48 +753,122 @@ async function summaryResponse(pool, store, key, query, env, now) {
         : requested;
     if (scope !== requested || attempt > 0) {
       cached = await lookup(scope);
-      if (final(cached)) return respond(cached.data);
+      if (final(cached)) return cached.data;
     }
     // `cached` was read before the snapshot below, so the conditional write
     // can only replace the entry this computation saw.
     if (cached && cached.metadata.key === key) {
       if (Number(cached.metadata.revision) === Number(run.revision))
-        return respond(cached.data);
+        return cached.data;
       const age = (now() - Date.parse(cached.metadata.computed_at)) / 1000;
-      if (run.state !== 'completed' && age < interval) return respond(cached.data);
+      if (run.state !== 'completed' && age < interval) return cached.data;
     }
-    const computedAt = new Date(now()).toISOString();
-    body = await computeSummary(pool, key, rid, requested, scope, (current, summary) => ({
-      rid: current.id,
-      key,
-      scope,
-      revision: current.revision,
-      state: current.state,
-      computed_at: computedAt,
-      min_interval: interval,
-      ...summary,
-    }));
+    value = await compute(scope, new Date(now()).toISOString());
   }
   const metadata = {
     key,
-    revision: body.revision,
-    state: body.state,
-    computed_at: body.computed_at,
+    revision: value.revision,
+    state: value.state,
+    computed_at: value.computed_at,
   };
   const target = blobKey(scope);
-  const write = await store.setJSON(target, body, {
+  const write = await store.setJSON(target, value, {
     metadata,
     ...(cached ? {onlyIfMatch: cached.etag} : {onlyIfNew: true}),
   });
-  if (!write.modified && body.state === 'completed') {
+  if (!write.modified && value.state === 'completed') {
     // Another request wrote first: keep a final result, never an older one.
     const stored = await store.getWithMetadata(target, {type: 'json'});
-    if (final(stored) && Number(stored.metadata.revision) === body.revision)
-      return respond(stored.data);
-    if (stored && Number(stored.metadata.revision) < body.revision)
-      await store.setJSON(target, body, {metadata, onlyIfMatch: stored.etag});
+    if (final(stored) && Number(stored.metadata.revision) === value.revision)
+      return stored.data;
+    if (stored && Number(stored.metadata.revision) < value.revision)
+      await store.setJSON(target, value, {metadata, onlyIfMatch: stored.etag});
   }
-  return respond(body);
+  return value;
+}
+
+async function summaryResponse(pool, store, key, query, env, now) {
+  const {rid, requested} = scopeQuery(query);
+  // A viewer built for another summary format must reload; one that names
+  // none gets the current format.
+  const format = query.get('format');
+  if (format !== null && format !== String(SUMMARY_FORMAT))
+    throw new HttpError(400, 'Unsupported summary format; reload the page');
+  const interval = Number(env.SUMMARY_MIN_INTERVAL ?? 60);
+  const body = await cachedScope({
+    pool,
+    store,
+    key,
+    rid,
+    requested,
+    interval,
+    now,
+    blobKey: (scope) => `${API_VERSION}/summary${SUMMARY_FORMAT}/${rid}/${scope}`,
+    compute: (scope, computedAt) =>
+      computeSummary(pool, key, rid, requested, scope, (current, summary) => ({
+        rid: current.id,
+        key,
+        scope,
+        revision: current.revision,
+        state: current.state,
+        computed_at: computedAt,
+        min_interval: interval,
+        ...summary,
+      })),
+  });
+  return json(body, {immutable: body.state === 'completed'});
+}
+
+// Every comparison of a scope for zoomed summary charts, paged (§5 Pairs).
+// The first request (no `revision`) goes through the summary cache policy
+// and returns the page at offset 0, naming the canonical `scope` and the
+// `revision` it was computed at. Continuations name both and an `offset`
+// from `next`, and are served from that cached record only: if it has moved
+// to another revision, they get 503 and the viewer starts over.
+async function pairsResponse(pool, store, key, query, env, now) {
+  const {rid, requested} = scopeQuery(query);
+  if (query.get('format') !== String(PAIRS_FORMAT))
+    throw new HttpError(400, 'Unsupported pairs format; reload the page');
+  const offset = nonNegativeInteger(query.get('offset'), 0, 'offset');
+  const revision = query.get('revision');
+  const blobKey = (scope) => `${API_VERSION}/pairs${PAIRS_FORMAT}/${rid}/${scope}`;
+  let value;
+  if (revision === null) {
+    if (offset !== 0) throw new HttpError(400, 'A continuation needs its revision');
+    const interval = Number(env.SUMMARY_MIN_INTERVAL ?? 60);
+    value = await cachedScope({
+      pool,
+      store,
+      key,
+      rid,
+      requested,
+      interval,
+      now,
+      blobKey,
+      compute: (scope, computedAt) =>
+        computePairs(
+          pool,
+          key,
+          rid,
+          requested,
+          scope,
+          computedAt,
+          interval,
+          Number(env.PAIRS_MAX_BYTES ?? PAIRS_MAX_BYTES),
+        ),
+    });
+  } else {
+    if (!/^\d+$/.test(revision)) throw new HttpError(400, 'Invalid revision');
+    const entry = await store.getWithMetadata(blobKey(requested), {type: 'json'});
+    if (entry?.metadata.key !== key || String(entry.metadata.revision) !== revision)
+      throw new HttpError(503, 'The run changed; start over');
+    value = entry.data;
+  }
+  if (value.too_large)
+    throw new HttpError(413, 'Full data too large; the summary keeps its sample');
+  const page = value.pages.find((candidate) => candidate.offset === offset);
+  if (!page) throw new HttpError(400, 'Invalid offset');
+  return json(page, {immutable: page.state === 'completed'});
 }
 
 export async function handleApi(
@@ -717,6 +898,8 @@ export async function handleApi(
     if (resource === undefined) return await manifest(pool, key);
     if (resource === 'summary' && rest.length === 0)
       return await summaryResponse(pool, store, key, query, env, now);
+    if (resource === 'pairs' && rest.length === 0)
+      return await pairsResponse(pool, store, key, query, env, now);
     if (resource === 'plots' && rest.length === 0)
       return await plotPage(pool, key, query);
     if (resource === 'points' && rest.length === 2)

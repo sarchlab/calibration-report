@@ -291,6 +291,27 @@ export const zoomAxes = {
   cdf: ['x'],
 };
 
+const byAbsolute = (list) =>
+  [...list].sort((a, b) => Math.abs(a.signedError) - Math.abs(b.signedError));
+// The CDF's error axis from `pairs` (its comparisons sorted by absolute
+// error, those errors, and the scale): a log axis starts at the decade of
+// the smallest nonzero error, where exact matches sit (`left`). The drawing
+// and the zoomed full-data selection (site/resample.js) share it.
+export function cdfAxis(pairs, preferLog) {
+  const sorted = byAbsolute(pairs);
+  const errors = sorted.map((pair) => Math.abs(pair.signedError));
+  const log = preferLog ?? preferLogScale(errors);
+  const smallest = errors.find((error) => error > 0) ?? 1;
+  const left = log ? 10 ** Math.floor(Math.log10(smallest)) : 0;
+  const maximum = errors.at(-1);
+  const padded = log
+    ? 10 ** (Math.ceil(Math.log10(Math.max(maximum, smallest))) + 0.1)
+    : maximum * 1.04 || 1;
+  // Padding an extreme error may overflow: keep the axis at the error.
+  const right = Number.isFinite(padded) ? padded : maximum;
+  return {sorted, errors, log, left, right};
+}
+
 // Drawing is imperative only inside the supplied canvas; React owns every DOM element.
 // `view` overrides each axis's data domain ({x: [min, max], y: [min, max]},
 // either optional); marks outside it are clipped and not hit-testable.
@@ -700,7 +721,9 @@ export function drawChart(
 
   // A sampled chart's pairs carry their `rank` among `total` comparisons.
   // With `factor`, the error axis is the signed log factor (sim / hw).
-  function rankedErrors(pairs, colors, total = pairs.length, bandSource = pairs, factor = false) {
+  // `shown` (default `pairs`) are the points drawn; axes and bands always
+  // come from `pairs`, so a denser zoomed sample magnifies the same chart.
+  function rankedErrors(pairs, colors, total = pairs.length, bandSource = pairs, factor = false, shown = pairs) {
     const ranked = [...pairs].sort((a, b) => a.signedError - b.signedError);
     const end = Math.max(2, total);
     // Margins are a share of the axis in its own (transformed) space.
@@ -739,35 +762,21 @@ export function drawChart(
             ]),
           ),
       );
-    ranked.forEach((pair, i) => {
+    (shown === pairs ? ranked : [...shown].sort((a, b) => a.signedError - b.signedError)).forEach((pair, i) => {
       const rank = pair.rank ?? i + 1;
       summaryPoint(
         chart,
         rank,
         pair.signedError,
-        colors.get(pair.id).color,
+        (colors.get(pair.id)?.color ?? chartTheme.palette[0]),
         pairDescription(pair, {'Case rank': rank.toLocaleString('en-US')}),
       );
     });
     return finish(chart);
   }
 
-  function absoluteErrorCDF(pairs, total = pairs.length, preferLog, bandSource = pairs) {
-    const ranked = [...pairs].sort(
-      (a, b) => Math.abs(a.signedError) - Math.abs(b.signedError),
-    );
-    const errors = ranked.map((pair) => Math.abs(pair.signedError));
-    const log = preferLog ?? preferLogScale(errors);
-    // A log axis starts at the decade of the smallest nonzero error; exact
-    // matches sit at its left edge.
-    const smallest = errors.find((error) => error > 0) ?? 1;
-    const left = log ? 10 ** Math.floor(Math.log10(smallest)) : 0;
-    const maximum = errors.at(-1);
-    const padded = log
-      ? 10 ** (Math.ceil(Math.log10(Math.max(maximum, smallest))) + 0.1)
-      : maximum * 1.04 || 1;
-    // Padding an extreme error may overflow: keep the axis at the error.
-    const right = Number.isFinite(padded) ? padded : maximum;
+  function absoluteErrorCDF(pairs, total = pairs.length, preferLog, bandSource = pairs, shown = pairs) {
+    const {sorted, errors, log, left, right} = cdfAxis(pairs, preferLog);
     const bands = timeBands(pairs, bandSource);
     const chart = summaryAxes(
       'Absolute error cumulative distribution',
@@ -799,8 +808,10 @@ export function drawChart(
     ctx.beginPath();
     ctx.moveTo(x(left), y(0));
     let fraction = 0;
-    for (let i = 0; i < errors.length; i++) {
-      const px = x(Math.max(left, errors[i]));
+    const ranked = shown === pairs ? sorted : byAbsolute(shown);
+    for (let i = 0; i < ranked.length; i++) {
+      const error = Math.abs(ranked[i].signedError);
+      const px = x(Math.max(left, error));
       ctx.lineTo(px, y(fraction));
       fraction = (ranked[i].rank ?? i + 1) / total;
       ctx.lineTo(px, y(fraction));
@@ -809,7 +820,7 @@ export function drawChart(
         x: px,
         y: y(fraction),
         description: pairDescription(ranked[i], {
-          'Absolute error': errors[i].toFixed(2) + '%',
+          'Absolute error': error.toFixed(2) + '%',
           'CDF percentile': (fraction * 100).toFixed(2) + '%',
         }),
       });
@@ -819,7 +830,7 @@ export function drawChart(
     return finish(chart);
   }
 
-  function comparisonScatter(pairs, unit, colors, log) {
+  function comparisonScatter(pairs, unit, colors, log, shown = pairs) {
     let minimum = Infinity,
       maximum = -Infinity;
     for (const pair of pairs) {
@@ -848,12 +859,12 @@ export function drawChart(
       {log, unit},
     );
     referenceLine(chart, range[0], range[0], range[1], range[1]);
-    for (const pair of pairs) {
+    for (const pair of shown) {
       summaryPoint(
         chart,
         pair.actual,
         pair.prediction,
-        colors.get(pair.id).color,
+        (colors.get(pair.id)?.color ?? chartTheme.palette[0]),
         pairDescription(pair),
       );
     }
@@ -872,8 +883,8 @@ export function drawChart(
       spec.lineOf,
     );
   if (spec.kind === 'ranked')
-    return rankedErrors(spec.pairs, spec.colors, spec.total, spec.bands, spec.factor);
+    return rankedErrors(spec.pairs, spec.colors, spec.total, spec.bands, spec.factor, spec.shown);
   if (spec.kind === 'cdf')
-    return absoluteErrorCDF(spec.pairs, spec.total, spec.log, spec.bands);
-  return comparisonScatter(spec.pairs, spec.unit, spec.colors, spec.log);
+    return absoluteErrorCDF(spec.pairs, spec.total, spec.log, spec.bands, spec.shown);
+  return comparisonScatter(spec.pairs, spec.unit, spec.colors, spec.log, spec.shown);
 }

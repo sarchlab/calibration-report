@@ -50,8 +50,7 @@ export function comparisonPairs(rows, benchmarks) {
         group: point.group,
         actual,
         prediction,
-        signedError:
-          (100 * (prediction - actual)) / Math.min(prediction, actual),
+        signedError: signedError(actual, prediction),
         unit,
         id: pairId,
         name,
@@ -466,6 +465,9 @@ export const SUMMARY_FORMAT = 2;
 // request, so a cached immutable response of an older format is never
 // reused, and the Function rejects any other format.
 export const PLOTS_FORMAT = 3;
+// Version of the pairs response within API_VERSION (`format=` on every
+// /pairs request, required, and part of its cache key).
+export const PAIRS_FORMAT = 1;
 
 // The row filter of indexReport: a finite value or a drawn status.
 export function isVisibleRow(point) {
@@ -566,14 +568,11 @@ function sampleSummary(pairs, units, limits) {
   return {samples: [...samples.keys()], scurve, cdf, scatter};
 }
 
-// The summary of one scope in the hosted format: exact statistics over every
-// comparison, charts from a deterministic sample. `rows` are data.json points
-// of the scope, each with a `plot` id; `groups` is [[id, key, name]] of the
-// scope's groups. Returns `sample(limits)`, which assembles the summary with at
-// most `limits` sampled comparisons per chart; the exact part is computed once
-// and is the same for every limit. `plots[id][2]` holds the row's
-// non_scaling_params, or null when the rows carry none (the API fills them in).
-export function buildSummary({rows, benchmarks, groups, overview}) {
+// The comparisons of one scope with the summary format's indices: `pairs`
+// (comparisonPairs, relabeled in a multi-group Overview), `pairOf(pair)` (its
+// index into `pairList.list`), and the series, benchmark and group tables.
+// buildSummary and buildPairs share it, so both define "paired" once.
+function scopePairs({rows, benchmarks, groups, overview}) {
   const groupIndex = new Map(groups.map(([, key], i) => [key, i]));
   const base = comparisonPairs(rows, benchmarks);
   const pairs = relabelPairs(
@@ -616,6 +615,60 @@ export function buildSummary({rows, benchmarks, groups, overview}) {
     return pairList.of(pair.id, i);
   };
   pairs.forEach(pairOf);
+  // Columns of `chosen` comparisons, with each one's plot in `plots`.
+  const columns = (chosen) => {
+    const plots = {};
+    const samples = {plot: [], x: [], pair: [], actual: [], prediction: []};
+    for (const pair of chosen) {
+      const {point} = pair;
+      if (!(point.plot in plots))
+        plots[point.plot] = [
+          groupIndex.get(point.group),
+          benchmarkList.of(point.benchmark),
+          point.non_scaling_params ?? null,
+        ];
+      samples.plot.push(point.plot);
+      samples.x.push(point.x);
+      samples.pair.push(pairOf(pair));
+      samples.actual.push(pair.actual);
+      samples.prediction.push(pair.prediction);
+    }
+    return {plots, samples};
+  };
+  return {pairs, relabeled, seriesList, benchmarkList, pairList, columns};
+}
+
+// Every comparison of one scope (same input as buildSummary) in the
+// summary's encoding: `samples` columns hold all of them in comparisonPairs
+// order, and `plots` every plot they name. The read API pages it as
+// `/pairs` for zoomed summary charts.
+export function buildPairs(input) {
+  const {pairs, relabeled, seriesList, benchmarkList, pairList, columns} =
+    scopePairs(input);
+  const {plots, samples} = columns(pairs);
+  return {
+    count: pairs.length,
+    relabeled,
+    groups: input.groups,
+    series: seriesList.list,
+    pairs: pairList.list,
+    benchmarks: benchmarkList.list,
+    plots,
+    samples,
+  };
+}
+
+// The summary of one scope in the hosted format: exact statistics over every
+// comparison, charts from a deterministic sample. `rows` are data.json points
+// of the scope, each with a `plot` id; `groups` is [[id, key, name]] of the
+// scope's groups. Returns `sample(limits)`, which assembles the summary with at
+// most `limits` sampled comparisons per chart; the exact part is computed once
+// and is the same for every limit. `plots[id][2]` holds the row's
+// non_scaling_params, or null when the rows carry none (the API fills them in).
+export function buildSummary(input) {
+  const {groups, overview} = input;
+  const {pairs, relabeled, seriesList, benchmarkList, pairList, columns} =
+    scopePairs(input);
   const units = Map.groupBy(pairs, (pair) => pair.unit);
   const scatterStats = Array.from(units, ([unit, unitPairs]) => [
     unit,
@@ -646,22 +699,7 @@ export function buildSummary({rows, benchmarks, groups, overview}) {
   };
   const assemble = (current) => {
     const sampled = sampleSummary(pairs, units, current);
-    const plots = {};
-    const samples = {plot: [], x: [], pair: [], actual: [], prediction: []};
-    for (const pair of sampled.samples) {
-      const {point} = pair;
-      if (!(point.plot in plots))
-        plots[point.plot] = [
-          groupIndex.get(point.group),
-          benchmarkList.of(point.benchmark),
-          point.non_scaling_params ?? null,
-        ];
-      samples.plot.push(point.plot);
-      samples.x.push(point.x);
-      samples.pair.push(pairOf(pair));
-      samples.actual.push(pair.actual);
-      samples.prediction.push(pair.prediction);
-    }
+    const {plots, samples} = columns(sampled.samples);
     return {
       count: exact.count,
       relabeled,
@@ -687,11 +725,12 @@ export function buildSummary({rows, benchmarks, groups, overview}) {
   return assemble;
 }
 
-// Inverse of buildSummary for drawing: pair-like objects that the summary
-// charts and point details consume.
-export function summaryCharts(summary) {
+// Decoder of a summary's (or a /pairs page's) `samples` columns: `legend`
+// has the entry of each `pairs` index, and `pair(i)` builds the pair-like
+// object of sample i that the summary charts and point details consume.
+export function sampleDecoder(summary) {
   const {series, groups, benchmarks, plots, samples} = summary;
-  const pairInfo = summary.pairs.map(([group, reference, simulated]) => {
+  const legend = summary.pairs.map(([group, reference, simulated]) => {
     const [referenceKey, referenceName] = series[reference];
     const [simulatedKey, simulatedName, unit] = series[simulated];
     const id = JSON.stringify([referenceKey, simulatedKey]);
@@ -706,9 +745,9 @@ export function summaryCharts(summary) {
           simulatedKey,
         };
   });
-  const pairs = samples.plot.map((plot, i) => {
-    const info = pairInfo[samples.pair[i]];
-    const [group, benchmark, params] = plots[plot];
+  const pair = (i) => {
+    const info = legend[samples.pair[i]];
+    const [group, benchmark, params] = plots[samples.plot[i]];
     const actual = samples.actual[i];
     const prediction = samples.prediction[i];
     const point = {
@@ -723,12 +762,29 @@ export function summaryCharts(summary) {
       group: point.group,
       actual,
       prediction,
-      signedError: (100 * (prediction - actual)) / Math.min(prediction, actual),
+      signedError: signedError(actual, prediction),
       unit: info.unit,
       id: info.id,
       name: info.name,
     };
-  });
+  };
+  return {legend, pair};
+}
+
+// The signed relative error of comparisonPairs, in percent.
+export const signedError = (actual, prediction) =>
+  (100 * (prediction - actual)) / Math.min(prediction, actual);
+
+// Every sample of a summary (or a /pairs page) decoded, and the legend.
+export function decodeSamples(summary) {
+  const {legend, pair} = sampleDecoder(summary);
+  return {legend, pairs: summary.samples.plot.map((_, i) => pair(i))};
+}
+
+// Inverse of buildSummary for drawing: pair-like objects that the summary
+// charts and point details consume.
+export function summaryCharts(summary) {
+  const {legend: pairInfo, pairs} = decodeSamples(summary);
   const ranked = (chart) =>
     chart.sample.map((sample, i) => ({...pairs[sample], rank: chart.rank[i]}));
   return {

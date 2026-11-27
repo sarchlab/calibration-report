@@ -5,14 +5,16 @@ import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {ReportHeader, RunProgress, useChartTheme} from './Layout.jsx';
 import {Benchmark, Summary} from './Charts.jsx';
 import {PointProvider} from './PointDetails.jsx';
-import {API_VERSION, PLOTS_FORMAT, SUMMARY_FORMAT} from './model.js';
+import {API_VERSION, PAIRS_FORMAT, PLOTS_FORMAT, SUMMARY_FORMAT} from './model.js';
+import {fullCharts} from './resample.js';
 import {runCsv} from './csv.js';
 import {PageControls, pageWindow} from './Pagination.jsx';
 
 const POLL_MS = 10_000;
 const STALE_MS = 30 * 60_000;
 const benchmarkPageSizes = [5, 10, 20, 50];
-// Reads of one plot page before giving up on a run that keeps changing.
+// Reads of one plot page (or of all pairs pages) before giving up on a run
+// that keeps changing.
 const PAGE_ATTEMPTS = 3;
 
 class ReplacedRun extends Error {}
@@ -30,9 +32,61 @@ async function fetchJson(path, signal) {
     } catch {
       // Not a JSON error body (a proxy or platform error page).
     }
-    throw new Error(message ?? 'HTTP ' + response.status);
+    throw Object.assign(new Error(message ?? 'HTTP ' + response.status), {
+      status: response.status,
+    });
   }
   return response.json();
+}
+
+// Every comparison of a summary's scope (§5 Pairs) as fullCharts data. A
+// continuation answered 503 means the cached record moved to a newer
+// revision between pages: start over.
+async function fetchPairs(runKey, rid, scope) {
+  const base = (scope) =>
+    `${runPath(runKey)}/pairs?rid=${rid}&scope=${encodeURIComponent(scope)}&format=${PAIRS_FORMAT}`;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const pages = [await fetchJson(base(scope))];
+      const [{revision, scope: canonical}] = pages;
+      while (pages.at(-1).next !== null)
+        pages.push(
+          await fetchJson(
+            `${base(canonical)}&offset=${pages.at(-1).next}&revision=${revision}`,
+          ),
+        );
+      return fullCharts(pages);
+    } catch (e) {
+      if (e.status !== 503 || attempt === PAGE_ATTEMPTS) throw e;
+    }
+  }
+}
+
+// `loadPairs` for the summary shown (Summary): loads its scope's pairs at
+// most once per run id, revision and scope, keeping only the latest load.
+// A failed load, or pairs older than the summary (the server's record
+// trailing it), is forgotten, so a later call loads again.
+function usePairsLoader(runKey, summary) {
+  const latest = useRef(null);
+  const rid = summary?.rid;
+  const revision = summary?.revision;
+  const scope = summary?.scope;
+  return useMemo(() => {
+    if (rid === undefined) return undefined;
+    const id = JSON.stringify([runKey, rid, revision, scope]);
+    return () => {
+      if (latest.current?.id !== id) {
+        const promise = fetchPairs(runKey, rid, scope);
+        const entry = {id, promise};
+        latest.current = entry;
+        const forget = () => {
+          if (latest.current === entry) latest.current = null;
+        };
+        promise.then((full) => full.revision < revision && forget(), forget);
+      }
+      return latest.current.promise;
+    };
+  }, [runKey, rid, revision, scope]);
 }
 
 const runPath = (key) => '/' + encodeURIComponent(key);
@@ -514,6 +568,7 @@ export function HostedReport({runKey}) {
     error: summaryError,
     retry: retrySummary,
   } = useSummary(runKey, manifest, polls, manifest ? scopeOf(group) : null, refresh);
+  const loadPairs = usePairsLoader(runKey, summary);
   const benchmarkStats = useMemo(
     () =>
       new Map(
@@ -649,6 +704,7 @@ export function HostedReport({runKey}) {
             {summary && (
               <Summary
                 summary={summary}
+                loadPairs={loadPairs}
                 scope={group}
                 groups={report.groups}
                 theme={theme}

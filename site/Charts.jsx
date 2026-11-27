@@ -1,8 +1,9 @@
 import {ActionIcon, Button, Modal, Paper, VisuallyHidden} from '@mantine/core';
 import {useElementSize} from '@mantine/hooks';
 import {useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState} from 'react';
-import {drawChart, zoomAxes} from './drawing.js';
+import {cdfAxis, drawChart, zoomAxes} from './drawing.js';
 import {panView, pinchView, wheelFactor, zoomView} from './zoom.js';
+import {visibleCDF, visibleRanked, visibleScatter} from './resample.js';
 import {
   chartParams,
   comparisonPairs,
@@ -19,6 +20,7 @@ import {
   rankingStats,
   relabelPairs,
   summaryCharts,
+  summaryLimits,
   visibleStates,
   valueBounds,
 } from './model.js';
@@ -111,8 +113,17 @@ function ExpandIcon() {
 }
 // A chart with its `controls`, plus an expand button that opens the same
 // spec in a full-screen overlay, where it can be zoomed and panned. The
-// overlay repeats the controls and shows `legend` below the chart.
-function ChartFrame({spec, theme, title, controls = null, legend = null, summary = false}) {
+// overlay repeats the controls and shows `legend` below the chart. A hosted
+// summary chart passes `fullData` ({load, specFor}): see ChartOverlay.
+function ChartFrame({
+  spec,
+  theme,
+  title,
+  controls = null,
+  legend = null,
+  summary = false,
+  fullData = null,
+}) {
   const [expanded, setExpanded] = useState(false);
   const collapse = useCallback(() => setExpanded(false), []);
   return (
@@ -150,6 +161,7 @@ function ChartFrame({spec, theme, title, controls = null, legend = null, summary
           theme={theme}
           controls={controls}
           legend={legend}
+          fullData={fullData}
           onClose={collapse}
         />
       </Modal>
@@ -163,8 +175,40 @@ const DOUBLE_TAP_MS = 350;
 const OVERLAY_TEXT_SCALE = 1.25;
 // Room under the overlay canvas for its hint line.
 const OVERLAY_HINT_HEIGHT = 24;
+// The same drawn row: the same object, or a summary comparison of the same
+// point, values and rank (the sample and the full data decode their own
+// objects), so a pin survives full data that draws the same points.
+function sameRow(a, b) {
+  if (a === b) return true;
+  if (!a?.point || !b?.point || a.id !== b.id) return false;
+  return (
+    a.actual === b.actual &&
+    a.prediction === b.prediction &&
+    a.rank === b.rank &&
+    a.point.group === b.point.group &&
+    a.point.benchmark === b.point.benchmark &&
+    a.point.x === b.point.x &&
+    JSON.stringify(a.point.non_scaling_params) === JSON.stringify(b.point.non_scaling_params)
+  );
+}
 const scaleKey = (spec) => JSON.stringify([spec.scales, spec.log, spec.factor]);
-function ChartOverlay({spec, theme, controls, legend, onClose}) {
+const fullStatus = {
+  loading: 'Loading full data…',
+  failed: 'Full data unavailable; showing the sample',
+  tooLarge: 'Full data too large; showing the sample',
+};
+// Reloads of pairs older than the summary while zoomed, and their delays.
+const STALE_PAIRS_RETRIES = [2000, 4000, 8000];
+// A summary chart drawn from a sample can pass `fullData`: `load()` resolves
+// to every comparison of the scope (fullCharts in site/resample.js),
+// `revision` is the revision of the summary drawn, and `specFor(full, view)`
+// gives the spec that draws a view from the full data. Whenever the chart is
+// zoomed and the current `load` has not run, it runs: on the first zoom or
+// pan, and again when a live summary update brings a new `load` while
+// zoomed. Superseded results are ignored. The full data is drawn only when
+// its revision equals `revision`; otherwise, meanwhile, after a failure, and
+// at the reset view, the overlay draws `spec` (the sample).
+function ChartOverlay({spec, theme, controls, legend, fullData, onClose}) {
   const {selection, close} = usePoints();
   // A zoom belongs to the axis scales it was made on: changing a scale
   // discards it. Changing the view dismisses point details, as scales do.
@@ -175,12 +219,65 @@ function ChartOverlay({spec, theme, controls, legend, onClose}) {
     setZoomedScales(scales);
     setView(null);
   }
+  // The full data of the current `fullData.load` only.
+  const [full, setFull] = useState({load: null, status: null, data: null});
+  const fullState = fullData && full.load === fullData.load ? full : null;
+  const started = useRef(null);
+  const zoomed = view !== null;
+  // Runs `load` (attempt `retry`, 0 first) unless superseded meanwhile.
+  const run = useCallback((load, retry) => {
+    const token = {};
+    started.current = token;
+    setFull((current) => ({load, status: 'loading', data: current.load === load ? current.data : null, retry}));
+    load().then(
+      // A zoomed canvas whose drawn pairs change drops its own details
+      // (PlotCanvas); nothing else is closed.
+      (data) => {
+        if (started.current === token) setFull({load, status: 'loaded', data, retry});
+      },
+      (error) => {
+        if (started.current === token)
+          setFull({load, status: error?.status === 413 ? 'tooLarge' : 'failed', data: null, retry});
+      },
+    );
+  }, []);
+  useEffect(() => {
+    if (zoomed && fullData && !fullState) run(fullData.load, 0);
+  }, [zoomed, fullData, fullState, run]);
+  // Pairs older than the summary (the server's record trails it) are
+  // reloaded a few times while the overlay stays zoomed on this summary.
+  const stale =
+    zoomed &&
+    fullState?.status === 'loaded' &&
+    fullState.data.revision < fullData.revision &&
+    fullState.retry < STALE_PAIRS_RETRIES.length;
+  useEffect(() => {
+    if (!stale) return;
+    const {load, retry} = fullState;
+    const timer = setTimeout(() => run(load, retry + 1), STALE_PAIRS_RETRIES[retry]);
+    return () => clearTimeout(timer);
+  }, [stale, fullState, run]);
+  // Leaving the overlay or the summary supersedes any request.
+  useEffect(
+    () => () => {
+      started.current = null;
+    },
+    [],
+  );
   const changeView = useCallback(
     (next) => {
       close();
       setView(next);
     },
     [close],
+  );
+  // Pairs of another revision than the summary may name comparisons,
+  // benchmarks or groups that the summary and manifest do not.
+  const usable =
+    fullState?.data && fullState.data.revision === fullData.revision ? fullState.data : null;
+  const drawn = useMemo(
+    () => (view && usable ? fullData.specFor(usable, view) : spec),
+    [view, usable, fullData, spec],
   );
   const detailsTarget = useRef(null);
   // Escape dismisses pinned point details first (PointProvider handles
@@ -210,6 +307,11 @@ function ChartOverlay({spec, theme, controls, legend, onClose}) {
     <>
       <div className="scale-controls chart-overlay-controls" role="group" aria-label="Chart controls">
         <p className="zoom-hint">Scroll or pinch to zoom · Drag to pan · Double-click or double-tap to reset</p>
+        {fullStatus[fullState?.status] && (
+          <span role="status" className="zoom-status">
+            {fullStatus[fullState.status]}
+          </span>
+        )}
         {controls}
         <Button
           size="compact-xs"
@@ -222,7 +324,7 @@ function ChartOverlay({spec, theme, controls, legend, onClose}) {
       </div>
       <div className="chart-overlay-plot" ref={ref}>
         <PlotCanvas
-          spec={spec}
+          spec={drawn}
           theme={theme}
           view={view}
           onViewChange={changeView}
@@ -272,8 +374,9 @@ export function PlotCanvas({
   useLayoutEffect(() => () => removePlot(id), [id, removePlot]);
   // Refreshed rows replace what a hover or pinned selection pointed at.
   // Rebuilt arrays of the same row objects (new metadata) are not a refresh.
-  // A launch-group chart compares its dispatches, not its rebuilt medians.
-  const sourceRows = spec.dispatches ?? spec.rows;
+  // A launch-group chart compares its dispatches, not its rebuilt medians;
+  // a summary chart its drawn pairs (`shown`, from full data when zoomed).
+  const sourceRows = spec.dispatches ?? spec.rows ?? spec.shown ?? spec.pairs;
   const shownRows = useRef(sourceRows);
   useLayoutEffect(() => {
     const previous = shownRows.current;
@@ -281,7 +384,7 @@ export function PlotCanvas({
     if (
       previous === sourceRows ||
       (previous?.length === sourceRows?.length &&
-        previous.every((row, i) => row === sourceRows[i]))
+        previous.every((row, i) => sameRow(row, sourceRows[i])))
     )
       return;
     removePlot(id);
@@ -916,6 +1019,8 @@ function Scatter({
   setPreference,
   exact,
   legend,
+  loadPairs,
+  revision,
 }) {
   const {close} = usePoints();
   const key = JSON.stringify(['scatter', scope, unit]);
@@ -930,6 +1035,7 @@ function Scatter({
     () => ({kind: 'scatter', pairs, unit, colors, log}),
     [pairs, unit, colors, log],
   );
+  const fullData = useFullData(loadPairs, revision, spec, scatterShown);
   const stats = useMemo(
     () => exact?.stats ?? [...rankingStats(pairs), ...errorStats(pairs)],
     [pairs, exact],
@@ -942,6 +1048,7 @@ function Scatter({
         theme={theme}
         title={'Measured vs. simulated' + (unit ? ' · ' + displayUnit(unit) : '')}
         legend={legend}
+        fullData={fullData}
         controls={
           <Button
             size="compact-xs"
@@ -972,11 +1079,45 @@ function SampleNote({shown, count}) {
     </p>
   );
 }
+// What a zoomed hosted summary chart draws from the full data: at most the
+// server sample's per-chart limit (site/resample.js).
+const rankedShown = (full, view) => visibleRanked(full, view, summaryLimits.scurve);
+// Selected where the CDF draws them: sub-floor errors at the log floor.
+const cdfShown = (full, view, spec) =>
+  visibleCDF(full, view, summaryLimits.cdf, cdfAxis(spec.pairs, spec.log).left);
+const scatterShown = (full, view, spec) =>
+  visibleScatter(full, spec.unit, view, summaryLimits.scatter);
+// The `fullData` of a hosted summary chart (ChartOverlay) for the summary
+// at `revision`: `spec` with the comparisons `shown(full, view, spec)` drawn
+// over it, ranks and cumulative shares counted among all comparisons of the
+// full data (of the same revision, so as many as the summary counts). Null
+// without `loadPairs` (the file source draws every pair already).
+function useFullData(loadPairs, revision, spec, shown) {
+  return useMemo(
+    () =>
+      loadPairs
+        ? {
+            load: loadPairs,
+            revision,
+            specFor: (full, view) => ({
+              ...spec,
+              ...(spec.kind !== 'scatter' && {total: full.count}),
+              shown: shown(full, view, spec),
+            }),
+          }
+        : null,
+    [loadPairs, revision, spec, shown],
+  );
+}
 // Summary of one scope, from the full pair list (file source) or from a
-// server summary with exact statistics and sampled charts (API source).
+// server summary with exact statistics and sampled charts (API source). With
+// a server summary, `loadPairs()` resolves to every comparison of the
+// summary's scope and revision (fullCharts), which expanded charts draw
+// zoomed views from.
 export function Summary({
   pairs: sourcePairs,
   summary,
+  loadPairs,
   scope,
   groups,
   theme,
@@ -1046,6 +1187,8 @@ export function Summary({
     cdf.log ??
     preferLogScale(cdf.pairs.map((pair) => Math.abs(pair.signedError)));
   const cdfSpec = useMemo(() => ({...cdf, log: cdfLog}), [cdf, cdfLog]);
+  const rankedFull = useFullData(loadPairs, summary?.revision, rankedSpec, rankedShown);
+  const cdfFull = useFullData(loadPairs, summary?.revision, cdfSpec, cdfShown);
   const {close} = usePoints();
   if (!count) return null;
   const legend = <Legend curves={[...colors.values()]} />;
@@ -1076,6 +1219,7 @@ export function Summary({
             theme={theme}
             title="S-curve"
             legend={legend}
+            fullData={rankedFull}
             controls={
               <Button
                 size="compact-xs"
@@ -1112,6 +1256,7 @@ export function Summary({
             spec={cdfSpec}
             theme={theme}
             title="Absolute error distribution (CDF)"
+            fullData={cdfFull}
             controls={
               <Button
                 size="compact-xs"
@@ -1152,6 +1297,8 @@ export function Summary({
               setPreference={setPreference}
               exact={exact}
               legend={legend}
+              loadPairs={loadPairs}
+              revision={summary?.revision}
             />
           ))}
         </Paper>
