@@ -12,8 +12,8 @@ import {
   logFactor,
   zoomAxes,
 } from '../site/drawing.js';
-import {comparisonPairs} from '../site/model.js';
-import {panView, wheelFactor, zoomView} from '../site/zoom.js';
+import {comparisonPairs, preferLogScale} from '../site/model.js';
+import {panView, pinchView, wheelFactor, zoomView} from '../site/zoom.js';
 
 const benchmarks = {
   fir: {
@@ -186,6 +186,32 @@ describe('zoom math', () => {
     const cdf = panView(null, axes, zoomAxes.cdf, {x: 20, y: 20});
     expect(cdf.y).toBeUndefined();
     expect(cdf.x).toEqual([-10, 90]);
+  });
+
+  test('a pinch zooms around where it began and pans with its midpoint', () => {
+    const axes = {x: linear, y: {...linear, range: [100, 0]}};
+    const at = (x1, y1, x2, y2) => [{x: x1, y: y1}, {x: x2, y: y2}];
+    // Fingers spreading from 20 to 40 apart around x = 100 (data 50).
+    const spread = pinchView(null, axes, ['x', 'y'], at(90, 50, 110, 50), at(80, 50, 120, 50));
+    expect(spread.x[0]).toBeCloseTo(25);
+    expect(spread.x[1]).toBeCloseTo(75);
+    expect(spread.y[0]).toBeCloseTo(25);
+    expect(spread.y[1]).toBeCloseTo(75);
+    // The S-curve's rank axis stays automatic.
+    const ranked = pinchView(null, axes, zoomAxes.ranked, at(90, 50, 110, 50), at(80, 50, 120, 50));
+    expect(ranked.x).toBeUndefined();
+    expect(ranked.y).toEqual(spread.y);
+    // Moving both fingers together pans; zooming then panning keeps the data
+    // under the starting midpoint under the new one.
+    expect(pinchView(null, axes, ['x', 'y'], at(90, 50, 110, 50), at(110, 50, 130, 50))).toEqual(
+      panView(null, axes, ['x', 'y'], {x: 20, y: 0}),
+    );
+    const both = pinchView(null, axes, ['x'], at(90, 50, 110, 50), at(100, 50, 140, 50));
+    // Data 50 (the start midpoint) is at pixel 120, the new midpoint.
+    expect(both.x[0] + ((120 - 0) / 200) * (both.x[1] - both.x[0])).toBeCloseTo(50);
+    // Still fingers change nothing.
+    const still = {x: [1, 2]};
+    expect(pinchView(still, axes, ['x', 'y'], at(90, 50, 110, 50), at(90, 50, 110, 50))).toBe(still);
   });
 
   test('degenerate or out-of-range zooms store no override and keep existing ones', () => {
@@ -469,5 +495,114 @@ describe('overlay', () => {
     view.rerender(report(rows.slice(0, 11), 1));
     expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
     expect(document.activeElement).toBe(within(dialog()).getByRole('img'));
+  });
+
+  describe('touch', () => {
+    const scatterOverlay = () => {
+      mount();
+      fireEvent.click(screen.getByRole('button', {name: 'Expand Measured vs. simulated · ms'}));
+      return within(dialog()).getByRole('img');
+    };
+    const reset = () => within(dialog()).getByRole('button', {name: 'Reset zoom'});
+    const touch = (type, canvas, pointerId, clientX, clientY) =>
+      fireEvent[type](canvas, {pointerType: 'touch', pointerId, clientX, clientY});
+    const tap = (canvas, clientX, clientY) => {
+      touch('pointerDown', canvas, 1, clientX, clientY);
+      touch('pointerUp', canvas, 1, clientX, clientY);
+      fireEvent.click(canvas, {clientX, clientY});
+    };
+    // Where the overlay canvas shows the first scatter point, in client
+    // pixels: it draws the default 320-unit-wide layout.
+    const firstPoint = (canvas) => {
+      const log = preferLogScale(pairs.flatMap((pair) => [pair.actual, pair.prediction]));
+      const [point] = drawChart(
+        document.createElement('canvas'),
+        {kind: 'scatter', pairs, unit: 'ns', colors, log},
+        theme,
+        benchmarks,
+      ).hitPoints;
+      const rect = canvas.getBoundingClientRect();
+      const ratio = canvas.width / 320;
+      return [
+        rect.left + (point.x * rect.width) / (canvas.width / ratio),
+        rect.top + (point.y * rect.height) / (canvas.height / ratio),
+      ];
+    };
+
+    test('only the overlay canvas opts out of native touch gestures', () => {
+      mount();
+      const inline = screen.getAllByRole('img');
+      expect(inline.every((canvas) => canvas.style.touchAction === '')).toBe(true);
+      fireEvent.click(screen.getByRole('button', {name: 'Expand S-curve'}));
+      expect(within(dialog()).getByRole('img').style.touchAction).toBe('none');
+    });
+
+    test('a two-finger pinch zooms; still fingers change nothing', () => {
+      const canvas = scatterOverlay();
+      canvas.focus();
+      fireEvent.keyDown(canvas, {key: 'Home'});
+      touch('pointerDown', canvas, 1, 100, 80);
+      touch('pointerDown', canvas, 2, 140, 80);
+      touch('pointerMove', canvas, 2, 140, 80);
+      touch('pointerUp', canvas, 2, 140, 80);
+      touch('pointerUp', canvas, 1, 100, 80);
+      expect(reset().disabled).toBe(true);
+      expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
+      touch('pointerDown', canvas, 1, 100, 80);
+      touch('pointerDown', canvas, 2, 140, 80);
+      touch('pointerMove', canvas, 1, 80, 80);
+      touch('pointerMove', canvas, 2, 160, 80);
+      touch('pointerUp', canvas, 1, 80, 80);
+      touch('pointerUp', canvas, 2, 160, 80);
+      fireEvent.click(canvas, {clientX: 160, clientY: 80});
+      expect(reset().disabled).toBe(false);
+      expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+    });
+
+    test('a pinch on the S-curve zooms only its error axis', () => {
+      mount();
+      fireEvent.click(screen.getByRole('button', {name: 'Expand S-curve'}));
+      const canvas = within(dialog()).getByRole('img');
+      // Fingers spreading only horizontally still zoom Y (by distance).
+      touch('pointerDown', canvas, 1, 100, 80);
+      touch('pointerDown', canvas, 2, 140, 80);
+      touch('pointerMove', canvas, 2, 200, 80);
+      expect(reset().disabled).toBe(false);
+    });
+
+    test('one finger pans, and the lift after it selects nothing', () => {
+      const canvas = scatterOverlay();
+      touch('pointerDown', canvas, 1, 100, 80);
+      touch('pointerMove', canvas, 1, 130, 95);
+      touch('pointerUp', canvas, 1, 130, 95);
+      fireEvent.click(canvas, {clientX: 130, clientY: 95});
+      expect(reset().disabled).toBe(false);
+      expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+    });
+
+    test('a tap, even with a little wobble, still pins a point', () => {
+      const canvas = scatterOverlay();
+      const [x, y] = firstPoint(canvas);
+      touch('pointerDown', canvas, 1, x, y);
+      touch('pointerMove', canvas, 1, x + 4, y + 3);
+      touch('pointerUp', canvas, 1, x + 4, y + 3);
+      fireEvent.click(canvas, {clientX: x, clientY: y});
+      expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
+      expect(reset().disabled).toBe(true);
+    });
+
+    test('a double tap resets a zoomed view and keeps details when unzoomed', () => {
+      const canvas = scatterOverlay();
+      const [x, y] = firstPoint(canvas);
+      tap(canvas, x, y);
+      tap(canvas, x, y);
+      // Unzoomed: the second tap neither unpins nor resets.
+      expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
+      fireEvent.wheel(canvas, {deltaY: -200, clientX: 100, clientY: 80});
+      expect(reset().disabled).toBe(false);
+      tap(canvas, 300, 30);
+      tap(canvas, 300, 30);
+      expect(reset().disabled).toBe(true);
+    });
   });
 });

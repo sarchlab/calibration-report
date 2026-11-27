@@ -296,10 +296,14 @@ a { color: var(--link); text-underline-offset: 3px; }
    page behind does not scroll; the pinned point panel (outside the modal)
    keeps its own scrolling and the chart makes room for it. */
 html:has(.chart-overlay-content) { overflow: hidden; }
-.chart-overlay-content { display: flex; flex-direction: column; }
+/* No native pinch or double-tap zoom in the overlay (its canvas zooms itself);
+   scrolling still works. */
+.chart-overlay-content { display: flex; flex-direction: column; touch-action: pan-x pan-y; }
 .chart-overlay-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
 .chart-overlay-plot { flex: 1; min-height: 0; overflow: auto; }
-.zoom-hint { margin: 0 auto 0 0; font-size: 11px; color: var(--muted); }
+.chart-overlay-controls { flex-wrap: wrap; }
+.chart-overlay-controls > *:not(.zoom-hint) { flex: none; }
+.zoom-hint { flex: 1 1 180px; margin: 0; font-size: 11px; color: var(--muted); }
 .curve[data-zoomable] { cursor: grab; }
 .curve[data-zoomable]:active { cursor: grabbing; }
 /* The hover preview never blocks the chart beneath it. */

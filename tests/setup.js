@@ -46,6 +46,7 @@ if (typeof window !== 'undefined') {
     constructor(type, options = {}) {
       super(type, options);
       this.pointerType = options.pointerType ?? '';
+      this.pointerId = options.pointerId ?? 0;
     }
   };
   HTMLElement.prototype.scrollIntoView = vi.fn();

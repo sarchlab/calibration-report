@@ -2,7 +2,7 @@ import {ActionIcon, Button, Modal, Paper, VisuallyHidden} from '@mantine/core';
 import {useElementSize} from '@mantine/hooks';
 import {useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {drawChart, zoomAxes} from './drawing.js';
-import {panView, wheelFactor, zoomView} from './zoom.js';
+import {panView, pinchView, wheelFactor, zoomView} from './zoom.js';
 import {
   chartParams,
   comparisonPairs,
@@ -207,7 +207,7 @@ function ChartOverlay({spec, theme, controls, legend, onClose}) {
   return (
     <>
       <div className="scale-controls chart-overlay-controls" role="group" aria-label="Chart controls">
-        <p className="zoom-hint">Scroll to zoom · Drag to pan · Double-click to reset</p>
+        <p className="zoom-hint">Scroll or pinch to zoom · Drag to pan · Double-click or double-tap to reset</p>
         {controls}
         <Button
           size="compact-xs"
@@ -234,8 +234,9 @@ function ChartOverlay({spec, theme, controls, legend, onClose}) {
     </>
   );
 }
-// With `onViewChange`, the wheel zooms the chart's view around the pointer,
-// a mouse drag pans it and a double click resets it (calls it with null),
+// With `onViewChange`, the wheel or a two-finger pinch zooms the chart's view
+// around the pointer or pinch, a one-pointer drag pans it, and a double click
+// or double tap resets it (calls it with null),
 // changing only the axes zoomAxes allows for the chart's kind. `size` and
 // `pixelRatio` replace the default layout (see drawChart). With
 // `detailsTarget` (a ref), pinned point details render inside that element.
@@ -296,8 +297,53 @@ export function PlotCanvas({
   const allowed = zoomAxes[spec.kind];
   const latest = useRef();
   latest.current = {drawing, view, onViewChange};
-  const drag = useRef(null);
+  // Pointers down on a zoomable chart, and the drawing, view and pointer
+  // positions where the current drag or pinch began.
+  const gesture = useRef({pointers: new Map(), start: null});
   const dragged = useRef(false);
+  const lastTap = useRef(null);
+  const beginGesture = () => {
+    const {pointers} = gesture.current;
+    const {drawing, view} = latest.current;
+    gesture.current.start =
+      pointers.size && drawing?.axes ? {drawing, view, pointers: new Map(pointers)} : null;
+  };
+  // A pointer's position in the drawing units of `drawing`.
+  const drawingPoint = ({clientX, clientY}, drawing) => {
+    const {rect, x, y} = drawingScale(canvas.current, drawing);
+    return {x: (clientX - rect.left) * x, y: (clientY - rect.top) * y};
+  };
+  const moveGesture = (event) => {
+    const {pointers, start} = gesture.current;
+    pointers.set(event.pointerId, {clientX: event.clientX, clientY: event.clientY});
+    if (!start) return;
+    const ids = [...start.pointers.keys()];
+    let next;
+    if (ids.length >= 2 && pointers.has(ids[0]) && pointers.has(ids[1])) {
+      const at = (positions) => ids.slice(0, 2).map((id) => drawingPoint(positions.get(id), start.drawing));
+      dragged.current = true;
+      next = pinchView(start.view, start.drawing.axes, allowed, at(start.pointers), at(pointers));
+    } else {
+      const from = start.pointers.get(event.pointerId);
+      if (!from) return;
+      const dx = event.clientX - from.clientX,
+        dy = event.clientY - from.clientY;
+      // A touch may wobble a little and still be a tap.
+      const slop = event.pointerType === 'mouse' ? 3 : 8;
+      if (!dragged.current && Math.hypot(dx, dy) < slop) return;
+      dragged.current = true;
+      const {x, y} = drawingScale(canvas.current, start.drawing);
+      next = panView(start.view, start.drawing.axes, allowed, {x: dx * x, y: dy * y});
+    }
+    // A gesture along locked axes only changes nothing.
+    if (next !== latest.current.view) onViewChange(next);
+  };
+  const endPointer = (event) => {
+    const {pointers} = gesture.current;
+    if (!pointers.delete(event.pointerId)) return;
+    // A finger left after a pinch pans on from the current view.
+    beginGesture();
+  };
   useEffect(() => {
     if (!zoomable) return;
     const node = canvas.current;
@@ -400,20 +446,11 @@ export function PlotCanvas({
               .join(' ') || undefined
           }
           data-zoomable={zoomable || undefined}
+          // The overlay handles pinch, pan and double tap itself.
+          style={zoomable ? {touchAction: 'none'} : undefined}
           onPointerMove={(event) => {
-            const start = drag.current;
-            if (start) {
-              const dx = event.clientX - start.clientX,
-                dy = event.clientY - start.clientY;
-              if (!dragged.current && Math.hypot(dx, dy) < 3) return;
-              dragged.current = true;
-              const {x, y} = drawingScale(canvas.current, start.drawing);
-              const next = panView(start.view, start.drawing.axes, allowed, {
-                x: dx * x,
-                y: dy * y,
-              });
-              // A drag along locked axes only changes nothing.
-              if (next !== latest.current.view) onViewChange(next);
+            if (gesture.current.pointers.has(event.pointerId)) {
+              moveGesture(event);
               return;
             }
             if (event.pointerType !== 'mouse' || pinned || selection) return;
@@ -429,27 +466,48 @@ export function PlotCanvas({
           }}
           onPointerDown={(event) => {
             pointer.current = event.pointerType;
-            dragged.current = false;
-            if (zoomable && drawing?.axes && event.pointerType === 'mouse' && event.button === 0) {
-              drag.current = {clientX: event.clientX, clientY: event.clientY, drawing, view};
+            if (!zoomable || (event.pointerType === 'mouse' && event.button !== 0)) return;
+            const {pointers} = gesture.current;
+            // A second pointer makes a pinch, never a tap.
+            dragged.current = pointers.size > 0;
+            pointers.set(event.pointerId, {clientX: event.clientX, clientY: event.clientY});
+            beginGesture();
+            // Capture fails for a pointer that is no longer active.
+            try {
               canvas.current.setPointerCapture?.(event.pointerId);
+            } catch {
+              // The gesture still follows events on the canvas.
             }
           }}
-          onPointerUp={() => {
-            drag.current = null;
-          }}
-          onPointerCancel={() => {
+          onPointerUp={endPointer}
+          onPointerCancel={(event) => {
             pointer.current = undefined;
-            drag.current = null;
+            endPointer(event);
           }}
           onDoubleClick={() => {
             if (zoomable && view) onViewChange(null);
           }}
           onClick={(event) => {
-            // The click that ends a drag, or the second click of a double
-            // click on a zoomable chart, selects nothing.
-            if (dragged.current || (zoomable && event.detail > 1)) {
+            // The click that ends a drag or pinch, or the second click of a
+            // double click or tap on a zoomable chart, selects nothing; a
+            // double tap resets a zoomed view as a double click does.
+            if (dragged.current) {
               dragged.current = false;
+              pointer.current = undefined;
+              return;
+            }
+            if (zoomable && (event.nativeEvent.pointerType || pointer.current) === 'touch') {
+              const tap = {time: event.timeStamp, x: event.clientX, y: event.clientY};
+              const last = lastTap.current;
+              lastTap.current = tap;
+              if (last && tap.time - last.time < 350 && Math.hypot(tap.x - last.x, tap.y - last.y) < 30) {
+                lastTap.current = null;
+                pointer.current = undefined;
+                if (view) onViewChange(null);
+                return;
+              }
+            }
+            if (zoomable && event.detail > 1) {
               pointer.current = undefined;
               return;
             }

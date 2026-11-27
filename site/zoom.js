@@ -63,6 +63,24 @@ export function panView(view, axes, allowed, delta) {
   });
 }
 
+// Zooms by the change in distance between two pointers around where the
+// pinch began, then pans by how far its midpoint moved, so the content
+// under the fingers follows them. `from` and `to` are the two pointers'
+// drawing positions ([{x, y}, {x, y}]) at the start and now.
+export function pinchView(view, axes, allowed, from, to) {
+  const distance = ([a, b]) => Math.hypot(b.x - a.x, b.y - a.y);
+  const middle = ([a, b]) => ({x: (a.x + b.x) / 2, y: (a.y + b.y) / 2});
+  const start = middle(from),
+    end = middle(to);
+  const factor = distance(from) > 0 && distance(to) > 0 ? distance(from) / distance(to) : 1;
+  const zoomed = zoomView(view, axes, allowed, start, factor);
+  // Pan over the zoomed domains.
+  const zoomedAxes = {};
+  for (const [name, axis] of Object.entries(axes))
+    zoomedAxes[name] = axis && zoomed?.[name] ? {...axis, domain: zoomed[name]} : axis;
+  return panView(zoomed, zoomedAxes, allowed, {x: end.x - start.x, y: end.y - start.y});
+}
+
 // Wheel delta in pixels to a zoom factor: one notch (100px) is about 1.2×.
 export function wheelFactor({deltaY, deltaMode}) {
   const pixels = deltaY * (deltaMode === 1 ? 16 : deltaMode === 2 ? 400 : 1);
