@@ -157,6 +157,17 @@ describe('S-curve percentile axis', () => {
     expect(x.ticks[4].position).toBeCloseTo(x.position(2861));
   });
 
+  test('a single case has one tick, labelled with its real count', () => {
+    const x = drawChart(
+      document.createElement('canvas'),
+      {kind: 'ranked', pairs: pairs.slice(0, 1), colors},
+      theme,
+      benchmarks,
+    ).axes.x;
+    expect(x.ticks.map((tick) => [tick.label, tick.sublabel])).toEqual([['100%', '1']]);
+    expect(x.ticks[0].position).toBeCloseTo(x.position(1));
+  });
+
   test('a wide overlay ticks every 5%, keeping the quartiles', () => {
     const x = ranked({size: {width: 1200, height: 500}});
     const labels = x.ticks.map((tick) => tick.label);
@@ -301,6 +312,25 @@ describe('zoom math', () => {
     // No moved axis at all leaves the view itself.
     expect(panView(null, drawn.axes, zoomAxes.ranked, {x: 30, y: 0})).toBeNull();
     expect(zoomView(panned, drawn.axes, zoomAxes.curve, {x: 100, y: 50}, 1)).toBe(panned);
+  });
+
+  test('a forced log CDF with an extreme error keeps a finite axis', () => {
+    const extreme = comparisonPairs(
+      [...rows, {...rows[0], x: 1, values: {hw: 1, sim: 1.7e306}}],
+      benchmarks,
+    );
+    const largest = Math.max(...extreme.map((pair) => Math.abs(pair.signedError)));
+    for (const log of [true, false]) {
+      const {domain, ticks} = drawChart(
+        document.createElement('canvas'),
+        {kind: 'cdf', pairs: extreme, log},
+        theme,
+        benchmarks,
+      ).axes.x;
+      expect(domain.every(Number.isFinite)).toBe(true);
+      expect(domain[1]).toBeGreaterThanOrEqual(largest);
+      expect(ticks.every((tick) => Number.isFinite(tick.position))).toBe(true);
+    }
   });
 
   test('an extreme log factor gives a finite axis and finite ticks', () => {
@@ -658,6 +688,54 @@ describe('overlay', () => {
       expect(reset().disabled).toBe(true);
       act(() => vi.advanceTimersByTime(1000));
       expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+    });
+
+    test('a data change drops a pending zoomed tap', () => {
+      vi.useFakeTimers();
+      const view = mount();
+      fireEvent.click(screen.getByRole('button', {name: 'Expand Measured vs. simulated · ms'}));
+      const canvas = within(dialog()).getByRole('img');
+      const [x, y] = firstPoint(canvas);
+      fireEvent.wheel(canvas, {deltaY: -100, clientX: x, clientY: y});
+      tap(canvas, x, y);
+      const changed = rows.map((row, i) =>
+        i === 3 ? {...row, values: {...row.values, sim: row.values.sim * 1.01}} : row,
+      );
+      view.rerender(report(changed, 1));
+      act(() => vi.advanceTimersByTime(1000));
+      expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+      expect(reset().disabled).toBe(false);
+    });
+
+    test('zoomed mouse clicks wait for the double-click window; a double click resets', () => {
+      vi.useFakeTimers();
+      const canvas = scatterOverlay();
+      const [x, y] = firstPoint(canvas);
+      const click = (detail) => {
+        fireEvent.pointerDown(canvas, {pointerType: 'mouse', button: 0, clientX: x, clientY: y});
+        fireEvent.pointerUp(canvas, {pointerType: 'mouse', clientX: x, clientY: y});
+        fireEvent.click(canvas, {clientX: x, clientY: y, detail});
+      };
+      // Unzoomed, a click pins at once.
+      click(1);
+      expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
+      click(1);
+      expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+      fireEvent.wheel(canvas, {deltaY: -100, clientX: x, clientY: y});
+      click(1);
+      expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+      act(() => vi.advanceTimersByTime(350));
+      expect(screen.getByRole('group', {name: 'Point details'})).toBeTruthy();
+      // Unpin, then double-click: no details, and the zoom resets.
+      click(1);
+      act(() => vi.advanceTimersByTime(350));
+      expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+      click(1);
+      click(2);
+      fireEvent.doubleClick(canvas, {clientX: x, clientY: y});
+      act(() => vi.advanceTimersByTime(1000));
+      expect(screen.queryByRole('group', {name: 'Point details'})).toBeNull();
+      expect(reset().disabled).toBe(true);
     });
 
     test('an unzoomed tap selects at once', () => {

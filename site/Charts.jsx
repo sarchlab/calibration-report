@@ -304,15 +304,22 @@ export function PlotCanvas({
   const gesture = useRef({pointers: new Map(), start: null});
   const dragged = useRef(false);
   const lastTap = useRef(null);
-  // A touch tap on a zoomed chart waits out the double-tap window before
-  // selecting, so the details panel cannot cover the chart before a second
-  // tap. A view change or unmount drops it.
+  // A click or tap on a zoomed chart waits out the double-click window
+  // before selecting, so the details panel cannot cover the chart before a
+  // second click or tap. A view or data change, or unmount, drops it along
+  // with the double-tap history.
   const pendingTap = useRef(null);
   const cancelTap = () => {
     clearTimeout(pendingTap.current);
     pendingTap.current = null;
   };
-  useEffect(() => cancelTap, [view]);
+  useEffect(
+    () => () => {
+      cancelTap();
+      lastTap.current = null;
+    },
+    [view, spec],
+  );
   const beginGesture = () => {
     const {pointers} = gesture.current;
     const {drawing, view} = latest.current;
@@ -496,6 +503,7 @@ export function PlotCanvas({
             endPointer(event);
           }}
           onDoubleClick={() => {
+            cancelTap();
             if (zoomable && view) onViewChange(null);
           }}
           onClick={(event) => {
@@ -526,6 +534,7 @@ export function PlotCanvas({
               }
             }
             if (zoomable && event.detail > 1) {
+              cancelTap();
               pointer.current = undefined;
               return;
             }
@@ -542,7 +551,7 @@ export function PlotCanvas({
               else select(plot, index);
             };
             cancelTap();
-            if (touchTap && view)
+            if (zoomable && view)
               pendingTap.current = setTimeout(() => {
                 pendingTap.current = null;
                 apply();

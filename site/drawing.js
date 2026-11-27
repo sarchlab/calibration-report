@@ -682,12 +682,14 @@ export function drawChart(
 
   // The S-curve's rank axis, ticked at percentiles of all `total` cases
   // (rank r is 100·(r − 1)/(total − 1)%), each with its case rank below.
+  // A single case has one tick, at its rank 1, labelled 100%.
   function percentileAxis(total) {
     const rankAt = (percent) => 1 + (percent / 100) * (total - 1);
-    const percentOf = (rank) => (100 * (rank - 1)) / (total - 1);
+    const percentOf = (rank) => (total > 1 ? (100 * (rank - 1)) / (total - 1) : 100);
     return {
       // Quartiles, or 5% steps (which keep them) when the axis has room.
       values: (min, max, count) => {
+        if (total <= 1) return [1];
         const step = 100 / 5 + 1 <= count ? 5 : 25;
         return Array.from({length: 100 / step + 1}, (_, i) => rankAt(i * step));
       },
@@ -716,7 +718,8 @@ export function drawChart(
       [inverse(minimum - margin), inverse(maximum + margin)].map((end, i) =>
         Number.isFinite(end) ? end : inverse(i ? maximum : minimum),
       ),
-      percentileAxis(end),
+      // Ticks count real cases; `end` only pads a single case's axis.
+      percentileAxis(total),
       factor
         ? {factor: true}
         : {format: (n) => (n > 0 ? '+' : '') + formatTick(n) + '%'},
@@ -760,9 +763,11 @@ export function drawChart(
     const smallest = errors.find((error) => error > 0) ?? 1;
     const left = log ? 10 ** Math.floor(Math.log10(smallest)) : 0;
     const maximum = errors.at(-1);
-    const right = log
+    const padded = log
       ? 10 ** (Math.ceil(Math.log10(Math.max(maximum, smallest))) + 0.1)
       : maximum * 1.04 || 1;
+    // Padding an extreme error may overflow: keep the axis at the error.
+    const right = Number.isFinite(padded) ? padded : maximum;
     const bands = timeBands(pairs, bandSource);
     const chart = summaryAxes(
       'Absolute error cumulative distribution',
