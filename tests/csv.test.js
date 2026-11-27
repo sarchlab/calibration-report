@@ -218,6 +218,53 @@ describe('runCsv', () => {
     expect(progress).toEqual([{plots: 3, of: 3}]);
   });
 
+  it('restarts a benchmark whose charts become launch-ordinal mid-export', async () => {
+    // 60 launches at size 1 are 60 charts; then size 2 arrives with 30
+    // launches, and the benchmark becomes 2 launch-ordinal charts.
+    const one = {...manifest, group_order: ['a'], plots: {a: [[0, 60]]}};
+    let calls = 0;
+    const queries = [];
+    const progress = [];
+    const {chunks, rows} = await runCsv(
+      one,
+      async (query) => {
+        const q = new URLSearchParams(query);
+        queries.push([q.get('offset'), q.get('after')]);
+        if (calls++ === 0)
+          return {
+            revision: 3,
+            total: 60,
+            plots: Array.from({length: 48}, (_, i) => ({id: i + 1, chart: i + 1, rows: [point('a', 'gemm', i + 1, 1)]})),
+            next: null,
+          };
+        if (q.get('offset') !== '0') return {revision: 4, total: 2, launch_ordinal: true, plots: [], next: null};
+        const chart = (x, n) =>
+          Array.from({length: n}, (_, i) => ({id: i + 1, chart: 1000 + x, rows: [point('a', 'gemm', i + 1, x)]}));
+        return {revision: 4, total: 2, launch_ordinal: true, plots: [...chart(1, 60), ...chart(2, 30)], next: null};
+      },
+      {onProgress: (p) => progress.push(p)},
+    );
+    expect(queries).toEqual([['0', null], ['48', null], ['0', null]]);
+    const lines = chunks.join('').split('\r\n').slice(1, -1);
+    const keys = lines.map((line) => line.split(',').slice(3, 5).join(':'));
+    expect(new Set(keys).size).toBe(90);
+    expect(keys).toHaveLength(90);
+    expect(rows).toBe(90);
+    expect(progress.at(-1)).toEqual({plots: 2, of: 60});
+  });
+
+  it('gives up on a benchmark whose layout keeps flipping, even on empty pages', async () => {
+    const one = {...manifest, group_order: ['a'], plots: {a: [[0, 60]]}};
+    await expect(
+      runCsv(one, async (query) => {
+        const offset = Number(new URLSearchParams(query).get('offset'));
+        return offset === 0
+          ? {revision: 3, total: 60, plots: [], next: null}
+          : {revision: 3, total: 60, launch_ordinal: true, plots: [], next: null};
+      }),
+    ).rejects.toThrow(/kept changing/);
+  });
+
   it('exports only the header for a run without visible plots', async () => {
     const empty = {...manifest, group_order: [], plots: {}};
     const result = await runCsv(empty, async () => {
